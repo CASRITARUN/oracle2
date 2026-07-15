@@ -1,0 +1,424 @@
+[
+  {
+    "id": "SUNPHARMA_1784022259",
+    "symbol": "SUNPHARMA",
+    "added_on": "2026-07-14",
+    "entry_spot": 1944.7,
+    "expiry": "2026-07-28",
+    "lot_size": 350,
+    "lots": 1,
+    "quantity": 350,
+    "strategy_type": "iron_condor",
+    "legs": {
+      "sell_call": {
+        "strike": 2020.0,
+        "ltp": 5.2,
+        "delta": 0.153,
+        "tradingsymbol": "SUNPHARMA26JUL2020CE"
+      },
+      "buy_call": {
+        "strike": 2060.0,
+        "ltp": 2.5,
+        "delta": 0.077,
+        "tradingsymbol": "SUNPHARMA26JUL2060CE"
+      },
+      "sell_put": {
+        "strike": 1880.0,
+        "ltp": 6.9,
+        "delta": -0.168,
+        "tradingsymbol": "SUNPHARMA26JUL1880PE"
+      },
+      "buy_put": {
+        "strike": 1840.0,
+        "ltp": 3.55,
+        "delta": -0.089,
+        "tradingsymbol": "SUNPHARMA26JUL1840PE"
+      }
+    },
+    "entry_net_credit_per_share": 6.05,
+    "entry_max_profit": 2117.5,
+    "entry_max_loss": 11882.5,
+    "entry_margin_required": 58653.38,
+    "entry_margin_error": null,
+    "breakeven_upper": 2026.05,
+    "breakeven_lower": 1873.95,
+    "broker_orders": [
+      {
+        "leg": "sell_call",
+        "tradingsymbol": "SUNPHARMA26JUL2020CE",
+        "transaction_type": "SELL",
+        "quantity": 350,
+        "status": "failed",
+        "error": "IP (163.116.219.95) is not allowed to place orders for this app. Update allowed IPs on the Kite developer console. Learn more - https://support.zerodha.com/category/trading-and-markets/general-kite/kite-api/articles/static-ip"
+      }
+    ],
+    "history": [
+      {
+        "date": "2026-07-14",
+        "spot": 1944.7,
+        "pnl": 0.0,
+        "current_debit_per_share": 6.05
+      },
+      {
+        "date": "2026-07-15",
+        "spot": 1948.6,
+        "pnl": 0.0,
+        "current_debit_per_share": 6.05
+      }
+    ]
+  },
+  {
+    "id": "APOLLOHOSP_1784022274",
+    "symbol": "APOLLOHOSP",
+    "added_on": "2026-07-14",
+    "entry_spot": 8892,
+    "expiry": "2026-07-28",
+    "lot_size": 125,
+    "lots": 1,
+    "quantity": 125,
+    "strategy_type": "iron_condor",
+    "legs": {
+      "sell_call": {
+        "strike": 9200.0,
+        "ltp": 32.4,
+        "delta": 0.191,
+        "tradingsymbol": "APOLLOHOSP26JUL9200CE"
+      },
+      "buy_call": {
+        "strike": 9400.0,
+        "ltp": 11.05,
+        "delta": 0.077,
+        "tradingsymbol": "APOLLOHOSP26JUL9400CE"
+      },
+      "sell_put": {
+        "strike": 8600.0,
+        "ltp": 36.05,
+        "delta": -0.181,
+        "tradingsymbol": "APOLLOHOSP26JUL8600PE"
+      },
+      "buy_put": {
+        "strike": 8450.0,
+        "ltp": 17,
+        "delta": -0.096,
+        "tradingsymbol": "APOLLOHOSP26JUL8450PE"
+      }
+    },
+    "entry_net_credit_per_share": 40.4,
+    "entry_max_profit": 5050.0,
+    "entry_max_loss": 19950.0,
+    "entry_margin_required": 97027.84,
+    "entry_margin_error": null,
+    "breakeven_upper": 9240.4,
+    "breakeven_lower": 8559.6,
+    "broker_orders": [],
+    "history": [
+      {
+        "date": "2026-07-14",
+        "spot": 8892,
+        "pnl": 0.0,
+        "current_debit_per_share": 40.4
+      },
+      {
+        "date": "2026-07-15",
+        "spot": 8937.5,
+        "pnl": -818.75,
+        "current_debit_per_share": 46.95
+      }
+    ]
+  },
+  {
+    "id": "MARICO_1784022292",
+    "symbol": "MARICO",
+    "added_on": "2026-07-14",
+    "entry_spot": 847.05,
+    "expiry": "2026-07-28",
+    "lot_size": 1200,
+    "lots": 1,
+    "quantity": 1200,
+    "strategy_type": "iron_condor",
+    "legs": {
+      "sell_call": {
+        "strike": 885.0,
+        "ltp": 3.6,
+        "delta": 0.181,
+        "tradingsymbol": "MARICO26JUL885CE"
+      },
+      "buy_call": {
+        "strike": 900.0,
+        "ltp": 1.75,
+        "delta": 0.1,
+        "tradingsymbol": "MARICO26JUL900CE"
+      },
+      "sell_put": {
+        "strike": 815.0,
+        "ltp": 4.25,
+        "delta": -0.187,
+        "tradingsymbol": "MARICO26JUL815PE"
+      },
+      "buy_put": {
+        "strike": 800.0,
+        "ltp": 1.45,
+        "delta": -0.084,
+        "tradingsymbol": "MARICO26JUL800PE"
+      }
+    },
+    "entry_net_credit_per_share": 4.65,
+    "entry_max_profit": 5580.0,
+    "entry_max_loss": 12420.0,
+    "entry_margin_required": 84345.9,
+    "entry_margin_error": null,
+    "breakeven_upper": 889.65,
+    "breakeven_lower": 810.35,
+    "broker_orders": [],
+    "history": [
+      {
+        "date": "2026-07-14",
+        "spot": 847.05,
+        "pnl": 0.0,
+        "current_debit_per_share": 4.65
+      },
+      {
+        "date": "2026-07-15",
+        "spot": 847.1,
+        "pnl": -360.0,
+        "current_debit_per_share": 4.95
+      }
+    ]
+  },
+  {
+    "id": "JSWSTEEL_1784022315",
+    "symbol": "JSWSTEEL",
+    "added_on": "2026-07-14",
+    "entry_spot": 1248.7,
+    "expiry": "2026-07-28",
+    "lot_size": 675,
+    "lots": 1,
+    "quantity": 675,
+    "strategy_type": "iron_condor",
+    "legs": {
+      "sell_call": {
+        "strike": 1320.0,
+        "ltp": 6.7,
+        "delta": 0.181,
+        "tradingsymbol": "JSWSTEEL26JUL1320CE"
+      },
+      "buy_call": {
+        "strike": 1350.0,
+        "ltp": 3,
+        "delta": 0.094,
+        "tradingsymbol": "JSWSTEEL26JUL1350CE"
+      },
+      "sell_put": {
+        "strike": 1190.0,
+        "ltp": 7.55,
+        "delta": -0.184,
+        "tradingsymbol": "JSWSTEEL26JUL1190PE"
+      },
+      "buy_put": {
+        "strike": 1170.0,
+        "ltp": 4.6,
+        "delta": -0.122,
+        "tradingsymbol": "JSWSTEEL26JUL1170PE"
+      }
+    },
+    "entry_net_credit_per_share": 6.65,
+    "entry_max_profit": 4488.75,
+    "entry_max_loss": 15761.25,
+    "entry_margin_required": 73539.98,
+    "entry_margin_error": null,
+    "breakeven_upper": 1326.65,
+    "breakeven_lower": 1183.35,
+    "broker_orders": [],
+    "history": [
+      {
+        "date": "2026-07-14",
+        "spot": 1248.7,
+        "pnl": 0.0,
+        "current_debit_per_share": 6.65
+      },
+      {
+        "date": "2026-07-15",
+        "spot": 1245.7,
+        "pnl": 303.75,
+        "current_debit_per_share": 6.2
+      }
+    ]
+  },
+  {
+    "id": "POWERGRID_1784022330",
+    "symbol": "POWERGRID",
+    "added_on": "2026-07-14",
+    "entry_spot": 286,
+    "expiry": "2026-07-28",
+    "lot_size": 1900,
+    "lots": 1,
+    "quantity": 1900,
+    "strategy_type": "iron_condor",
+    "legs": {
+      "sell_call": {
+        "strike": 297.5,
+        "ltp": 0.95,
+        "delta": 0.169,
+        "tradingsymbol": "POWERGRID26JUL297.5CE"
+      },
+      "buy_call": {
+        "strike": 302.5,
+        "ltp": 0.5,
+        "delta": 0.095,
+        "tradingsymbol": "POWERGRID26JUL302.5CE"
+      },
+      "sell_put": {
+        "strike": 275.0,
+        "ltp": 1.05,
+        "delta": -0.159,
+        "tradingsymbol": "POWERGRID26JUL275PE"
+      },
+      "buy_put": {
+        "strike": 270.0,
+        "ltp": 0.5,
+        "delta": -0.084,
+        "tradingsymbol": "POWERGRID26JUL270PE"
+      }
+    },
+    "entry_net_credit_per_share": 1.0,
+    "entry_max_profit": 1900.0,
+    "entry_max_loss": 7600.0,
+    "entry_margin_required": 44916,
+    "entry_margin_error": null,
+    "breakeven_upper": 298.5,
+    "breakeven_lower": 274.0,
+    "broker_orders": [],
+    "history": [
+      {
+        "date": "2026-07-14",
+        "spot": 286,
+        "pnl": 0.0,
+        "current_debit_per_share": 1.0
+      },
+      {
+        "date": "2026-07-15",
+        "spot": 285,
+        "pnl": 285.0,
+        "current_debit_per_share": 0.85
+      }
+    ]
+  },
+  {
+    "id": "ITC_1784048678",
+    "symbol": "ITC",
+    "added_on": "2026-07-14",
+    "entry_spot": 275.55,
+    "expiry": "2026-07-28",
+    "lot_size": 1725,
+    "lots": 1,
+    "quantity": 1725,
+    "strategy_type": "iron_condor",
+    "legs": {
+      "sell_call": {
+        "strike": 287.5,
+        "ltp": 1.2,
+        "delta": 0.186,
+        "tradingsymbol": "ITC26JUL287.5CE"
+      },
+      "buy_call": {
+        "strike": 292.5,
+        "ltp": 0.75,
+        "delta": 0.119,
+        "tradingsymbol": "ITC26JUL292.5CE"
+      },
+      "sell_put": {
+        "strike": 265.0,
+        "ltp": 1.1,
+        "delta": -0.167,
+        "tradingsymbol": "ITC26JUL265PE"
+      },
+      "buy_put": {
+        "strike": 260.0,
+        "ltp": 0.55,
+        "delta": -0.091,
+        "tradingsymbol": "ITC26JUL260PE"
+      }
+    },
+    "entry_net_credit_per_share": 1.0,
+    "entry_max_profit": 1725.0,
+    "entry_max_loss": 6900.0,
+    "entry_margin_required": 40035.53,
+    "entry_margin_error": null,
+    "breakeven_upper": 288.5,
+    "breakeven_lower": 264.0,
+    "broker_orders": [],
+    "history": [
+      {
+        "date": "2026-07-14",
+        "spot": 275.55,
+        "pnl": 0.0,
+        "current_debit_per_share": 1.0
+      },
+      {
+        "date": "2026-07-15",
+        "spot": 276.45,
+        "pnl": 86.25,
+        "current_debit_per_share": 0.95
+      }
+    ]
+  },
+  {
+    "id": "ITC_1784049111",
+    "symbol": "ITC",
+    "added_on": "2026-07-14",
+    "entry_spot": 275.55,
+    "expiry": "2026-07-28",
+    "lot_size": 1725,
+    "lots": 3,
+    "quantity": 5175,
+    "strategy_type": "iron_condor",
+    "legs": {
+      "sell_call": {
+        "strike": 295.0,
+        "ltp": 0.65,
+        "delta": 0.101,
+        "tradingsymbol": "ITC26JUL295CE"
+      },
+      "buy_call": {
+        "strike": 300.0,
+        "ltp": 0.4,
+        "delta": 0.064,
+        "tradingsymbol": "ITC26JUL300CE"
+      },
+      "sell_put": {
+        "strike": 260.0,
+        "ltp": 0.55,
+        "delta": -0.091,
+        "tradingsymbol": "ITC26JUL260PE"
+      },
+      "buy_put": {
+        "strike": 255.0,
+        "ltp": 0.3,
+        "delta": -0.051,
+        "tradingsymbol": "ITC26JUL255PE"
+      }
+    },
+    "entry_net_credit_per_share": 0.5,
+    "entry_max_profit": 2587.5,
+    "entry_max_loss": 23287.5,
+    "entry_margin_required": 122339.59,
+    "entry_margin_error": null,
+    "breakeven_upper": 295.5,
+    "breakeven_lower": 259.5,
+    "broker_orders": [],
+    "history": [
+      {
+        "date": "2026-07-14",
+        "spot": 275.55,
+        "pnl": 0.0,
+        "current_debit_per_share": 0.5
+      },
+      {
+        "date": "2026-07-15",
+        "spot": 276.45,
+        "pnl": 776.25,
+        "current_debit_per_share": 0.35
+      }
+    ]
+  }
+]
