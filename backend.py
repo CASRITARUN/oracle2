@@ -2,7 +2,7 @@
 Kite Option-Selling Dashboard — local backend
 ------------------------------------------------
 Run:  python backend.py
-Then open: http://localhost:5000
+Then open: https://algo.wecon.in
 
 What this does
 - Logs you into Kite Connect (daily login, token expires every day - that's Kite's design, not a bug here)
@@ -50,7 +50,7 @@ import requests
 # ---------------------------------------------------------------------------
 API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
 API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
-REDIRECT_URL = "http://localhost:5000/api/callback"   # set this exact URL in your Kite app settings
+REDIRECT_URL = "https://algo.wecon.in/api/callback"   # set this exact URL in your Kite app settings
 
 # If your network does TLS interception (common on office/government networks — you'll see
 # "self-signed certificate in certificate chain" errors), set this env var to allow the news
