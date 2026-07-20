@@ -53,8 +53,8 @@ import requests
 # this process starts) — do NOT hardcode real keys/secrets directly in this file,
 # especially if this file is ever shared, committed to git, or pasted anywhere.
 # ---------------------------------------------------------------------------
-API_KEY = os.environ.get("KITE_API_KEY", "vecsucwn1tckme31")
-API_SECRET = os.environ.get("KITE_API_SECRET", "mehksxgc3gsbj3zz7kpacrb9ezrkvzro")
+API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
+API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
 REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo.wecon.in/api/callback")
 
 # If your network does TLS interception (common on office/government networks — you'll see
@@ -1907,11 +1907,52 @@ def leg_keys_for(position):
         else ["sell_call", "sell_put"]
 
 
-def place_basket_orders(legs_to_place, product, order_type):
+ORDER_TERMINAL_STATUSES = ("COMPLETE", "REJECTED", "CANCELLED")
+
+
+def wait_for_order_terminal(order_id, timeout_seconds=8, poll_interval=0.5):
+    """Polls Kite's order book for a specific order_id until it reaches a terminal state
+    (COMPLETE / REJECTED / CANCELLED) or the timeout elapses. Returns the last status seen, or
+    'TIMEOUT' if it was still open/pending when we stopped waiting (Kite market orders on NFO
+    normally resolve in well under a second, so the timeout is just a safety net against a hung
+    poll — it does not cancel the order)."""
+    deadline = time.time() + timeout_seconds
+    last_status = None
+    while time.time() < deadline:
+        try:
+            for o in kite.orders():
+                if o.get("order_id") == order_id:
+                    last_status = o.get("status")
+                    break
+        except Exception:
+            pass
+        if last_status in ORDER_TERMINAL_STATUSES:
+            return last_status
+        time.sleep(poll_interval)
+    return last_status or "TIMEOUT"
+
+
+def place_basket_orders(legs_to_place, product, order_type, sequence_for_margin=True):
     """Places each leg as a separate real order. Stops immediately on the first failure rather
-    than continuing — continuing could leave a partial, unintentionally unhedged position."""
+    than continuing — continuing could leave a partial, unintentionally unhedged position.
+
+    sequence_for_margin=True (the default for basket entry/close) sends every BUY leg first and
+    — for MARKET orders — waits for each BUY to actually reach a terminal state before sending any
+    SELL leg. Zerodha checks margin against your live positions at the moment each order hits the
+    exchange, so a SELL leg fired before its offsetting BUY leg has filled can get REJECTED for
+    insufficient margin even though the combo is fully hedged once both legs are in. Waiting for
+    the BUY fill first lets the freed-up/hedged margin actually register before the SELL leg goes.
+    Pass sequence_for_margin=False for one-off, independent leg placements/exits where there's no
+    basket-level margin ordering to respect (e.g. the per-leg 'Execute this leg' button, or exiting
+    an arbitrary set of live positions picked by the user)."""
+    ordered = legs_to_place
+    if sequence_for_margin:
+        buys = [item for item in legs_to_place if item["transaction_type"] == "BUY"]
+        sells = [item for item in legs_to_place if item["transaction_type"] != "BUY"]
+        ordered = buys + sells
+
     results = []
-    for item in legs_to_place:
+    for item in ordered:
         txn_type = kite.TRANSACTION_TYPE_SELL if item["transaction_type"] == "SELL" else kite.TRANSACTION_TYPE_BUY
         quantity = int(item.get("quantity") or 1)
         reference_price = item.get("price")
@@ -1926,9 +1967,21 @@ def place_basket_orders(legs_to_place, product, order_type):
             if order_type == "LIMIT" and reference_price:
                 kwargs["price"] = float(reference_price)
             order_id = kite.place_order(**kwargs)
+
+            fill_status = None
+            if sequence_for_margin and order_type == "MARKET":
+                fill_status = wait_for_order_terminal(order_id)
+                if fill_status == "REJECTED":
+                    results.append({"leg": item.get("leg", "?"), "tradingsymbol": item["tradingsymbol"],
+                                     "transaction_type": item["transaction_type"], "quantity": quantity,
+                                     "status": "failed", "order_id": order_id, "fill_status": fill_status,
+                                     "error": "Order was REJECTED by the exchange/broker.",
+                                     "reference_price": reference_price})
+                    break
+
             results.append({"leg": item.get("leg", "?"), "tradingsymbol": item["tradingsymbol"],
                              "transaction_type": item["transaction_type"], "quantity": quantity,
-                             "status": "placed", "order_id": order_id,
+                             "status": "placed", "order_id": order_id, "fill_status": fill_status,
                              "estimated_realized_pnl": 0,  # filled in by caller if this is a closing trade
                              "reference_price": reference_price})
         except Exception as e:
@@ -1962,8 +2015,45 @@ def execute_preview(pos_id):
         "warning": "These orders are NOT yet placed. Review carefully — you can edit quantity/price or "
                    "remove a leg entirely below — then confirm to send them to your live Zerodha account. "
                    "Removing a hedge leg (a BUY order) from an Iron Condor leaves that side of the "
-                   "position with unlimited-style risk, same as a naked strangle."
+                   "position with unlimited-style risk, same as a naked strangle. If you click "
+                   "'Yes, place these real orders', BUY legs are sent first and this tool waits for "
+                   "each to fill before sending SELL legs, so the SELL side doesn't get rejected for "
+                   "insufficient margin. You can also use 'Execute this leg' on any single row to fire "
+                   "legs yourself, one at a time, in whatever order you choose."
     })
+
+
+@app.route("/api/execute/<pos_id>/leg", methods=["POST"])
+def execute_single_leg(pos_id):
+    """Places exactly ONE leg right now — used by the per-leg 'Execute this leg' button in the
+    review screen so you can manually sequence a multi-leg entry yourself (e.g. fire the BUY hedge,
+    watch it fill in your Zerodha app, then come back and fire the SELL leg once margin is freed).
+    This does NOT apply the automatic BUY-before-SELL basket sequencing — you're placing one leg,
+    on purpose, right now."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    if not body.get("confirmed"):
+        return jsonify({"error": "Confirmation flag not set — nothing was placed."}), 400
+    order = body.get("order")
+    if not order or not order.get("tradingsymbol"):
+        return jsonify({"error": "No leg order provided."}), 400
+
+    position = find_position(pos_id)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+
+    product = body.get("product", "NRML")
+    order_type = body.get("order_type", "MARKET")
+    results = place_basket_orders([order], product, order_type, sequence_for_margin=False)
+
+    positions = load_positions()
+    for p in positions:
+        if p["id"] == pos_id:
+            p["broker_orders"] = p.get("broker_orders", []) + results
+    save_positions(positions)
+
+    return jsonify({"results": results})
 
 
 @app.route("/api/execute/<pos_id>/confirm", methods=["POST"])
@@ -2065,6 +2155,36 @@ def close_preview(pos_id):
     })
 
 
+@app.route("/api/execute/<pos_id>/close/leg", methods=["POST"])
+def close_single_leg(pos_id):
+    """Places exactly ONE closing leg right now — the close-flow counterpart of
+    /api/execute/<pos_id>/leg, for manually sequencing a square-off leg by leg."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    if not body.get("confirmed"):
+        return jsonify({"error": "Confirmation flag not set — nothing was placed."}), 400
+    order = body.get("order")
+    if not order or not order.get("tradingsymbol"):
+        return jsonify({"error": "No leg order provided."}), 400
+
+    position = find_position(pos_id)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+
+    product = body.get("product", "NRML")
+    order_type = body.get("order_type", "MARKET")
+    results = place_basket_orders([order], product, order_type, sequence_for_margin=False)
+
+    positions = load_positions()
+    for p in positions:
+        if p["id"] == pos_id:
+            p["broker_orders"] = p.get("broker_orders", []) + results
+    save_positions(positions)
+
+    return jsonify({"results": results})
+
+
 @app.route("/api/execute/<pos_id>/close/confirm", methods=["POST"])
 def close_confirm(pos_id):
     if not require_session():
@@ -2128,6 +2248,102 @@ def close_confirm(pos_id):
 
     save_positions(positions)
     return jsonify({"results": results, "fully_closed": fully_closed, "note": note})
+
+
+@app.route("/api/broker-positions")
+def broker_positions():
+    """Live F&O positions straight from your Zerodha account (Kite's net positions() call) —
+    independent of this tool's own tracked Iron Condor / Strangle baskets in positions.json, and
+    independent of which strategy or basket a leg originally came from. For each open NFO leg this
+    returns the entry (average) price, live LTP, and running P&L reported by Kite itself, so the
+    Order Management tab can show exactly what your account currently holds and let you price and
+    fire an exit — for one leg or several at once — straight from here."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    try:
+        pos = kite.positions()
+        net = pos.get("net", [])
+        rows = []
+        for p in net:
+            if p.get("exchange") != "NFO":
+                continue
+            qty = int(p.get("quantity") or 0)
+            if qty == 0:
+                continue  # already flat — nothing open on this tradingsymbol
+            rows.append({
+                "tradingsymbol": p.get("tradingsymbol"),
+                "product": p.get("product"),
+                "quantity": qty,
+                "side": "LONG" if qty > 0 else "SHORT",
+                "average_price": p.get("average_price"),
+                "last_price": p.get("last_price"),
+                "pnl": p.get("pnl"),
+                "close_price": p.get("close_price"),
+            })
+        return jsonify({"positions": rows})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/broker-positions/exit", methods=["POST"])
+def broker_positions_exit():
+    """Squares off one or more live Zerodha F&O positions directly by tradingsymbol — backs the
+    Order Management tab's per-row 'Exit' button and the 'Exit Selected' multi-select action.
+    Independent of this tool's own tracked baskets; works on whatever legs you pick, in whatever
+    combination. A LONG position is squared off with a SELL, a SHORT position with a BUY. Each leg
+    can optionally carry its own exit price (LIMIT) — legs left blank use MARKET. These legs are NOT
+    run through the BUY-before-SELL basket sequencing (see place_basket_orders) since they're
+    independent square-offs you chose yourself, not a hedged multi-leg entry."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    if not body.get("confirmed"):
+        return jsonify({"error": "Confirmation flag not set — nothing was placed."}), 400
+    legs = body.get("legs")
+    if not legs:
+        return jsonify({"error": "No legs provided."}), 400
+
+    product = body.get("product", "NRML")
+
+    legs_to_place = []
+    any_priced = False
+    for lg in legs:
+        if not lg.get("tradingsymbol"):
+            continue
+        qty = abs(int(lg.get("quantity") or 0))
+        if qty <= 0:
+            continue
+        close_txn = "SELL" if str(lg.get("side", "LONG")).upper() == "LONG" else "BUY"
+        price = lg.get("price")
+        if price not in (None, ""):
+            any_priced = True
+        legs_to_place.append({
+            "leg": lg["tradingsymbol"], "tradingsymbol": lg["tradingsymbol"],
+            "transaction_type": close_txn, "quantity": qty,
+            "price": float(price) if price not in (None, "") else None,
+        })
+
+    if not legs_to_place:
+        return jsonify({"error": "No valid legs to place."}), 400
+
+    # If ANY leg in this batch was given a specific price, place the whole batch as LIMIT orders
+    # (legs without a price fall back to their live reference price computed per-leg below);
+    # otherwise place everything MARKET.
+    if any_priced:
+        inst_keys = [f"NFO:{lg['tradingsymbol']}" for lg in legs_to_place]
+        try:
+            quotes = kite.quote(inst_keys)
+        except Exception:
+            quotes = {}
+        for lg in legs_to_place:
+            if lg["price"] is None:
+                lg["price"] = extract_price(quotes.get(f"NFO:{lg['tradingsymbol']}"))
+        order_type = "LIMIT"
+    else:
+        order_type = "MARKET"
+
+    results = place_basket_orders(legs_to_place, product, order_type, sequence_for_margin=False)
+    return jsonify({"results": results})
 
 
 @app.route("/api/orders")
