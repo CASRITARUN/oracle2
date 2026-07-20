@@ -289,6 +289,29 @@
       <tbody></tbody>
     </table>
     <div class="legend" id="ordersEmpty">No orders yet, or click Refresh to load today's order book.</div>
+
+    <h3 style="margin-top:22px;">Open F&amp;O positions (live from Zerodha)</h3>
+    <div class="row" style="margin-bottom:12px;">
+      <button id="refreshPositionsBtn">Refresh Positions</button>
+      <button class="danger" id="exitSelectedBtn">Exit Selected</button>
+      <span id="positionsStatus" class="loading"></span>
+    </div>
+    <table id="positionsTable" style="display:none;">
+      <thead><tr>
+        <th><input type="checkbox" id="selectAllPositions" /></th>
+        <th>Symbol</th><th>Side</th><th>Qty</th><th>Entry Price</th><th>LTP</th><th>P&amp;L</th>
+        <th>Exit Price (blank = MARKET)</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="legend" id="positionsEmpty">No open F&amp;O positions, or click Refresh.</div>
+    <div class="legend">
+      Entry price, LTP and P&amp;L here come straight from Zerodha's live position book — this is
+      every open F&amp;O leg in your account, not just the ones this tool placed. Type a price in a
+      row and Exit (or select several with the checkboxes and click "Exit Selected") to send that
+      as a LIMIT order; leave it blank to exit at MARKET. Selecting several legs and exiting them
+      together sends one order per leg, back to back — it does not net legs against each other.
+    </div>
   </div>
 
   <div class="panel">
@@ -351,7 +374,7 @@
 <div class="modal-overlay" id="execModal">
   <div class="modal">
     <h3>Confirm order placement</h3>
-    <div class="modal-warning">These orders will be sent to your LIVE Zerodha account and use real money. Review every line — edit quantity/price or remove a leg — before confirming.</div>
+    <div class="modal-warning">These orders will be sent to your LIVE Zerodha account and use real money. Review every line — edit quantity/price or remove a leg — before confirming. "Yes, place these real orders" sends BUY legs first and waits for each to fill before sending SELL legs, so SELL legs don't get rejected for insufficient margin. Or use "Execute this leg" on any single row to fire legs yourself, one at a time, in whatever order you choose.</div>
     <table style="width:100%; font-size:13px;">
       <thead><tr><th>Leg</th><th>Qty</th><th id="execPriceHeader" style="display:none;">Price</th><th></th></tr></thead>
       <tbody id="execOrderLines"></tbody>
@@ -374,7 +397,7 @@
 <div class="modal-overlay" id="closeModal">
   <div class="modal">
     <h3>Confirm position close / square-off</h3>
-    <div class="modal-warning">This reverses each leg (buy back what you sold, sell what you bought) at current market prices — real orders, real money. Review before confirming.</div>
+    <div class="modal-warning">This reverses each leg (buy back what you sold, sell what you bought) at current market prices — real orders, real money. Review before confirming. "Yes, close this position" places all legs — BUY legs first, waiting for each fill, so SELL legs don't get rejected for insufficient margin. Or use "Execute this leg" on any single row to fire legs yourself, one at a time.</div>
     <table style="width:100%; font-size:13px;">
       <thead><tr><th>Leg</th><th>Qty</th><th id="closePriceHeader" style="display:none;">Price</th><th></th></tr></thead>
       <tbody id="closeOrderLines"></tbody>
@@ -426,12 +449,41 @@ function renderCloseOrderLines() {
       <td style="display:${showPrice ? 'table-cell' : 'none'};">
         <input type="number" step="0.05" value="${o.price ?? ''}" style="width:80px;" onchange="closeOrders[${idx}].price=this.value" />
       </td>
-      <td><button class="secondary small-btn" onclick="closeOrders.splice(${idx},1); renderCloseOrderLines();">Remove</button></td>`;
+      <td>
+        <button class="secondary small-btn" onclick="closeOrders.splice(${idx},1); renderCloseOrderLines();">Remove</button>
+        <button class="small-btn" onclick="executeSingleCloseLeg(${idx})">Execute this leg</button>
+      </td>`;
     tbody.appendChild(tr);
   });
   if (!closeOrders.length) {
     tbody.innerHTML = `<tr><td colspan="4" style="color:var(--red);">All legs removed — nothing would be placed.</td></tr>`;
   }
+}
+
+async function executeSingleCloseLeg(idx) {
+  const leg = closeOrders[idx];
+  if (!leg || !currentClosePositionId) return;
+  const product = document.getElementById("closeProduct").value;
+  const orderType = document.getElementById("closeOrderType").value;
+  if (!confirm(`Place ONLY this closing leg now?\n${leg.transaction_type} ${leg.tradingsymbol} x${leg.quantity}\n\nReal order, real money.`)) return;
+  const resultBox = document.getElementById("closeResultBox");
+  resultBox.innerHTML += `<div class="loading">Placing ${leg.tradingsymbol}...</div>`;
+  try {
+    const r = await apiFetch(`/api/execute/${currentClosePositionId}/close/leg`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({confirmed: true, product, order_type: orderType, order: leg})
+    });
+    const d = await r.json();
+    if (d.error) { resultBox.innerHTML += `<div style="color:var(--red);">${d.error}</div>`; return; }
+    d.results.forEach(res => {
+      const color = res.status === "placed" ? "var(--green)" : "var(--red)";
+      resultBox.innerHTML += `<div style="color:${color}; font-size:13px;">${res.leg}: ${res.tradingsymbol} — ${res.status}${res.order_id ? " (order " + res.order_id + ")" : ""}${res.error ? " — " + res.error : ""}</div>`;
+    });
+    closeOrders.splice(idx, 1);
+    renderCloseOrderLines();
+    loadOrders();
+    if (typeof loadBrokerPositions === "function") loadBrokerPositions();
+  } catch (e) { resultBox.innerHTML += `<div style="color:var(--red);">Request failed: ${e}</div>`; }
 }
 
 document.getElementById("closeOrderType").onchange = renderCloseOrderLines;
@@ -464,6 +516,7 @@ document.getElementById("closeConfirmBtn").onclick = async () => {
     resultBox.innerHTML = html;
     loadOrders();
     loadWatchlist();
+    if (typeof loadBrokerPositions === "function") loadBrokerPositions();
   } catch (e) { resultBox.innerHTML = `<span style="color:var(--red);">Request failed: ${e}</span>`; }
 };
 </script>
@@ -1062,12 +1115,41 @@ function renderExecOrderLines() {
       <td style="display:${showPrice ? 'table-cell' : 'none'};">
         <input type="number" step="0.05" value="${o.price}" style="width:80px;" onchange="execOrders[${idx}].price=this.value" />
       </td>
-      <td><button class="secondary small-btn" onclick="removeExecLeg(${idx})">Remove</button></td>`;
+      <td>
+        <button class="secondary small-btn" onclick="removeExecLeg(${idx})">Remove</button>
+        <button class="small-btn" onclick="executeSingleExecLeg(${idx})">Execute this leg</button>
+      </td>`;
     tbody.appendChild(tr);
   });
   if (!execOrders.length) {
     tbody.innerHTML = `<tr><td colspan="4" style="color:var(--red);">All legs removed — nothing would be placed.</td></tr>`;
   }
+}
+
+async function executeSingleExecLeg(idx) {
+  const leg = execOrders[idx];
+  if (!leg || !currentExecPositionId) return;
+  const product = document.getElementById("execProduct").value;
+  const orderType = document.getElementById("execOrderType").value;
+  if (!confirm(`Place ONLY this leg now?\n${leg.transaction_type} ${leg.tradingsymbol} x${leg.quantity}\n\nReal order, real money.`)) return;
+  const resultBox = document.getElementById("execResultBox");
+  resultBox.innerHTML += `<div class="loading">Placing ${leg.tradingsymbol}...</div>`;
+  try {
+    const r = await apiFetch(`/api/execute/${currentExecPositionId}/leg`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({confirmed: true, product, order_type: orderType, order: leg})
+    });
+    const d = await r.json();
+    if (d.error) { resultBox.innerHTML += `<div style="color:var(--red);">${d.error}</div>`; return; }
+    d.results.forEach(res => {
+      const color = res.status === "placed" ? "var(--green)" : "var(--red)";
+      resultBox.innerHTML += `<div style="color:${color}; font-size:13px;">${res.leg}: ${res.tradingsymbol} — ${res.status}${res.order_id ? " (order " + res.order_id + ")" : ""}${res.error ? " — " + res.error : ""}</div>`;
+    });
+    execOrders.splice(idx, 1);
+    renderExecOrderLines();
+    loadOrders();
+    if (typeof loadBrokerPositions === "function") loadBrokerPositions();
+  } catch (e) { resultBox.innerHTML += `<div style="color:var(--red);">Request failed: ${e}</div>`; }
 }
 
 function removeExecLeg(idx) {
@@ -1108,6 +1190,7 @@ document.getElementById("execConfirmBtn").onclick = async () => {
     html += `<div style="margin-top:10px; font-size:13px; color:${d.partial_failure ? "var(--red)" : "var(--text)"};">${d.note}</div>`;
     resultBox.innerHTML = html;
     loadOrders();
+    if (typeof loadBrokerPositions === "function") loadBrokerPositions();
   } catch (e) { resultBox.innerHTML = `<span style="color:var(--red);">Request failed: ${e}</span>`; }
 };
 
@@ -1169,7 +1252,86 @@ async function modifyOrderPrompt(orderId) {
   loadOrders();
 }
 
-document.getElementById("refreshOrdersBtn").onclick = loadOrders;
+document.getElementById("refreshOrdersBtn").onclick = () => { loadOrders(); loadBrokerPositions(); };
+
+// ---------- Live broker positions (Order Management — open F&O legs) ----------
+let livePositions = [];  // cached rows; each carries _selected / _exitPrice UI state
+
+async function loadBrokerPositions() {
+  const status = document.getElementById("positionsStatus");
+  const loggedIn = await checkSession();
+  if (!loggedIn) { status.textContent = "Connect your Kite account first."; return; }
+  status.textContent = "Loading positions...";
+  try {
+    const r = await apiFetch("/api/broker-positions");
+    const d = await r.json();
+    if (d.error) { status.textContent = "Error: " + d.error; return; }
+    livePositions = (d.positions || []).map(p => ({...p, _selected: false, _exitPrice: ""}));
+    renderPositionsTable();
+    status.textContent = "Updated just now.";
+  } catch (e) { status.textContent = "Request failed: " + e; }
+}
+
+function renderPositionsTable() {
+  const tbody = document.querySelector("#positionsTable tbody");
+  tbody.innerHTML = "";
+  if (!livePositions.length) {
+    document.getElementById("positionsTable").style.display = "none";
+    document.getElementById("positionsEmpty").style.display = "block";
+    return;
+  }
+  document.getElementById("positionsEmpty").style.display = "none";
+  livePositions.forEach((p, idx) => {
+    const pnlClass = (p.pnl != null && p.pnl >= 0) ? "pnl-pos" : "pnl-neg";
+    const sideClass = p.side === "SHORT" ? "sell" : "buy";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><input type="checkbox" ${p._selected ? "checked" : ""} onchange="livePositions[${idx}]._selected=this.checked" /></td>
+      <td>${p.tradingsymbol}</td>
+      <td class="${sideClass}">${p.side}</td>
+      <td>${Math.abs(p.quantity)}</td>
+      <td>₹${p.average_price}</td>
+      <td>₹${p.last_price}</td>
+      <td class="${pnlClass}">₹${p.pnl}</td>
+      <td><input type="number" step="0.05" placeholder="MARKET" style="width:90px;" value="${p._exitPrice}" onchange="livePositions[${idx}]._exitPrice=this.value" /></td>
+      <td><button class="danger small-btn" onclick="exitSingleLivePosition(${idx})">Exit</button></td>`;
+    tbody.appendChild(tr);
+  });
+  document.getElementById("positionsTable").style.display = "table";
+}
+
+document.getElementById("selectAllPositions").onchange = function() {
+  livePositions.forEach(p => p._selected = this.checked);
+  renderPositionsTable();
+  document.getElementById("selectAllPositions").checked = this.checked;
+};
+
+async function exitLivePositions(rows) {
+  if (!rows.length) { alert("No positions selected."); return; }
+  const summary = rows.map(r => `${r.tradingsymbol} (${r.side} ${Math.abs(r.quantity)}${r._exitPrice ? " @ ₹" + r._exitPrice : " @ MARKET"})`).join("\n");
+  if (!confirm(`Send real exit order(s) to your LIVE Zerodha account for:\n\n${summary}\n\nContinue?`)) return;
+  const legs = rows.map(r => ({
+    tradingsymbol: r.tradingsymbol, quantity: Math.abs(r.quantity), side: r.side,
+    price: r._exitPrice || undefined,
+  }));
+  try {
+    const r = await apiFetch("/api/broker-positions/exit", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({confirmed: true, legs})
+    });
+    const d = await r.json();
+    if (d.error) { alert("Error: " + d.error); return; }
+    const msg = d.results.map(res => `${res.tradingsymbol}: ${res.status}${res.order_id ? " (order " + res.order_id + ")" : ""}${res.error ? " — " + res.error : ""}`).join("\n");
+    alert(msg);
+    loadBrokerPositions();
+    loadOrders();
+  } catch (e) { alert("Request failed: " + e); }
+}
+
+function exitSingleLivePosition(idx) { exitLivePositions([livePositions[idx]]); }
+
+document.getElementById("refreshPositionsBtn").onclick = loadBrokerPositions;
+document.getElementById("exitSelectedBtn").onclick = () => exitLivePositions(livePositions.filter(p => p._selected));
 
 // ---------- Price chart (candlestick) ----------
 document.getElementById("chartBtn").onclick = async () => {
@@ -1314,6 +1476,7 @@ document.getElementById("refreshEventsBtn").onclick = loadEvents;
 checkSession();
 loadWatchlist();
 loadOrders();
+loadBrokerPositions();
 loadEvents();
 </script>
 </body>
