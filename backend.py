@@ -2,7 +2,7 @@
 Kite Option-Selling Dashboard — local backend
 ------------------------------------------------
 Run:  python backend.py
-Then open: https://algo2.wecon.in
+Then open: https://algo.wecon.in
 
 What this does
 - Logs you into Kite Connect (daily login, token expires every day - that's Kite's design, not a bug here)
@@ -55,7 +55,7 @@ import requests
 # ---------------------------------------------------------------------------
 API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
 API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
-REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
+REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo.wecon.in/api/callback")
 
 # If your network does TLS interception (common on office/government networks — you'll see
 # "self-signed certificate in certificate chain" errors), set this env var to allow the news
@@ -69,6 +69,20 @@ MIN_DAYS_TO_EXPIRY = 7
 DEFAULT_TARGET_DELTA = 0.18
 DEFAULT_WING_WIDTH_PCT = 0.05
 CHAIN_STRIKE_RANGE_PCT = 0.25
+
+# --- Double Calendar Spread defaults ---
+# A double calendar is: SELL a near-term call + SELL a near-term put (usually a bit OTM each side),
+# and BUY a far-term call + far-term put at the SAME two strikes. It's a net-DEBIT, defined-risk
+# trade that profits from the near leg decaying faster than the far leg (positive theta, long vega) —
+# the "sweet spot" is the underlying sitting between the two short strikes at near expiry.
+DEFAULT_CALENDAR_OTM_PCT = 0.03      # each strike this far OTM from spot, in "otm_pct" strike mode
+DEFAULT_CALENDAR_TARGET_DELTA = 0.25 # used instead of otm_pct in "delta" strike mode
+CALENDAR_TARGET_GAP_DAYS = 30        # preferred day-gap between near and far expiry when auto-picking
+CALENDAR_CURVE_POINTS = 41           # number of spot points sampled for the payoff curve
+CALENDAR_CURVE_RANGE_PCT = 0.15      # curve spans spot x (1 +/- this), i.e. +/-15% around current spot
+# Exit-suggestion thresholds for tracked calendar positions (informational only, never auto-exits)
+CALENDAR_STOP_LOSS_DEBIT_MULTIPLE = 0.5   # suggest exit if loss reaches this multiple of debit paid
+CALENDAR_NEAR_EXPIRY_DAYS_WARNING = 3     # suggest exit/roll when this close to near-leg expiry (gamma risk)
 
 # --- Exit / stop-loss suggestion rule (informational only — this tool never auto-exits) ---
 # Trigger a suggested-exit flag when EITHER condition is met, whichever occurs first:
@@ -1523,6 +1537,298 @@ def strategy(symbol):
     return jsonify(result)
 
 
+# ---------------------------------------------------------------------------
+# Strategy builder — Double Calendar Spread (sell near-term call+put, buy far-term
+# call+put at the same two strikes). Net debit, defined risk, long vega / positive theta.
+# ---------------------------------------------------------------------------
+def pick_calendar_expiries(all_expiries_str, near_expiry_str_override=None, far_expiry_str_override=None):
+    """Auto-picks a sensible near/far expiry pair from the full expiry list (strings 'YYYY-MM-DD').
+    Near = nearest expiry beyond MIN_DAYS_TO_EXPIRY (same rule as the other strategy builders).
+    Far = the available expiry whose gap from Near is closest to CALENDAR_TARGET_GAP_DAYS (and
+    strictly after Near) — this is what "automatically pick which expiries" means in practice:
+    typically the current/next-week expiry paired with the next monthly one or two out.
+    Returns (near_str, far_str) or (None, None, error_dict)."""
+    today = datetime.now().date()
+    all_expiries = sorted(datetime.strptime(e, "%Y-%m-%d").date() for e in all_expiries_str)
+
+    if near_expiry_str_override:
+        try:
+            near = datetime.strptime(near_expiry_str_override, "%Y-%m-%d").date()
+        except ValueError:
+            return None, None, {"error": f"Invalid near_expiry format '{near_expiry_str_override}'"}
+        if near not in all_expiries:
+            return None, None, {"error": f"{near_expiry_str_override} is not a valid expiry for this symbol"}
+    else:
+        valid = [e for e in all_expiries if (e - today).days >= MIN_DAYS_TO_EXPIRY]
+        if not valid:
+            return None, None, {"error": "No near expiry beyond minimum days-to-expiry filter"}
+        near = valid[0]
+
+    later = [e for e in all_expiries if e > near]
+    if not later:
+        return None, None, {"error": f"No later expiry available beyond near expiry {near} to use as the far leg"}
+
+    if far_expiry_str_override:
+        try:
+            far = datetime.strptime(far_expiry_str_override, "%Y-%m-%d").date()
+        except ValueError:
+            return None, None, {"error": f"Invalid far_expiry format '{far_expiry_str_override}'"}
+        if far not in later:
+            return None, None, {"error": f"{far_expiry_str_override} must be a valid expiry strictly after {near}"}
+    else:
+        far = min(later, key=lambda e: abs((e - near).days - CALENDAR_TARGET_GAP_DAYS))
+
+    return str(near), str(far), None
+
+
+def build_double_calendar_strategy(symbol, strike_mode="otm_pct", otm_pct=DEFAULT_CALENDAR_OTM_PCT,
+                                    target_delta=DEFAULT_CALENDAR_TARGET_DELTA,
+                                    near_expiry_str=None, far_expiry_str=None, lots=1):
+    symbol = symbol.upper()
+    today = datetime.now().date()
+
+    # Resolve which two expiries to use (auto-picked unless the user overrode one/both).
+    nfo, _ = get_instruments()
+    opts = [i for i in nfo if i["name"] == symbol and i["segment"] == "NFO-OPT"]
+    if not opts:
+        return {"error": f"No options found for {symbol}"}
+    all_expiries_str = [str(e) for e in sorted({o["expiry"] for o in opts})]
+    near_expiry_str, far_expiry_str, err = pick_calendar_expiries(all_expiries_str, near_expiry_str, far_expiry_str)
+    if err:
+        return err
+
+    near_data, err = get_chain_for_symbol(symbol, near_expiry_str)
+    if err:
+        return err
+    far_data, err = get_chain_for_symbol(symbol, far_expiry_str)
+    if err:
+        return err
+
+    spot = near_data["spot"]
+    lot_size = near_data["lot_size"]
+    quantity = lot_size * max(1, int(lots))
+    near_expiry = near_data["expiry"]
+    far_expiry = far_data["expiry"]
+    days_to_near = (near_expiry - today).days
+    days_between = (far_expiry - near_expiry).days
+    if days_between <= 0:
+        return {"error": "Far expiry must be strictly after near expiry"}
+
+    near_calls = sorted([o for o in near_data["chain"] if o["instrument_type"] == "CE"], key=lambda x: x["strike"])
+    near_puts = sorted([o for o in near_data["chain"] if o["instrument_type"] == "PE"], key=lambda x: x["strike"])
+    far_calls = sorted([o for o in far_data["chain"] if o["instrument_type"] == "CE"], key=lambda x: x["strike"])
+    far_puts = sorted([o for o in far_data["chain"] if o["instrument_type"] == "PE"], key=lambda x: x["strike"])
+    if not near_calls or not near_puts or not far_calls or not far_puts:
+        return {"error": "Could not load a complete call/put chain for both expiries"}
+
+    def closest_strike(options, target):
+        return min(options, key=lambda o: abs(o["strike"] - target))
+
+    def closest_by_delta(options, target, sign):
+        return min(options, key=lambda o: abs(o["delta"] - sign * target))
+
+    if strike_mode == "atm":
+        call_strike_target = put_strike_target = spot
+        near_call = closest_strike(near_calls, call_strike_target)
+        near_put = closest_strike(near_puts, put_strike_target)
+    elif strike_mode == "delta":
+        near_call = closest_by_delta(near_calls, target_delta, +1)
+        near_put = closest_by_delta(near_puts, target_delta, -1)
+    else:  # "otm_pct" (default)
+        near_call = closest_strike(near_calls, spot * (1 + otm_pct))
+        near_put = closest_strike(near_puts, spot * (1 - otm_pct))
+
+    # Match the SAME strikes on the far expiry (nearest available if strikes differ slightly).
+    far_call = closest_strike(far_calls, near_call["strike"])
+    far_put = closest_strike(far_puts, near_put["strike"])
+
+    def leg(o):
+        return {"strike": o["strike"], "ltp": o["ltp"], "delta": o["delta"], "iv_pct": o["iv"],
+                "tradingsymbol": o["tradingsymbol"]}
+
+    legs = {"sell_call_near": leg(near_call), "sell_put_near": leg(near_put),
+            "buy_call_far": leg(far_call), "buy_put_far": leg(far_put)}
+
+    net_debit_per_share = ((far_call["ltp"] + far_put["ltp"]) - (near_call["ltp"] + near_put["ltp"]))
+    max_loss_per_share = max(net_debit_per_share, 0.0)  # defined risk: worst case both near legs expire
+    # worthless and you simply own the far legs, having overpaid the debit — you lose at most the debit.
+
+    # --- Model-based P&L curve at NEAR expiry, across a range of assumed spot outcomes ---
+    # At near expiry: the short near-leg is worth its intrinsic value (you owe that to close it);
+    # the long far-leg still has (far_expiry - near_expiry) days left, valued via Black-Scholes at
+    # today's implied vol for that leg (assumes IV holds roughly steady — the standard simplifying
+    # assumption for calendar-spread payoff diagrams; real IV can/does change).
+    T_far_remaining = days_between / 365.0
+    call_iv = far_call["iv"] / 100.0
+    put_iv = far_put["iv"] / 100.0
+    call_strike, put_strike = near_call["strike"], near_put["strike"]
+
+    def pnl_at_spot(s_t):
+        near_call_intrinsic = max(s_t - call_strike, 0.0)
+        near_put_intrinsic = max(put_strike - s_t, 0.0)
+        far_call_value = bs_price(s_t, call_strike, T_far_remaining, RISK_FREE_RATE, call_iv, "CE")
+        far_put_value = bs_price(s_t, put_strike, T_far_remaining, RISK_FREE_RATE, put_iv, "PE")
+        position_value = (far_call_value - near_call_intrinsic) + (far_put_value - near_put_intrinsic)
+        return position_value - net_debit_per_share
+
+    lo = spot * (1 - CALENDAR_CURVE_RANGE_PCT)
+    hi = spot * (1 + CALENDAR_CURVE_RANGE_PCT)
+    step = (hi - lo) / (CALENDAR_CURVE_POINTS - 1)
+    curve = []
+    for i in range(CALENDAR_CURVE_POINTS):
+        s_t = lo + i * step
+        pnl_per_share = pnl_at_spot(s_t)
+        curve.append({"spot": round(s_t, 2), "pnl": round(pnl_per_share * quantity, 2)})
+
+    max_profit_point = max(curve, key=lambda pt: pt["pnl"])
+    max_profit_estimated = max_profit_point["pnl"]
+
+    # Breakevens: spot values where the curve crosses zero (linear interpolation between samples).
+    breakevens = []
+    for i in range(len(curve) - 1):
+        p1, p2 = curve[i], curve[i + 1]
+        if (p1["pnl"] <= 0 <= p2["pnl"]) or (p1["pnl"] >= 0 >= p2["pnl"]):
+            if p2["pnl"] != p1["pnl"]:
+                frac = -p1["pnl"] / (p2["pnl"] - p1["pnl"])
+                be_spot = p1["spot"] + frac * (p2["spot"] - p1["spot"])
+                breakevens.append(round(be_spot, 2))
+    # de-dupe near-identical crossings
+    dedup_breakevens = []
+    for b in breakevens:
+        if not any(abs(b - x) < 0.5 for x in dedup_breakevens):
+            dedup_breakevens.append(b)
+
+    result = {
+        "symbol": symbol, "spot": spot, "lot_size": lot_size, "lots": lots, "quantity": quantity,
+        "strategy_type": "double_calendar", "strike_mode": strike_mode,
+        "near_expiry": str(near_expiry), "far_expiry": str(far_expiry),
+        "days_to_near_expiry": days_to_near, "days_between_expiries": days_between,
+        "all_expiries": all_expiries_str,
+        "legs": legs,
+        "net_debit_per_share": round(net_debit_per_share, 2),
+        "max_loss": round(max_loss_per_share * quantity, 2),
+        "max_profit_estimated": round(max_profit_estimated, 2),
+        "breakevens": dedup_breakevens,
+        "sweet_spot_range": [near_put["strike"], near_call["strike"]],
+        "curve": curve,
+        "note": ("DOUBLE CALENDAR SPREAD: net-debit, defined-risk trade. Max loss is capped at the debit "
+                 "paid; max profit is a MODEL ESTIMATE (Black-Scholes value of the far leg at near expiry, "
+                 "assuming today's IV holds) — not guaranteed, since realized IV and the exact time of exit "
+                 "both move the actual P&L. Profit is maximized if spot sits between the two short strikes "
+                 "at near expiry; sharp moves in either direction erode it. Educational calculation only — "
+                 "not a trade recommendation. Verify prices, margin, and lot size on your broker terminal.")
+    }
+
+    legs_for_margin = [
+        {"tradingsymbol": legs["sell_call_near"]["tradingsymbol"], "transaction_type": "SELL"},
+        {"tradingsymbol": legs["sell_put_near"]["tradingsymbol"], "transaction_type": "SELL"},
+        {"tradingsymbol": legs["buy_call_far"]["tradingsymbol"], "transaction_type": "BUY"},
+        {"tradingsymbol": legs["buy_put_far"]["tradingsymbol"], "transaction_type": "BUY"},
+    ]
+    margin_required, margin_error = compute_margin(legs_for_margin, quantity)
+    result["margin_required"] = margin_required
+    result["margin_error"] = margin_error
+    result["entry_event_warning"] = get_entry_warning()
+    result["event_before_expiry"] = get_event_before_expiry(result["near_expiry"])
+
+    entry_orders_for_charges = [
+        {"price": legs["sell_call_near"]["ltp"], "quantity": quantity, "transaction_type": "SELL"},
+        {"price": legs["sell_put_near"]["ltp"], "quantity": quantity, "transaction_type": "SELL"},
+        {"price": legs["buy_call_far"]["ltp"], "quantity": quantity, "transaction_type": "BUY"},
+        {"price": legs["buy_put_far"]["ltp"], "quantity": quantity, "transaction_type": "BUY"},
+    ]
+    entry_charges = estimate_charges(entry_orders_for_charges)
+    result["estimated_entry_charges"] = entry_charges
+    result["charges_note"] = ("Entry-side charges only. If you square off before near expiry, exit-side "
+                               "charges apply too — see the Track Positions section for the running "
+                               "round-trip estimate once tracked.")
+
+    # --- Reuse the same trading-logic layer as the Iron Condor/Strangle builder ---
+    rank_info = get_stock_rank(symbol)
+    result["rank_info"] = rank_info
+    iv_hv = classify_iv_hv(rank_info.get("atm_iv_pct") if rank_info else None,
+                            rank_info.get("hv_annualized_pct") if rank_info else None)
+    result["iv_hv"] = iv_hv
+    if iv_hv is None:
+        result["iv_hv_note"] = "Run the Screener (section 1) first so IV/HV data is cached for this symbol."
+
+    em = expected_move(spot, rank_info.get("atm_iv_pct") if rank_info else None, days_to_near)
+    result["expected_move"] = em
+    if em:
+        outside_sweet_spot = em["upper"] > near_call["strike"] or em["lower"] < near_put["strike"]
+        result["expected_move_vs_sweet_spot"] = (
+            f"{days_to_near}-day expected move (±₹{em['expected_move']}, range {em['lower']}–{em['upper']}) "
+            + ("extends BEYOND the short strikes (" + f"{near_put['strike']}–{near_call['strike']}"
+               + ") — a normal move could already erode profit before near expiry."
+               if outside_sweet_spot else
+               "comfortably stays WITHIN the short strikes (" + f"{near_put['strike']}–{near_call['strike']}"
+               + ") — favorable for this trade."))
+
+    trend = get_trend_regime(symbol)
+    result["trend"] = None if trend.get("error") else trend
+    if trend.get("error"):
+        result["trend_note"] = trend["error"]
+    if trend and not trend.get("error") and trend.get("avoid_premium_selling"):
+        result["trend_warning"] = (f"{trend['regime']} detected — calendars do best in range-bound/low-trend "
+                                    f"conditions; a strong trend risks pushing spot outside the sweet spot.")
+
+    vix, vix_err = get_india_vix()
+    iv_rank_for_regime = rank_info.get("iv_rank_pct") if rank_info else None
+    result["volatility_regime"] = classify_volatility_regime(vix, iv_rank_for_regime)
+    if vix_err:
+        result["volatility_regime"]["note"] = f"India VIX fetch failed ({vix_err}); classification unavailable."
+    # Calendars are LONG vega (unlike condors/strangles which are short vega) — a rising-IV regime
+    # after entry helps this trade, so flip the usual "avoid high vol" framing into a note here.
+    result["vega_note"] = ("This trade is net LONG vega (benefits if IV rises after entry) and net SHORT "
+                            "gamma near-term — opposite of the Iron Condor/Strangle builder's exposure. "
+                            "A low-IV entry (cheap far-month vega) with room for IV to expand is typically "
+                            "more favorable than entering when IV is already elevated.")
+
+    score_components = []
+    if iv_hv:
+        # For a long-vega trade, a LOW iv/hv ratio (calm now, room to expand) scores better — inverse
+        # of the condor/strangle scoring, which wants rich IV to sell.
+        inv_label = {"avoid": 90, "fair": 70, "good": 55, "excellent": 35}.get(iv_hv["label"].lower(), 50)
+        score_components.append(inv_label)
+    if trend and not trend.get("error"):
+        score_components.append(25 if trend.get("avoid_premium_selling") else 80)
+    if result["volatility_regime"]["label"] != "Unknown":
+        vr_score = {"Low Volatility": 80, "Normal": 65, "High Volatility": 35, "Extreme": 15}.get(
+            result["volatility_regime"]["label"], 50)
+        score_components.append(vr_score)
+    if rank_info and rank_info.get("fo_banned_today"):
+        score_components.append(0)
+    trade_quality_score = round(sum(score_components) / len(score_components), 1) if score_components else None
+    result["trade_quality_score"] = trade_quality_score
+    if trade_quality_score is not None:
+        result["trade_quality_label"] = ("Excellent" if trade_quality_score >= 80 else
+                                          "Good" if trade_quality_score >= 60 else
+                                          "Average" if trade_quality_score >= 40 else "Avoid")
+    result["trade_quality_note"] = ("Heuristic score for a LONG-VEGA/theta trade: rewards calm current IV "
+                                     "with room to rise, range-bound trend, and low-to-normal volatility "
+                                     "regime — the inverse of the premium-selling score elsewhere in this "
+                                     "dashboard. Not a probability, not backtested — a rough triage aid only.")
+
+    return result
+
+
+@app.route("/api/calendar-strategy/<symbol>")
+def calendar_strategy(symbol):
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    strike_mode = request.args.get("strike_mode", "otm_pct")
+    otm_pct = float(request.args.get("otm_pct", DEFAULT_CALENDAR_OTM_PCT))
+    target_delta = float(request.args.get("target_delta", DEFAULT_CALENDAR_TARGET_DELTA))
+    near_expiry = request.args.get("near_expiry")
+    far_expiry = request.args.get("far_expiry")
+    lots = int(request.args.get("lots", 1))
+    result = build_double_calendar_strategy(symbol, strike_mode, otm_pct, target_delta,
+                                             near_expiry, far_expiry, lots)
+    if "error" in result:
+        return jsonify(result), 404
+    return jsonify(result)
+
+
 @app.route("/api/trend/<symbol>")
 def trend(symbol):
     if not require_session():
@@ -1558,19 +1864,29 @@ def position_sizing():
 def position_greeks(position):
     """Per-position net Greeks via Black-Scholes at current quotes (Kite doesn't publish Greeks
     itself). Gamma/Vega/Theta are estimated by bump-and-reprice off the same bs_price/bs_delta
-    helpers used everywhere else in this file."""
+    helpers used everywhere else in this file. Handles double_calendar's two different expiries
+    (near legs use position['expiry'], far legs use position['far_expiry'])."""
     strategy_type = position.get("strategy_type", "iron_condor")
-    leg_keys = ["sell_call", "buy_call", "sell_put", "buy_put"] if strategy_type == "iron_condor" \
-        else ["sell_call", "sell_put"]
+    leg_keys = leg_keys_for(position)
     quantity = position.get("quantity", position["lot_size"])
     spot, err = get_spot_price(position["symbol"])
     if err:
         return {"error": err["error"]}
-    expiry_date = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
-    days_left = max((expiry_date - datetime.now().date()).days, 0)
-    T = days_left / 365.0
-    if T <= 0:
-        return {"error": "Position has expired"}
+
+    today = datetime.now().date()
+    near_expiry_date = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
+    days_left_near = max((near_expiry_date - today).days, 0)
+    far_expiry_date = None
+    days_left_far = None
+    if strategy_type == "double_calendar":
+        far_expiry_date = datetime.strptime(position["far_expiry"], "%Y-%m-%d").date()
+        days_left_far = max((far_expiry_date - today).days, 0)
+        if days_left_near <= 0 and days_left_far <= 0:
+            return {"error": "Position has expired"}
+    else:
+        if days_left_near <= 0:
+            return {"error": "Position has expired"}
+
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
     try:
         quotes = kite.quote(inst_keys)
@@ -1581,6 +1897,12 @@ def position_greeks(position):
     for k in leg_keys:
         strike = position["legs"][k]["strike"]
         opt_type = "CE" if "call" in k else "PE"
+        # calendars: near legs (sell_*_near) decay against the near expiry; far legs (buy_*_far)
+        # against the far expiry. Everything else (iron_condor/strangle) has a single shared expiry.
+        T = (days_left_far if (strategy_type == "double_calendar" and k.endswith("_far"))
+             else days_left_near) / 365.0
+        if T <= 0:
+            continue
         ltp = extract_price(quotes.get(f"NFO:{position['legs'][k]['tradingsymbol']}"))
         if ltp is None:
             return {"error": f"No usable price for {k}"}
@@ -1601,6 +1923,7 @@ def position_greeks(position):
 
     return {"net_delta": round(net_delta, 2), "net_gamma": round(net_gamma, 4),
             "net_vega": round(net_vega, 2), "net_theta": round(net_theta, 2)}
+
 
 
 @app.route("/api/portfolio-greeks")
@@ -1739,6 +2062,130 @@ def watchlist_add():
     return jsonify({"ok": True, "position": position})
 
 
+@app.route("/api/calendar-watchlist/add", methods=["POST"])
+def calendar_watchlist_add():
+    """Track-a-position counterpart of /api/watchlist/add, for Double Calendar Spreads. Kept as its
+    own endpoint (rather than overloading /api/watchlist/add) since the position shape is different
+    enough (two expiries, four legs with different leg-key names, debit instead of credit) to be
+    clearer as a separate, explicit flow — mirrors how this dashboard keeps the Calendar tab separate."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    symbol = body.get("symbol", "").upper()
+    strike_mode = body.get("strike_mode", "otm_pct")
+    otm_pct = float(body.get("otm_pct", DEFAULT_CALENDAR_OTM_PCT))
+    target_delta = float(body.get("target_delta", DEFAULT_CALENDAR_TARGET_DELTA))
+    near_expiry = body.get("near_expiry")
+    far_expiry = body.get("far_expiry")
+    lots = int(body.get("lots", 1))
+
+    built = build_double_calendar_strategy(symbol, strike_mode, otm_pct, target_delta,
+                                            near_expiry, far_expiry, lots)
+    if "error" in built:
+        return jsonify(built), 404
+
+    today_str = datetime.now().date().isoformat()
+    position = {
+        "id": f"{symbol}_CAL_{int(time.time())}",
+        "symbol": symbol,
+        "added_on": today_str,
+        "entry_spot": built["spot"],
+        "strategy_type": "double_calendar",
+        "strike_mode": built["strike_mode"],
+        "expiry": built["near_expiry"],          # "expiry" = the near/critical management date
+        "far_expiry": built["far_expiry"],
+        "lot_size": built["lot_size"],
+        "lots": built["lots"],
+        "quantity": built["quantity"],
+        "legs": built["legs"],
+        "entry_net_debit_per_share": built["net_debit_per_share"],
+        "entry_max_loss": built["max_loss"],
+        "entry_max_profit_estimated": built["max_profit_estimated"],
+        "entry_margin_required": built.get("margin_required"),
+        "entry_margin_error": built.get("margin_error"),
+        "entry_estimated_charges": built.get("estimated_entry_charges", {}).get("total"),
+        "breakevens": built["breakevens"],
+        "sweet_spot_range": built["sweet_spot_range"],
+        "broker_orders": [],
+        "history": [{"date": today_str, "spot": built["spot"],
+                     "pnl": 0.0, "current_debit_per_share": built["net_debit_per_share"]}],
+    }
+    positions = load_positions()
+    positions.append(position)
+    save_positions(positions)
+    return jsonify({"ok": True, "position": position})
+
+
+@app.route("/api/calendar-watchlist/<pos_id>/curve")
+def calendar_watchlist_curve(pos_id):
+    """Regenerates a LIVE payoff curve for an already-tracked calendar position, using current spot
+    and current far-leg IV (rather than the IV at entry time) — lets the Track Positions tab show how
+    the expected max-profit/max-loss shape has shifted since entry, not just the frozen entry-day curve."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    position = find_position(pos_id)
+    if not position or position.get("strategy_type") != "double_calendar":
+        return jsonify({"error": "Calendar position not found"}), 404
+
+    spot, err = get_spot_price(position["symbol"])
+    if err:
+        return jsonify(err), 404
+
+    today = datetime.now().date()
+    near_expiry = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
+    far_expiry = datetime.strptime(position["far_expiry"], "%Y-%m-%d").date()
+    days_to_near = max((near_expiry - today).days, 0)
+    days_between = max((far_expiry - near_expiry).days, 1)
+
+    call_strike = position["legs"]["sell_call_near"]["strike"]
+    put_strike = position["legs"]["sell_put_near"]["strike"]
+    quantity = position.get("quantity", position["lot_size"])
+
+    inst_keys = [f"NFO:{position['legs']['buy_call_far']['tradingsymbol']}",
+                 f"NFO:{position['legs']['buy_put_far']['tradingsymbol']}"]
+    try:
+        quotes = kite.quote(inst_keys)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    T_near_remaining = days_to_near / 365.0
+    far_call_ltp = extract_price(quotes.get(inst_keys[0]))
+    far_put_ltp = extract_price(quotes.get(inst_keys[1]))
+    if far_call_ltp is None or far_put_ltp is None:
+        return jsonify({"error": "No usable live price for one or both far legs"}), 400
+    call_iv = implied_vol(far_call_ltp, spot, call_strike, T_near_remaining + days_between / 365.0, "CE")
+    put_iv = implied_vol(far_put_ltp, spot, put_strike, T_near_remaining + days_between / 365.0, "PE")
+
+    entry_debit = position["entry_net_debit_per_share"]
+    T_far_remaining = days_between / 365.0
+
+    def pnl_at_spot(s_t):
+        near_call_intrinsic = max(s_t - call_strike, 0.0)
+        near_put_intrinsic = max(put_strike - s_t, 0.0)
+        far_call_value = bs_price(s_t, call_strike, T_far_remaining, RISK_FREE_RATE, call_iv, "CE")
+        far_put_value = bs_price(s_t, put_strike, T_far_remaining, RISK_FREE_RATE, put_iv, "PE")
+        position_value = (far_call_value - near_call_intrinsic) + (far_put_value - near_put_intrinsic)
+        return position_value - entry_debit
+
+    lo = spot * (1 - CALENDAR_CURVE_RANGE_PCT)
+    hi = spot * (1 + CALENDAR_CURVE_RANGE_PCT)
+    step = (hi - lo) / (CALENDAR_CURVE_POINTS - 1)
+    curve = []
+    for i in range(CALENDAR_CURVE_POINTS):
+        s_t = lo + i * step
+        curve.append({"spot": round(s_t, 2), "pnl": round(pnl_at_spot(s_t) * quantity, 2)})
+
+    return jsonify({
+        "position_id": pos_id, "spot": spot, "days_to_near_expiry": days_to_near,
+        "curve": curve, "sweet_spot_range": [put_strike, call_strike],
+        "note": "Live re-estimate using current spot and today's implied vol on the far legs — the "
+                "curve shape will keep shifting daily as time passes and IV moves; treat it as a "
+                "current best-guess snapshot, not a fixed prediction."
+    })
+
+
+
+
 @app.route("/api/watchlist/<pos_id>", methods=["DELETE"])
 def watchlist_remove(pos_id):
     positions = load_positions()
@@ -1747,7 +2194,143 @@ def watchlist_remove(pos_id):
     return jsonify({"ok": True})
 
 
+def mark_to_market_calendar(position):
+    """Double Calendar equivalent of mark_to_market() below — kept separate because the P&L math,
+    zone logic, and exit rules are genuinely different for a debit calendar vs a credit condor/strangle
+    (two expiries, model-based re-valuation of the far leg instead of a simple credit/debit diff)."""
+    quantity = position.get("quantity", position["lot_size"])
+    leg_keys = ["sell_call_near", "sell_put_near", "buy_call_far", "buy_put_far"]
+
+    inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
+    quotes = kite.quote(inst_keys)
+
+    prices, missing_legs = {}, []
+    for k in leg_keys:
+        key = f"NFO:{position['legs'][k]['tradingsymbol']}"
+        price = extract_price(quotes.get(key))
+        prices[k] = price
+        if price is None:
+            missing_legs.append(f"{k} ({position['legs'][k]['tradingsymbol']})")
+    if missing_legs:
+        return {"__error__": "No usable price for: " + ", ".join(missing_legs) +
+                              ". Contract may be expired/delisted, or market closed with no resting orders."}
+
+    # Current cost to CLOSE this spread: sell the far longs at their ltp, buy back the near shorts
+    # at their ltp. Position value rising above the entry debit is what "profit" means here.
+    current_value_per_share = ((prices["buy_call_far"] - prices["sell_call_near"]) +
+                                (prices["buy_put_far"] - prices["sell_put_near"]))
+    entry_debit = position["entry_net_debit_per_share"]
+    pnl_per_share = current_value_per_share - entry_debit
+    pnl = round(pnl_per_share * quantity, 2)
+    current_position_value = round(current_value_per_share * quantity, 2)
+
+    spot, err = get_spot_price(position["symbol"])
+    if err:
+        return {"__error__": err["error"]}
+
+    today = datetime.now().date()
+    near_expiry_date = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
+    far_expiry_date = datetime.strptime(position["far_expiry"], "%Y-%m-%d").date()
+    days_left = (near_expiry_date - today).days
+    T_near_remaining = max(days_left, 0) / 365.0
+
+    call_strike = position["legs"]["sell_call_near"]["strike"]
+    put_strike = position["legs"]["sell_put_near"]["strike"]
+    sweet_spot_lo, sweet_spot_hi = put_strike, call_strike
+
+    zone = "safe"
+    if spot > sweet_spot_hi or spot < sweet_spot_lo:
+        zone = "outside_sweet_spot"
+    if days_left <= CALENDAR_NEAR_EXPIRY_DAYS_WARNING:
+        zone = "near_expiry"
+
+    delta_call = delta_put = None
+    if days_left > 0:
+        iv_call = implied_vol(prices["sell_call_near"], spot, call_strike, T_near_remaining, "CE")
+        iv_put = implied_vol(prices["sell_put_near"], spot, put_strike, T_near_remaining, "PE")
+        delta_call = bs_delta(spot, call_strike, T_near_remaining, RISK_FREE_RATE, iv_call, "CE")
+        delta_put = bs_delta(spot, put_strike, T_near_remaining, RISK_FREE_RATE, iv_put, "PE")
+
+    # Probability spot is still WITHIN the sweet spot (between the two short strikes) at near expiry —
+    # lognormal approx using the same expected-move machinery used elsewhere in this file.
+    probability_in_sweet_spot = None
+    rank_info = get_stock_rank(position["symbol"])
+    atm_iv_pct = rank_info.get("atm_iv_pct") if rank_info else None
+    if atm_iv_pct and days_left > 0 and spot:
+        sigma = atm_iv_pct / 100.0
+        T = days_left / 365.0
+        if sigma > 0 and T > 0:
+            d_hi = (math.log(sweet_spot_hi / spot)) / (sigma * math.sqrt(T))
+            d_lo = (math.log(sweet_spot_lo / spot)) / (sigma * math.sqrt(T))
+            probability_in_sweet_spot = round((norm_cdf(d_hi) - norm_cdf(d_lo)) * 100, 1)
+    elif days_left <= 0:
+        probability_in_sweet_spot = 100.0 if zone == "safe" else 0.0
+
+    # --- Exit suggestion (informational only) ---
+    exit_suggested, exit_reasons = False, []
+    entry_debit_total = abs(entry_debit * quantity)
+    if entry_debit_total and pnl <= -CALENDAR_STOP_LOSS_DEBIT_MULTIPLE * entry_debit_total:
+        exit_suggested = True
+        exit_reasons.append(f"Loss (₹{abs(pnl)}) has reached {CALENDAR_STOP_LOSS_DEBIT_MULTIPLE}x the debit "
+                             f"paid (₹{round(entry_debit_total,2)}).")
+    if zone == "outside_sweet_spot":
+        exit_suggested = True
+        exit_reasons.append(f"Spot (₹{spot}) has moved outside the sweet spot range "
+                             f"({sweet_spot_lo}–{sweet_spot_hi}) — the near leg is losing its edge.")
+    if days_left <= CALENDAR_NEAR_EXPIRY_DAYS_WARNING and days_left >= 0:
+        exit_suggested = True
+        exit_reasons.append(f"Only {days_left} day(s) to near-leg expiry — consider closing or rolling "
+                             f"the near leg to manage gamma/assignment risk.")
+
+    event_flag = get_event_before_expiry(position["expiry"])
+
+    exit_orders_for_charges = [
+        {"price": prices["sell_call_near"], "quantity": quantity, "transaction_type": "BUY"},
+        {"price": prices["sell_put_near"], "quantity": quantity, "transaction_type": "BUY"},
+        {"price": prices["buy_call_far"], "quantity": quantity, "transaction_type": "SELL"},
+        {"price": prices["buy_put_far"], "quantity": quantity, "transaction_type": "SELL"},
+    ]
+    exit_charges = estimate_charges(exit_orders_for_charges)
+    entry_charges_total = position.get("entry_estimated_charges") or 0
+    round_trip_charges = round(entry_charges_total + exit_charges["total"], 2)
+    net_pnl_after_charges = round(pnl - round_trip_charges, 2)
+
+    leg_details = {}
+    for k in leg_keys:
+        entry_price = position["legs"][k]["ltp"]
+        current_price = prices[k]
+        is_sell = k.startswith("sell")
+        per_share = (entry_price - current_price) if is_sell else (current_price - entry_price)
+        leg_details[k] = {
+            "tradingsymbol": position["legs"][k]["tradingsymbol"],
+            "strike": position["legs"][k]["strike"],
+            "entry_price": entry_price, "current_price": round(current_price, 2),
+            "pnl": round(per_share * quantity, 2),
+        }
+        if k == "sell_call_near" and delta_call is not None:
+            leg_details[k]["current_delta"] = round(delta_call, 3)
+        if k == "sell_put_near" and delta_put is not None:
+            leg_details[k]["current_delta"] = round(delta_put, 3)
+
+    entry_max_profit = position.get("entry_max_profit_estimated")
+    return {
+        "spot": spot, "pnl": pnl, "current_debit_per_share": round(current_value_per_share, 2),
+        "current_position_value": current_position_value, "legs_current": leg_details,
+        "days_left": days_left, "zone": zone,
+        "probability_in_sweet_spot_pct": probability_in_sweet_spot,
+        "pct_of_max_profit": round((pnl / entry_max_profit * 100), 1) if entry_max_profit else None,
+        "exit_suggested": exit_suggested, "exit_reasons": exit_reasons,
+        "event_before_expiry": event_flag,
+        "entry_charges": entry_charges_total, "estimated_exit_charges": exit_charges["total"],
+        "estimated_round_trip_charges": round_trip_charges, "net_pnl_after_charges": net_pnl_after_charges,
+        "sweet_spot_range": [sweet_spot_lo, sweet_spot_hi],
+    }
+
+
 def mark_to_market(position):
+    if position.get("strategy_type") == "double_calendar":
+        return mark_to_market_calendar(position)
+
     strategy_type = position.get("strategy_type", "iron_condor")
     leg_keys = ["sell_call", "buy_call", "sell_put", "buy_put"] if strategy_type == "iron_condor" \
         else ["sell_call", "sell_put"]
@@ -1903,8 +2486,12 @@ def watchlist():
 # Order execution — preview (no side effects) then confirm (places real orders)
 # ---------------------------------------------------------------------------
 def leg_keys_for(position):
-    return ["sell_call", "buy_call", "sell_put", "buy_put"] if position.get("strategy_type") == "iron_condor" \
-        else ["sell_call", "sell_put"]
+    st = position.get("strategy_type")
+    if st == "iron_condor":
+        return ["sell_call", "buy_call", "sell_put", "buy_put"]
+    if st == "double_calendar":
+        return ["sell_call_near", "sell_put_near", "buy_call_far", "buy_put_far"]
+    return ["sell_call", "sell_put"]
 
 
 ORDER_TERMINAL_STATUSES = ("COMPLETE", "REJECTED", "CANCELLED")
