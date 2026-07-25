@@ -3028,8 +3028,22 @@ def chart(symbol):
     clamped = requested_days > max_days
 
     to_date = datetime.now()
-    from_date = to_date - timedelta(days=days + (15 if interval == "day" else 3))
+    from_date = to_date - timedelta(days=days + (15 if interval == "day" else 5))
     candles = kite.historical_data(token, from_date, to_date, interval)
+
+    if interval != "day":
+        # The window above is padded (weekends/holidays could otherwise leave fewer trading
+        # sessions than requested), so it can return MORE trading days than `days` asked for.
+        # Trim down to exactly the most recent `days` trading days so a short lookback (e.g. 1
+        # day) doesn't silently keep showing extra earlier sessions -- which is what made the
+        # chart look like it "wasn't updating" when you changed the lookback control.
+        by_day = {}
+        for c in candles:
+            d = c["date"]
+            key = d.date() if hasattr(d, "date") else str(d)[:10]
+            by_day.setdefault(key, []).append(c)
+        wanted_days = sorted(by_day.keys())[-days:]
+        candles = [c for day_key in wanted_days for c in by_day[day_key]]
 
     def fmt_date(c):
         d = c["date"]
@@ -3139,7 +3153,7 @@ def news(symbol):
 #     stop hits, or the end-of-day square-off time, whichever comes first.
 #   - MANUAL mode: it scans continuously and shows you the ranked signal — nothing is ever sent
 #     to your broker until you click "Execute this signal".
-#   - AUTO mode: after you type the exact acknowledgement phrase, it places that entry order the
+#   - AUTO mode: after you click OK on the confirmation dialog, it places that entry order the
 #     moment a qualifying signal appears, with no per-trade click. This is real money, unattended.
 #     Hard safety rails below (daily trade cap, daily loss cap, single-position-at-a-time, kill
 #     switch) exist specifically because of that — they are not optional and cannot be disabled
@@ -3160,7 +3174,6 @@ AUTOTRADE_TRADES_FILE = os.path.join(os.path.dirname(__file__), "autotrade_trade
 _autotrade_lock = threading.Lock()
 
 AUTOTRADE_MARKET_OPEN = "09:20"   # a few minutes after the 9:15 open, letting the opening range settle
-AUTOTRADE_ACK_PHRASE = "I UNDERSTAND THIS PLACES REAL ORDERS AUTOMATICALLY"
 
 AUTOTRADE_DEFAULTS = {
     "enabled": False,                 # is the scan/execute loop armed at all
@@ -3642,8 +3655,9 @@ def autotrade_arm():
     mode = body.get("mode", "manual")
     if mode not in ("manual", "auto"):
         return jsonify({"error": "mode must be 'manual' or 'auto'"}), 400
-    if mode == "auto" and body.get("ack") != AUTOTRADE_ACK_PHRASE:
-        return jsonify({"error": "Auto-execute mode requires the exact acknowledgement phrase to be sent."}), 400
+    if mode == "auto" and body.get("ack") is not True:
+        return jsonify({"error": "Auto-execute mode requires explicit confirmation (ack: true) that "
+                                  "this places real orders automatically."}), 400
     state = _autotrade_roll_day_if_needed(load_autotrade_state())
     state["mode"], state["enabled"], state["disarm_reason"] = mode, True, None
     save_autotrade_state(state)
