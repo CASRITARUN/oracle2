@@ -3144,11 +3144,16 @@ def news(symbol):
 #     Hard safety rails below (daily trade cap, daily loss cap, single-position-at-a-time, kill
 #     switch) exist specifically because of that — they are not optional and cannot be disabled
 #     from the UI.
-#   - This is a simple rules-based heuristic, not a proven or guaranteed-profitable strategy.
-#     Breakouts fail often (a "false breakout" is one of the most common ways to lose money in
-#     intraday trading). Past behavior of this logic on any symbol says nothing about future
-#     results. Only ever risk capital you can afford to lose, and watch your Zerodha app while
-#     Auto mode is armed.
+#   - Universe: either a hand-picked list, OR "scan_all_fo" mode, which rotates through the ENTIRE
+#     live F&O stock list (indices always included) a batch at a time, staying under Kite's
+#     historical-data rate limit -- see _effective_scan_universe().
+#   - Signal model: Donchian-channel breakout scored with THREE confirmation layers -- EMA9/21
+#     trend agreement, RSI(14) momentum, and continuous relative volume -- combined into one
+#     composite score. Still fully rules-based and transparent (see _detect_breakout()); it is
+#     NOT a proven or guaranteed-profitable strategy, and false breakouts remain one of the most
+#     common ways to lose money in intraday trading. Past behavior of this logic on any symbol
+#     says nothing about future results. Only ever risk capital you can afford to lose, and watch
+#     your Zerodha app while Auto mode is armed.
 # ---------------------------------------------------------------------------
 AUTOTRADE_FILE = os.path.join(os.path.dirname(__file__), "autotrade_state.json")
 AUTOTRADE_TRADES_FILE = os.path.join(os.path.dirname(__file__), "autotrade_trades.json")
@@ -3160,7 +3165,11 @@ AUTOTRADE_ACK_PHRASE = "I UNDERSTAND THIS PLACES REAL ORDERS AUTOMATICALLY"
 AUTOTRADE_DEFAULTS = {
     "enabled": False,                 # is the scan/execute loop armed at all
     "mode": "manual",                 # "manual" (show signal, wait for click) or "auto" (self-execute)
-    "universe": ["NIFTY", "BANKNIFTY", "FINNIFTY"],   # symbols to scan; add F&O stocks too if you want
+    "universe": ["NIFTY", "BANKNIFTY", "FINNIFTY"],   # symbols to scan when scan_all_fo is OFF
+    "scan_all_fo": False,             # when True, scans the ENTIRE live F&O stock universe (every
+                                       # NFO-OPT name) instead of just `universe` above -- see
+                                       # _effective_scan_universe() for how this is rate-limited
+    "_fo_scan_cursor": 0,             # internal: rotation position through the full F&O list
     "candle_interval": "5minute",
     "breakout_lookback": 20,          # candles in the Donchian channel
     "poll_seconds": 20,
@@ -3183,10 +3192,42 @@ AUTOTRADE_DEFAULTS = {
 }
 
 CONFIGURABLE_AUTOTRADE_KEYS = (
-    "universe", "candle_interval", "breakout_lookback", "poll_seconds", "max_trades_per_day",
-    "capital_per_trade", "max_daily_loss", "sl_pct_of_premium", "target_pct_of_premium",
-    "trail_after_pct", "trail_giveback_pct", "min_breakout_score", "square_off_time",
+    "universe", "scan_all_fo", "candle_interval", "breakout_lookback", "poll_seconds",
+    "max_trades_per_day", "capital_per_trade", "max_daily_loss", "sl_pct_of_premium",
+    "target_pct_of_premium", "trail_after_pct", "trail_giveback_pct", "min_breakout_score",
+    "square_off_time",
 )
+
+# --- "Scan all F&O stocks" mode ---
+# Kite's historical-data endpoint is rate-limited to roughly 3 requests/second. The live F&O stock
+# list is typically ~180-220 names, so scanning all of them in one go takes well over a minute and
+# would blow through that limit if it were retried every `poll_seconds`. Instead of scanning
+# everything every cycle, the loop rotates through the full list a chunk at a time (covering it all
+# every few minutes) and calls to Kite are staggered. The background loop also has a floor on how
+# often it's allowed to run while this mode is on.
+FO_SCAN_CHUNK_SIZE = 40            # symbols scanned per background poll cycle when scan_all_fo is on
+FO_SCAN_MIN_POLL_SECONDS = 45      # floor on poll_seconds while scan_all_fo is on
+HISTORICAL_CALL_STAGGER_SECONDS = 0.35   # ~2.8 req/sec between historical-data calls, under Kite's cap
+
+
+def _effective_scan_universe(state):
+    """Returns the symbols to scan THIS cycle. If scan_all_fo is off, that's just the configured
+    `universe`. If it's on, rotates through the full live F&O stock list (indices always included)
+    in FO_SCAN_CHUNK_SIZE-sized slices, advancing the cursor stored in state each call, so the
+    entire universe gets covered progressively across consecutive cycles rather than all at once."""
+    if not state.get("scan_all_fo"):
+        return state.get("universe") or list(AUTOTRADE_DEFAULTS["universe"])
+    try:
+        full = list(INDEX_SYMBOLS.keys()) + fo_stock_universe()
+    except Exception:
+        return state.get("universe") or list(AUTOTRADE_DEFAULTS["universe"])
+    if not full:
+        return state.get("universe") or list(AUTOTRADE_DEFAULTS["universe"])
+    cursor = state.get("_fo_scan_cursor", 0) % len(full)
+    rotated = full[cursor:] + full[:cursor]
+    chunk = rotated[:FO_SCAN_CHUNK_SIZE]
+    state["_fo_scan_cursor"] = (cursor + FO_SCAN_CHUNK_SIZE) % len(full)
+    return chunk
 
 
 def load_autotrade_state():
@@ -3239,19 +3280,55 @@ def _fetch_recent_intraday(symbol, interval, lookback):
     if err:
         return None, err
     to_date = datetime.now()
-    from_date = to_date - timedelta(days=5)
+    from_date = to_date - timedelta(days=7)  # a bit more history so EMA21/RSI14 have enough bars
     try:
         candles = kite.historical_data(token, from_date, to_date, interval)
     except Exception as e:
         return None, str(e)
-    if len(candles) < lookback + 5:
+    min_needed = max(lookback + 5, 30)
+    if len(candles) < min_needed:
         return None, "Not enough intraday candles yet today for a reliable channel"
     return candles, None
 
 
+def _ema(values, period):
+    """Simple exponential moving average over `values` (oldest-first), seeded with the first value."""
+    if len(values) < period:
+        return None
+    alpha = 2.0 / (period + 1)
+    ema = float(values[0])
+    for v in values[1:]:
+        ema = alpha * float(v) + (1 - alpha) * ema
+    return ema
+
+
+def _rsi(closes, period=14):
+    """Wilder-style RSI (simple-average variant) over the trailing `period` bars."""
+    closes = np.asarray(closes, dtype=float)
+    if len(closes) < period + 1:
+        return None
+    deltas = np.diff(closes[-(period + 1):])
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+    avg_gain, avg_loss = float(np.mean(gains)), float(np.mean(losses))
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1 + rs))
+
+
 def _detect_breakout(candles, lookback):
-    """Donchian-channel breakout: does the latest candle close outside the high/low range of the
-    PRIOR `lookback` candles, by a meaningful multiple of recent ATR? Returns None if no breakout."""
+    """Donchian-channel breakout PLUS three confirmation layers, combined into one transparent
+    composite score (still fully rules-based -- every input is echoed in `reasoning`, no black box):
+
+      1. Breakout size   -- how far the close is outside the prior `lookback`-candle range, in ATR.
+      2. Trend alignment -- EMA9 vs EMA21: does the breakout agree with the prevailing short-term
+                             trend, or is it a counter-trend poke that's more likely to fail?
+      3. Momentum        -- RSI(14): is momentum actually pushing the same direction as the break?
+      4. Relative volume -- today's bar's volume vs the recent average, scaled continuously instead
+                             of a blunt above/below-average flag.
+
+    Returns None if there's no breakout at all."""
     highs = np.array([c["high"] for c in candles], dtype=float)
     lows = np.array([c["low"] for c in candles], dtype=float)
     closes = np.array([c["close"] for c in candles], dtype=float)
@@ -3272,6 +3349,7 @@ def _detect_breakout(candles, lookback):
     prior_vol = volumes[-(lookback + 1):-1]
     avg_vol = float(np.mean(prior_vol)) if prior_vol.size else 0.0
     last_vol = float(volumes[-1])
+    rel_volume = round(last_vol / avg_vol, 2) if avg_vol > 0 else None
     vol_confirmed = (avg_vol == 0) or (last_vol >= avg_vol * 1.2)
 
     direction, breakout_level = None, None
@@ -3282,20 +3360,53 @@ def _detect_breakout(candles, lookback):
     if not direction:
         return None
 
-    score = round(abs(last_close - breakout_level) / atr, 2)
+    breakout_size_score = abs(last_close - breakout_level) / atr
+
+    ema_fast = _ema(closes[-min(len(closes), 60):], 9)
+    ema_slow = _ema(closes[-min(len(closes), 60):], 21)
+    trend_aligned = None
+    if ema_fast is not None and ema_slow is not None:
+        trend_aligned = (ema_fast > ema_slow) if direction == "CE" else (ema_fast < ema_slow)
+
+    rsi = _rsi(closes, 14)
+    momentum_aligned = None
+    if rsi is not None:
+        momentum_aligned = (rsi > 55) if direction == "CE" else (rsi < 45)
+
+    # Composite: breakout size is the base signal; trend agreement and momentum each scale it up,
+    # a counter-trend breakout gets heavily discounted (those fail far more often intraday), and
+    # relative volume scales it continuously rather than as a flat bonus.
+    composite = breakout_size_score
+    if trend_aligned is True:
+        composite *= 1.25
+    elif trend_aligned is False:
+        composite *= 0.6
+    if momentum_aligned is True:
+        composite *= 1.15
+    if rel_volume is not None:
+        composite *= min(max(rel_volume, 0.5), 2.5) / 1.2
+
+    score = round(composite, 2)
+
     return {
-        "direction": direction, "score": score, "breakout_level": round(breakout_level, 2),
-        "last_close": round(last_close, 2), "atr": round(atr, 2), "volume_confirmed": bool(vol_confirmed),
+        "direction": direction, "score": score, "breakout_size_atr": round(breakout_size_score, 2),
+        "breakout_level": round(breakout_level, 2), "last_close": round(last_close, 2),
+        "atr": round(atr, 2), "volume_confirmed": bool(vol_confirmed), "rel_volume": rel_volume,
+        "trend_aligned": trend_aligned, "momentum_aligned": momentum_aligned,
+        "rsi": round(rsi, 1) if rsi is not None else None,
         "channel_high": round(channel_high, 2), "channel_low": round(channel_low, 2),
     }
 
 
 def scan_breakouts(universe, interval, lookback):
-    """Ranked, fully-transparent list of breakout candidates across the configured universe.
-    Every candidate carries a plain-English `reasoning` string -- this IS the "why" shown in the UI,
-    there is no hidden model behind it."""
+    """Ranked, fully-transparent list of breakout candidates across the given universe. Every
+    candidate carries a plain-English `reasoning` string -- this IS the "why" shown in the UI, there
+    is no hidden model behind it. Calls are staggered to stay under Kite's historical-data rate
+    limit when scanning long lists (e.g. the full F&O universe)."""
     candidates, errors = [], []
-    for symbol in universe:
+    for idx, symbol in enumerate(universe):
+        if idx > 0:
+            time.sleep(HISTORICAL_CALL_STAGGER_SECONDS)
         candles, err = _fetch_recent_intraday(symbol, interval, lookback)
         if err:
             errors.append(f"{symbol}: {err}")
@@ -3305,251 +3416,26 @@ def scan_breakouts(universe, interval, lookback):
             continue
         result["symbol"] = symbol
         direction_word = "broke above" if result["direction"] == "CE" else "broke below"
+        trend_note = ("EMA9/21 trend agrees" if result["trend_aligned"] is True else
+                       "EMA9/21 trend disagrees (counter-trend, discounted)" if result["trend_aligned"] is False
+                       else "trend unavailable")
+        momentum_note = (f"RSI {result['rsi']} agrees" if result["momentum_aligned"] is True else
+                          f"RSI {result['rsi']} disagrees" if result["momentum_aligned"] is False
+                          else "RSI unavailable")
+        vol_note = (f"relative volume {result['rel_volume']}x average" if result["rel_volume"] is not None
+                    else "no average-volume baseline yet")
         result["reasoning"] = (
-            f"{symbol}: price {direction_word} its {lookback}-candle range "
-            f"({result['breakout_level']}), now at {result['last_close']} -- a move of "
-            f"{result['score']}x average true range" +
-            (", with above-average volume confirming it." if result["volume_confirmed"]
-             else ", but volume was NOT above average (weaker signal).")
+            f"{symbol}: price {direction_word} its {lookback}-candle range ({result['breakout_level']}), "
+            f"now at {result['last_close']} -- {result['breakout_size_atr']}x ATR raw move; "
+            f"{trend_note}; {momentum_note}; {vol_note}. Composite score {result['score']}."
         )
         candidates.append(result)
-    candidates.sort(key=lambda c: (c["volume_confirmed"], c["score"]), reverse=True)
+    candidates.sort(key=lambda c: c["score"], reverse=True)
     return candidates, errors
 
 
 def _build_autotrade_order(candidate_symbol, direction, capital_per_trade):
     return _build_autotrade_order_impl(candidate_symbol, direction, capital_per_trade)
-
-
-# ---------------------------------------------------------------------------
-# Backtest — replays the SAME breakout rule against real historical spot candles.
-# ---------------------------------------------------------------------------
-# IMPORTANT LIMITATION, read before trusting any number below: Kite's API does not expose
-# historical tick/order-book data for EXPIRED weekly/monthly option contracts, only for
-# instruments currently listed. So there is no way to backtest against real historical option
-# prices here. Instead, each simulated trade's option premium is ESTIMATED with Black-Scholes,
-# fed by the REAL historical spot price path plus a realized-volatility estimate computed from
-# that same price history (or a value you override). Lot sizes use each symbol's CURRENT lot
-# size (lot sizes don't change often, so this is a reasonable stand-in for the past). Charges use
-# the exact same brokerage/STT/exchange/SEBI/GST/stamp-duty model as live trading.
-# This is a sanity check of the breakout RULE's behavior over history -- not a precise recreation
-# of what you would actually have been filled at, which also depends on bid-ask spread and
-# slippage that aren't modeled here.
-INTRADAY_MINUTES_PER_DAY = 375  # NSE cash/F&O session length, 09:15-15:30
-
-
-def _interval_minutes(interval):
-    return {"5minute": 5, "15minute": 15, "60minute": 60}.get(interval, 5)
-
-
-def _bars_per_year(interval):
-    bars_per_day = INTRADAY_MINUTES_PER_DAY / _interval_minutes(interval)
-    return bars_per_day * 252
-
-
-STRIKE_STEP_OVERRIDES = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25}
-
-
-def _strike_step_for(symbol, spot):
-    if symbol in STRIKE_STEP_OVERRIDES:
-        return STRIKE_STEP_OVERRIDES[symbol]
-    if spot < 250:
-        return 5
-    if spot < 1000:
-        return 10
-    if spot < 2500:
-        return 20
-    return 50
-
-
-def _round_to_strike(spot, step):
-    return round(spot / step) * step
-
-
-def _lookup_current_lot_size(symbol):
-    nfo, _ = get_instruments()
-    match = next((i for i in nfo if i["name"] == symbol and i["segment"] == "NFO-OPT"), None)
-    return match["lot_size"] if match else 1
-
-
-def _group_candles_by_day(candles):
-    days = {}
-    for c in candles:
-        d = c["date"]
-        day_key = d.date() if hasattr(d, "date") else str(d)[:10]
-        days.setdefault(day_key, []).append(c)
-    return days
-
-
-def run_breakout_backtest(symbols, interval, lookback, days_back, cfg):
-    """Bar-by-bar simulation of the exact same _detect_breakout() rule the live engine uses,
-    one trading day at a time (the channel resets fresh each day, same as intraday breakout
-    trading in practice). Returns (trades, notes)."""
-    all_trades, notes = [], []
-    for symbol in symbols:
-        token, err = resolve_token_for_symbol(symbol)
-        if err:
-            notes.append(f"{symbol}: {err}")
-            continue
-        to_date = datetime.now()
-        from_date = to_date - timedelta(days=days_back + 3)
-        try:
-            candles = kite.historical_data(token, from_date, to_date, interval)
-        except Exception as e:
-            notes.append(f"{symbol}: {e}")
-            continue
-        if len(candles) < lookback + 10:
-            notes.append(f"{symbol}: not enough history returned for this interval/lookback")
-            continue
-
-        closes_all = np.array([c["close"] for c in candles], dtype=float)
-        log_rets = np.diff(np.log(closes_all))
-        if cfg.get("assumed_iv_pct"):
-            sigma = cfg["assumed_iv_pct"] / 100.0
-        else:
-            raw_sigma = float(np.std(log_rets) * math.sqrt(_bars_per_year(interval))) if len(log_rets) > 5 else 0.18
-            sigma = max(0.08, min(raw_sigma, 1.2))  # sanity clamp -- avoids degenerate 0% or 1000%+ IV
-
-        lot_size = _lookup_current_lot_size(symbol)
-        by_day = _group_candles_by_day(candles)
-
-        for day_key, day_candles in sorted(by_day.items()):
-            if len(day_candles) < lookback + 3:
-                continue
-            open_trade = None
-            for i in range(lookback, len(day_candles)):
-                bar = day_candles[i]
-                bar_time = bar["date"]
-                bar_hm = bar_time.strftime("%H:%M") if hasattr(bar_time, "strftime") else "00:00"
-                window = day_candles[max(0, i - lookback):i + 1]
-
-                if open_trade is None:
-                    if bar_hm >= cfg["square_off_time"]:
-                        continue
-                    signal = _detect_breakout(window, lookback)
-                    if not signal or signal["score"] < cfg["min_breakout_score"]:
-                        continue
-                    if cfg.get("require_volume_confirmation", True) and not signal["volume_confirmed"]:
-                        continue
-                    spot_entry = bar["close"]
-                    step = _strike_step_for(symbol, spot_entry)
-                    strike = _round_to_strike(spot_entry, step)
-                    T_entry = max(cfg["assumed_days_to_expiry"], 0.5) / 365.0
-                    premium_entry = bs_price(spot_entry, strike, T_entry, RISK_FREE_RATE, sigma, signal["direction"])
-                    if premium_entry <= 0.5:
-                        continue
-                    lots = max(1, int(cfg["capital_per_trade"] // (premium_entry * lot_size)))
-                    open_trade = {
-                        "symbol": symbol, "day": str(day_key), "direction": signal["direction"], "strike": strike,
-                        "entry_time": str(bar_time), "entry_bar_index": i, "entry_spot": round(spot_entry, 2),
-                        "entry_premium": round(premium_entry, 2),
-                        "sl_price": round(premium_entry * (1 - cfg["sl_pct_of_premium"] / 100.0), 2),
-                        "target_price": round(premium_entry * (1 + cfg["target_pct_of_premium"] / 100.0), 2),
-                        "trail_active": False, "quantity": lots * lot_size, "lot_size": lot_size,
-                        "reasoning": signal["reasoning"], "sigma_used_pct": round(sigma * 100, 1),
-                    }
-                    continue
-
-                minutes_elapsed = (i - open_trade["entry_bar_index"]) * _interval_minutes(interval)
-                elapsed_days = minutes_elapsed / (24 * 60)
-                T_remaining = max(cfg["assumed_days_to_expiry"] - elapsed_days, 0.05) / 365.0
-                premium_now = bs_price(bar["close"], open_trade["strike"], T_remaining, RISK_FREE_RATE, sigma,
-                                        open_trade["direction"])
-                pnl_pct = (premium_now / open_trade["entry_premium"] - 1) * 100.0
-                if pnl_pct >= cfg["trail_after_pct"]:
-                    new_sl = open_trade["entry_premium"] * (1 + (pnl_pct - cfg["trail_giveback_pct"]) / 100.0)
-                    if new_sl > open_trade["sl_price"]:
-                        open_trade["sl_price"], open_trade["trail_active"] = round(new_sl, 2), True
-
-                reason = None
-                if premium_now <= open_trade["sl_price"]:
-                    reason = "Trailing stop hit" if open_trade["trail_active"] else "Stop loss hit"
-                elif premium_now >= open_trade["target_price"] and not open_trade["trail_active"]:
-                    reason = "Target hit"
-                elif bar_hm >= cfg["square_off_time"] or i == len(day_candles) - 1:
-                    reason = "End-of-day square-off"
-
-                if reason:
-                    exit_premium = round(premium_now, 2)
-                    quantity = open_trade["quantity"]
-                    gross_pnl = round((exit_premium - open_trade["entry_premium"]) * quantity, 2)
-                    entry_charges = estimate_charges([{"price": open_trade["entry_premium"], "quantity": quantity,
-                                                        "transaction_type": "BUY"}])
-                    exit_charges = estimate_charges([{"price": exit_premium, "quantity": quantity,
-                                                       "transaction_type": "SELL"}])
-                    total_charges = round(entry_charges["total"] + exit_charges["total"], 2)
-                    all_trades.append({
-                        **open_trade, "exit_time": str(bar_time), "exit_spot": round(bar["close"], 2),
-                        "exit_premium": exit_premium, "exit_reason": reason, "gross_pnl": gross_pnl,
-                        "charges": total_charges, "net_pnl": round(gross_pnl - total_charges, 2),
-                    })
-                    open_trade = None
-    return all_trades, notes
-
-
-def summarize_backtest(trades):
-    if not trades:
-        return {"total_trades": 0}
-    ordered = sorted(trades, key=lambda t: t["entry_time"])
-    net_pnls = [t["net_pnl"] for t in ordered]
-    wins = [p for p in net_pnls if p > 0]
-    losses = [p for p in net_pnls if p <= 0]
-    equity, peak, max_drawdown, equity_curve = 0.0, 0.0, 0.0, []
-    for t in ordered:
-        equity += t["net_pnl"]
-        peak = max(peak, equity)
-        max_drawdown = min(max_drawdown, equity - peak)
-        equity_curve.append({"time": t["exit_time"], "equity": round(equity, 2)})
-    return {
-        "total_trades": len(ordered), "wins": len(wins), "losses": len(losses),
-        "win_rate_pct": round(len(wins) / len(ordered) * 100, 1),
-        "gross_pnl": round(sum(t["gross_pnl"] for t in ordered), 2),
-        "total_charges": round(sum(t["charges"] for t in ordered), 2),
-        "net_pnl": round(sum(net_pnls), 2),
-        "avg_win": round(sum(wins) / len(wins), 2) if wins else 0,
-        "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0,
-        "best_trade": round(max(net_pnls), 2), "worst_trade": round(min(net_pnls), 2),
-        "max_drawdown": round(max_drawdown, 2),
-        "profit_factor": round(sum(wins) / abs(sum(losses)), 2) if losses and sum(losses) != 0 else None,
-        "equity_curve": equity_curve,
-    }
-
-
-@app.route("/api/autotrade/backtest", methods=["POST"])
-def autotrade_backtest():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    symbols = [s.strip().upper() for s in (body.get("universe") or ["NIFTY"]) if s.strip()]
-    interval = body.get("candle_interval", "5minute")
-    if interval not in INTERVAL_MAX_DAYS:
-        return jsonify({"error": f"Unsupported interval. Use one of: {', '.join(INTERVAL_MAX_DAYS)}"}), 400
-    lookback = int(body.get("breakout_lookback", 20))
-    days_back = min(int(body.get("days", 20)), INTERVAL_MAX_DAYS[interval])
-    cfg = {
-        "min_breakout_score": float(body.get("min_breakout_score", 0.5)),
-        "require_volume_confirmation": bool(body.get("require_volume_confirmation", True)),
-        "capital_per_trade": float(body.get("capital_per_trade", 15000)),
-        "sl_pct_of_premium": float(body.get("sl_pct_of_premium", 30)),
-        "target_pct_of_premium": float(body.get("target_pct_of_premium", 60)),
-        "trail_after_pct": float(body.get("trail_after_pct", 30)),
-        "trail_giveback_pct": float(body.get("trail_giveback_pct", 15)),
-        "square_off_time": body.get("square_off_time", "15:15"),
-        "assumed_days_to_expiry": float(body.get("assumed_days_to_expiry", 3)),
-        "assumed_iv_pct": float(body["assumed_iv_pct"]) if body.get("assumed_iv_pct") else None,
-    }
-    trades, notes = run_breakout_backtest(symbols, interval, lookback, days_back, cfg)
-    return jsonify({
-        "summary": summarize_backtest(trades), "trades": trades, "notes": notes,
-        "params": {**cfg, "universe": symbols, "candle_interval": interval, "breakout_lookback": lookback,
-                   "days_back": days_back},
-        "disclaimer": ("Option premiums are Black-Scholes ESTIMATES from real historical spot prices and a "
-                       "realized-volatility estimate (or your override) -- Kite does not expose real historical "
-                       "option order-book data for expired contracts, so no backtest anywhere can fully replay "
-                       "actual historical fills. Lot sizes use each symbol's CURRENT lot size. Charges use the "
-                       "same brokerage/STT/exchange/SEBI/GST/stamp-duty model as live trading. Treat this as a "
-                       "sanity check of the breakout RULE's behavior, not a guarantee of future results."),
-    })
 
 
 def _build_autotrade_order_impl(symbol, direction, capital_per_trade):
@@ -3684,15 +3570,20 @@ def _autotrade_loop():
 
                 if (state["enabled"] and not has_open and within_hours
                         and state.get("trades_today", 0) < state.get("max_trades_per_day", 3)):
-                    candidates, errors = scan_breakouts(state["universe"], state["candle_interval"],
+                    scan_universe = _effective_scan_universe(state)
+                    candidates, errors = scan_breakouts(scan_universe, state["candle_interval"],
                                                          state["breakout_lookback"])
                     state["last_scan_at"] = datetime.now().isoformat()
                     state["last_scan_candidates"] = candidates[:10]
+                    state["last_scan_universe_size"] = len(scan_universe)
                     state["last_error"] = "; ".join(errors[:3]) if errors else state.get("last_error")
                     changed = True
 
+                    # Advanced qualification: strong enough composite score, NOT counter-trend
+                    # (trend_aligned is False), and at least one of volume/momentum confirming.
                     best = next((c for c in candidates if c["score"] >= state.get("min_breakout_score", 0.5)
-                                 and c["volume_confirmed"]), None)
+                                 and c.get("trend_aligned") is not False
+                                 and (c["volume_confirmed"] or c.get("momentum_aligned"))), None)
                     if best and state["mode"] == "auto":
                         trade, err = _execute_autotrade_entry(best, state)
                         if trade:
@@ -3705,6 +3596,8 @@ def _autotrade_loop():
                     save_autotrade_state(state)
                     save_autotrade_trades(trades)
                 sleep_for = state.get("poll_seconds", 20)
+                if state.get("scan_all_fo"):
+                    sleep_for = max(sleep_for, FO_SCAN_MIN_POLL_SECONDS)
         except Exception as e:
             logger.exception("autotrade loop error")
             try:
@@ -3797,8 +3690,19 @@ def autotrade_scan():
     if not require_session():
         return jsonify({"error": "not_logged_in"}), 401
     state = load_autotrade_state()
-    candidates, errors = scan_breakouts(state["universe"], state["candle_interval"], state["breakout_lookback"])
-    return jsonify({"candidates": candidates, "errors": errors})
+    if state.get("scan_all_fo"):
+        # Explicit, on-demand "Scan now" click -- OK to scan the whole live F&O list in one go
+        # (unlike the background loop, this isn't repeated every poll_seconds); calls are still
+        # staggered inside scan_breakouts() to respect Kite's rate limit, so this can take up to
+        # roughly a minute for the full universe.
+        try:
+            universe = list(INDEX_SYMBOLS.keys()) + fo_stock_universe()
+        except Exception as e:
+            return jsonify({"error": f"Could not load full F&O universe: {e}"}), 500
+    else:
+        universe = state["universe"]
+    candidates, errors = scan_breakouts(universe, state["candle_interval"], state["breakout_lookback"])
+    return jsonify({"candidates": candidates, "errors": errors, "universe_size": len(universe)})
 
 
 @app.route("/api/autotrade/execute-signal", methods=["POST"])
