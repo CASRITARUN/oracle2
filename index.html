@@ -557,17 +557,31 @@
     <h2>Settings</h2>
     <div class="row" style="align-items:flex-start;">
       <div>
-        <label class="inline">Universe — indices &amp; F&amp;O stocks
-          <input type="text" id="autoUniverseInput" list="foUniverseList" placeholder="type to search, e.g. RELIANCE" style="width:220px;" />
-          <button class="secondary small-btn" onclick="addAutoUniverseSymbol()">Add</button>
+        <label class="inline" style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="autoScanAllFo" onchange="onScanAllFoToggle()" />
+          Scan the entire F&amp;O stock universe automatically (ignore the manual list below)
         </label>
-        <datalist id="foUniverseList"></datalist>
-        <div id="autoUniverseTags" class="row" style="margin-top:8px;"></div>
-        <div class="legend" style="margin-top:4px;">
-          Stock options are usually monthly-expiry only (indices also get weekly) and can be far less
-          liquid than NIFTY/BANKNIFTY — wider bid-ask spreads mean your real fill may be noticeably
-          worse than the LTP shown. Consider a smaller budget per trade for stocks until you've
-          watched a few go through.
+        <div class="legend" style="margin-top:4px; max-width:640px;">
+          Scans every live F&amp;O stock (~180-220 names) instead of a hand-picked list. Kite's
+          historical-data API is rate-limited (~3 requests/sec), so the full list is scanned in
+          rotating batches of <span id="foChunkSizeNote">40</span> a cycle — it fully cycles through
+          every name every few minutes rather than all at once. While this is on, the background
+          poll interval is floored at <span id="foMinPollNote">45s</span> regardless of the setting
+          below, and a manual "Scan now" click does a single full pass (can take up to ~a minute).
+        </div>
+        <div id="autoManualUniverseBox" style="margin-top:10px;">
+          <label class="inline">Universe — indices &amp; F&amp;O stocks
+            <input type="text" id="autoUniverseInput" list="foUniverseList" placeholder="type to search, e.g. RELIANCE" style="width:220px;" />
+            <button class="secondary small-btn" onclick="addAutoUniverseSymbol()">Add</button>
+          </label>
+          <datalist id="foUniverseList"></datalist>
+          <div id="autoUniverseTags" class="row" style="margin-top:8px;"></div>
+          <div class="legend" style="margin-top:4px;">
+            Stock options are usually monthly-expiry only (indices also get weekly) and can be far less
+            liquid than NIFTY/BANKNIFTY — wider bid-ask spreads mean your real fill may be noticeably
+            worse than the LTP shown. Consider a smaller budget per trade for stocks until you've
+            watched a few go through.
+          </div>
         </div>
       </div>
       <label class="inline">Candle interval
@@ -595,10 +609,26 @@
 
   <div class="panel">
     <h2>Real-time chart</h2>
-    <div class="row">
-      <select id="autoChartSymbol"></select>
-      <span class="loading" id="autoChartStatus"></span>
+    <div class="row" style="align-items:flex-end; gap:14px;">
+      <label class="inline">Symbol <select id="autoChartSymbol"></select></label>
+      <label class="inline">Interval
+        <select id="autoChartInterval">
+          <option value="5minute">5 min</option>
+          <option value="15minute">15 min</option>
+          <option value="60minute">60 min</option>
+        </select>
+      </label>
+      <label class="inline">Lookback days <input type="number" id="autoChartDays" value="3" min="1" max="30" style="width:60px;" /></label>
       <label class="inline"><input type="checkbox" id="autoChartLive" checked /> Live refresh (10s)</label>
+      <button class="secondary small-btn" onclick="loadAutoChart()">Refresh</button>
+      <span class="loading" id="autoChartStatus"></span>
+    </div>
+    <div class="row" style="margin-top:6px;">
+      <span class="legend" style="display:inline-flex; align-items:center; gap:6px;">
+        <span style="width:10px; height:10px; border-radius:2px; background:#34c77b; display:inline-block;"></span> Up candle
+        <span style="width:10px; height:10px; border-radius:2px; background:#e5484d; display:inline-block; margin-left:10px;"></span> Down candle
+        — bars are shown back-to-back by trading session (no gaps for closed-market hours).
+      </span>
     </div>
     <div class="chart-wrap"><canvas id="autoChartCanvas"></canvas></div>
   </div>
@@ -610,7 +640,7 @@
       <span class="loading" id="autoScanStatus"></span>
     </div>
     <table id="autoScanTable" style="margin-top:12px; display:none;">
-      <thead><tr><th>Symbol</th><th>Direction</th><th>Strength</th><th>Volume</th><th>Reasoning</th><th></th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Direction</th><th>Score</th><th>Trend</th><th>RSI</th><th>Volume</th><th>Reasoning</th><th></th></tr></thead>
       <tbody id="autoScanBody"></tbody>
     </table>
     <div class="legend" id="autoScanEmpty">No breakout candidates yet — click "Scan now" or arm the loop above.</div>
@@ -621,36 +651,6 @@
     <div id="autoOpenPositionBox">
       <div class="legend">No auto-trade position currently open.</div>
     </div>
-  </div>
-
-  <div class="panel">
-    <h2>Backtest</h2>
-    <div class="warn-box" style="margin-top:0;">
-      Kite doesn't expose historical order-book data for expired option contracts, so premiums here
-      are Black-Scholes <b>estimates</b> from real historical spot prices + a realized-volatility
-      estimate (editable below) — not a replay of actual historical fills. Lot sizes use each
-      symbol's current lot size. Charges use the same brokerage/STT/exchange/SEBI/GST/stamp-duty
-      model as live trading. Treat results as a sanity check of the breakout <i>rule</i>, not a
-      promise about the future.
-    </div>
-    <div class="row" style="margin-top:10px;">
-      <label class="inline">Lookback (days) <input type="number" id="btDays" value="20" min="1" max="30" /></label>
-      <label class="inline">Assumed days-to-expiry <input type="number" id="btDte" value="3" min="0.5" max="30" step="0.5" /></label>
-      <label class="inline">Assumed IV % (blank = auto) <input type="number" id="btIv" placeholder="auto" min="1" max="200" /></label>
-      <label class="inline"><input type="checkbox" id="btRequireVol" checked /> Require volume confirmation</label>
-    </div>
-    <div class="row" style="margin-top:10px;">
-      <button onclick="runAutoTradeBacktest()">Run backtest</button>
-      <span class="loading" id="btStatus"></span>
-    </div>
-    <div id="btDisclaimer" class="legend" style="display:none; margin-top:10px;"></div>
-    <div class="metric-row" id="btSummaryRow" style="display:none; margin-top:12px;"></div>
-    <div class="chart-wrap" id="btEquityWrap" style="display:none; height:220px;"><canvas id="btEquityCanvas"></canvas></div>
-    <table id="btTradesTable" style="margin-top:14px; display:none;">
-      <thead><tr><th>Day</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Gross</th><th>Charges</th><th>Net</th><th>Reason</th></tr></thead>
-      <tbody id="btTradesBody"></tbody>
-    </table>
-    <div class="legend" id="btEmpty">No backtest run yet.</div>
   </div>
 
   <div class="panel">
@@ -1628,6 +1628,37 @@ function exitSingleLivePosition(idx) { exitLivePositions([livePositions[idx]]); 
 document.getElementById("refreshPositionsBtn").onclick = loadBrokerPositions;
 document.getElementById("exitSelectedBtn").onclick = () => exitLivePositions(livePositions.filter(p => p._selected));
 
+// ---------- Shared candlestick helpers ----------
+// Candles are plotted back-to-back by INDEX rather than by real timestamp. A time-scale axis
+// leaves big empty gaps for every night/weekend the market is closed, which is what made the
+// chart look broken/confusing. Indexing removes the gaps; the axis ticks below still show real
+// dates/times, just evenly spaced.
+function formatCandleTick(tMillis, interval) {
+  const d = new Date(tMillis);
+  const datePart = d.toLocaleDateString([], { day: "2-digit", month: "short" });
+  if (interval === "day") return datePart;
+  const timePart = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${datePart} ${timePart}`;
+}
+
+function buildIndexedCandles(candles, interval) {
+  const labels = candles.map(c => formatCandleTick(new Date(c.t).getTime(), interval));
+  const data = candles.map((c, i) => ({ x: i, o: c.o, h: c.h, l: c.l, c: c.c }));
+  return { labels, data };
+}
+
+function indexedXScale(labels) {
+  return {
+    type: "linear",
+    min: 0, max: Math.max(labels.length - 1, 1),
+    ticks: {
+      color: "#8b93a3", maxTicksLimit: 8, autoSkip: true,
+      callback: (val) => labels[Math.round(val)] ?? ""
+    },
+    grid: { color: "#262b36" }
+  };
+}
+
 // ---------- Price chart (candlestick) ----------
 document.getElementById("chartBtn").onclick = async () => {
   const sym = document.getElementById("chartSymbolInput").value.trim().toUpperCase();
@@ -1655,7 +1686,7 @@ document.getElementById("chartBtn").onclick = async () => {
       }
     } catch (e) {}
 
-    const candleData = d.candles.map(c => ({ x: new Date(c.t).getTime(), o: c.o, h: c.h, l: c.l, c: c.c }));
+    const { labels, data: candleData } = buildIndexedCandles(d.candles, interval);
     const datasets = [{
       label: sym, data: candleData, type: "candlestick",
       color: { up: "#34c77b", down: "#e5484d", unchanged: "#8b93a3" }
@@ -1677,8 +1708,7 @@ document.getElementById("chartBtn").onclick = async () => {
       options: {
         responsive: true, maintainAspectRatio: false,
         scales: {
-          x: { type: "time", time: { unit: interval === "day" ? "day" : "hour" },
-               ticks: { color: "#8b93a3", maxTicksLimit: 8 }, grid: { color: "#262b36" } },
+          x: indexedXScale(labels),
           y: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } }
         },
         plugins: { legend: { labels: { color: "#e6e8ec" } } }
@@ -2181,7 +2211,10 @@ function removeAutoUniverseSymbol(sym) {
 function initAutoTradeTab() {
   loadFoUniverseOptions();
   renderAutoUniverseTags();
+  onScanAllFoToggle();
   document.getElementById("autoChartSymbol").onchange = loadAutoChart;
+  document.getElementById("autoChartInterval").onchange = loadAutoChart;
+  document.getElementById("autoChartDays").onchange = loadAutoChart;
   document.getElementById("autoUniverseInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); addAutoUniverseSymbol(); }
   });
@@ -2239,9 +2272,16 @@ async function closeAllAutoTrades() {
   } catch (e) { alert("Request failed: " + e); }
 }
 
+function onScanAllFoToggle() {
+  const on = document.getElementById("autoScanAllFo").checked;
+  document.getElementById("autoManualUniverseBox").style.opacity = on ? "0.45" : "1";
+  document.getElementById("autoManualUniverseBox").style.pointerEvents = on ? "none" : "auto";
+}
+
 async function saveAutoConfig() {
   const body = {
     universe: autoUniverseSymbols,
+    scan_all_fo: document.getElementById("autoScanAllFo").checked,
     candle_interval: document.getElementById("autoInterval").value,
     breakout_lookback: Number(document.getElementById("autoLookback").value),
     poll_seconds: Number(document.getElementById("autoPoll").value),
@@ -2305,6 +2345,16 @@ async function pollAutoTradeState() {
       autoUniverseSymbols = s.universe.slice();
       renderAutoUniverseTags();
     }
+    if (!window.__scanAllFoSyncedOnce) {
+      window.__scanAllFoSyncedOnce = true;
+      document.getElementById("autoScanAllFo").checked = !!s.scan_all_fo;
+      onScanAllFoToggle();
+    }
+    if (s.scan_all_fo && s.last_scan_universe_size) {
+      document.getElementById("autoLastScan").textContent =
+        (s.last_scan_at ? new Date(s.last_scan_at).toLocaleTimeString() : "—") +
+        ` (${s.last_scan_universe_size} scanned this cycle)`;
+    }
     renderAutoScanTable(autoLastCandidates, s.mode);
     renderAutoOpenPosition(d.open_trades && d.open_trades[0]);
     renderAutoLog(d.recent_trades || []);
@@ -2320,11 +2370,16 @@ function renderAutoScanTable(candidates, mode) {
   tbody.innerHTML = "";
   candidates.forEach((c, idx) => {
     const dirClass = c.direction === "CE" ? "buy" : "sell";
+    const trendPill = c.trend_aligned === true ? '<span class="pill ok">aligned</span>'
+      : c.trend_aligned === false ? '<span class="pill warn">counter</span>'
+      : '<span class="legend">n/a</span>';
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${c.symbol}</td>
       <td class="${dirClass}">${c.direction === "CE" ? "Bullish breakout (buy CE)" : "Bearish breakdown (buy PE)"}</td>
-      <td>${c.score}x ATR</td>
+      <td>${c.score}</td>
+      <td>${trendPill}</td>
+      <td>${c.rsi != null ? c.rsi : "—"}</td>
       <td>${c.volume_confirmed ? '<span class="pill ok">confirmed</span>' : '<span class="pill warn">weak</span>'}</td>
       <td style="font-size:12px; color:var(--muted); max-width:340px;">${c.reasoning}</td>
       <td>${mode === "manual" ? `<button class="small-btn" onclick="executeAutoSignal(${idx})">Execute</button>` : "<span class=\"legend\">auto-executes</span>"}</td>`;
@@ -2411,13 +2466,15 @@ async function loadAutoChart() {
   const status = document.getElementById("autoChartStatus");
   const loggedIn = await checkSession();
   if (!loggedIn) { status.textContent = "Connect your Kite account first."; return; }
+  const interval = document.getElementById("autoChartInterval").value;
+  const days = document.getElementById("autoChartDays").value || 3;
   status.textContent = "Loading...";
   try {
-    const r = await apiFetch(`/api/chart/${sym}?interval=5minute&days=5`);
+    const r = await apiFetch(`/api/chart/${sym}?interval=${interval}&days=${days}`);
     const d = await r.json();
     if (d.error) { status.textContent = "Error: " + d.error; return; }
     if (!d.candles.length) { status.textContent = "No candle data returned."; return; }
-    const candleData = d.candles.map(c => ({ x: new Date(c.t).getTime(), o: c.o, h: c.h, l: c.l, c: c.c }));
+    const { labels, data: candleData } = buildIndexedCandles(d.candles, interval);
     const datasets = [{
       label: sym, data: candleData, type: "candlestick",
       color: { up: "#34c77b", down: "#e5484d", unchanged: "#8b93a3" }
@@ -2430,117 +2487,15 @@ async function loadAutoChart() {
       options: {
         responsive: true, maintainAspectRatio: false,
         scales: {
-          x: { type: "time", time: { unit: "hour" }, ticks: { color: "#8b93a3", maxTicksLimit: 8 }, grid: { color: "#262b36" } },
+          x: indexedXScale(labels),
           y: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } }
         },
         plugins: { legend: { labels: { color: "#e6e8ec" } } }
       }
     });
-    status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    status.textContent = `Updated ${new Date().toLocaleTimeString()}` +
+      (d.clamped_to_days ? ` (lookback clamped to ${d.clamped_to_days}d for this interval)` : "");
   } catch (e) { status.textContent = "Request failed: " + e; }
-}
-let btEquityChartInstance = null;
-
-async function runAutoTradeBacktest() {
-  const status = document.getElementById("btStatus");
-  const loggedIn = await checkSession();
-  if (!loggedIn) { status.textContent = "Connect your Kite account first."; return; }
-  status.textContent = "Running backtest — this can take a little while for wide date ranges...";
-  const body = {
-    universe: autoUniverseSymbols,
-    candle_interval: document.getElementById("autoInterval").value,
-    breakout_lookback: Number(document.getElementById("autoLookback").value),
-    days: Number(document.getElementById("btDays").value),
-    min_breakout_score: Number(document.getElementById("autoMinScore").value),
-    require_volume_confirmation: document.getElementById("btRequireVol").checked,
-    capital_per_trade: Number(document.getElementById("autoCapital").value),
-    sl_pct_of_premium: Number(document.getElementById("autoSlPct").value),
-    target_pct_of_premium: Number(document.getElementById("autoTargetPct").value),
-    trail_after_pct: Number(document.getElementById("autoTrailAfter").value),
-    trail_giveback_pct: Number(document.getElementById("autoTrailGiveback").value),
-    square_off_time: document.getElementById("autoSquareOff").value.trim(),
-    assumed_days_to_expiry: Number(document.getElementById("btDte").value),
-  };
-  const ivVal = document.getElementById("btIv").value;
-  if (ivVal) body.assumed_iv_pct = Number(ivVal);
-
-  try {
-    const r = await apiFetch("/api/autotrade/backtest", {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
-    });
-    const d = await r.json();
-    if (d.error) { status.textContent = "Error: " + d.error; return; }
-    status.textContent = d.notes && d.notes.length ? `Done, with notes: ${d.notes.join(" | ")}` : "Done.";
-    document.getElementById("btDisclaimer").style.display = "block";
-    document.getElementById("btDisclaimer").textContent = d.disclaimer;
-    renderBacktestSummary(d.summary);
-    renderBacktestEquityCurve(d.summary.equity_curve || []);
-    renderBacktestTrades(d.trades || []);
-  } catch (e) { status.textContent = "Request failed: " + e; }
-}
-
-function renderBacktestSummary(s) {
-  const row = document.getElementById("btSummaryRow");
-  const empty = document.getElementById("btEmpty");
-  if (!s || !s.total_trades) {
-    row.style.display = "none"; empty.style.display = "block"; empty.textContent = "No qualifying breakout trades found over this window — try a wider lookback or lower min breakout score.";
-    return;
-  }
-  empty.style.display = "none"; row.style.display = "flex";
-  const netClass = s.net_pnl >= 0 ? "profit" : "loss";
-  const pnlValClass = s.net_pnl >= 0 ? "pnl-pos" : "pnl-neg";
-  row.innerHTML = `
-    <div class="metric"><div class="k">Trades</div><div class="v">${s.total_trades}</div></div>
-    <div class="metric"><div class="k">Win rate</div><div class="v">${s.win_rate_pct}%</div></div>
-    <div class="metric"><div class="k">Gross P&amp;L</div><div class="v">₹${s.gross_pnl}</div></div>
-    <div class="metric"><div class="k">Total charges</div><div class="v">₹${s.total_charges}</div></div>
-    <div class="metric ${netClass}"><div class="k">Net P&amp;L (after charges)</div><div class="v ${pnlValClass}">₹${s.net_pnl}</div></div>
-    <div class="metric"><div class="k">Max drawdown</div><div class="v">₹${s.max_drawdown}</div></div>
-    <div class="metric"><div class="k">Profit factor</div><div class="v">${s.profit_factor ?? '—'}</div></div>
-    <div class="metric"><div class="k">Best / worst trade</div><div class="v" style="font-size:14px;">₹${s.best_trade} / ₹${s.worst_trade}</div></div>`;
-}
-
-function renderBacktestEquityCurve(curve) {
-  const wrap = document.getElementById("btEquityWrap");
-  if (!curve.length) { wrap.style.display = "none"; return; }
-  wrap.style.display = "block";
-  if (btEquityChartInstance) btEquityChartInstance.destroy();
-  const ctx = document.getElementById("btEquityCanvas").getContext("2d");
-  btEquityChartInstance = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels: curve.map((_, i) => i + 1),
-      datasets: [{ label: "Cumulative net P&L (₹)", data: curve.map(p => p.equity),
-                   borderColor: "#5b8def", backgroundColor: "rgba(91,141,239,.1)", fill: true, pointRadius: 0, tension: .15 }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      scales: {
-        x: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } },
-        y: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } }
-      },
-      plugins: { legend: { labels: { color: "#e6e8ec" } } }
-    }
-  });
-}
-
-function renderBacktestTrades(trades) {
-  const table = document.getElementById("btTradesTable");
-  const tbody = document.getElementById("btTradesBody");
-  if (!trades.length) { table.style.display = "none"; return; }
-  table.style.display = "table";
-  tbody.innerHTML = "";
-  trades.forEach(t => {
-    const netClass = t.net_pnl >= 0 ? "pnl-pos" : "pnl-neg";
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${t.day}</td><td>${t.symbol}</td><td>${t.direction}</td>
-      <td>₹${t.entry_premium}</td><td>₹${t.exit_premium}</td>
-      <td>₹${t.gross_pnl}</td><td>₹${t.charges}</td>
-      <td class="${netClass}">₹${t.net_pnl}</td>
-      <td style="font-size:12px; color:var(--muted);">${t.exit_reason}</td>`;
-    tbody.appendChild(tr);
-  });
 }
 </script>
 
