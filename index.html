@@ -651,6 +651,9 @@
     <div id="autoOpenPositionBox">
       <div class="legend">No auto-trade position currently open.</div>
     </div>
+    <div class="chart-wrap" id="autoPositionChartWrap" style="display:none; height:220px; margin-top:10px;">
+      <canvas id="autoPositionChartCanvas"></canvas>
+    </div>
   </div>
 
   <div class="panel">
@@ -1659,6 +1662,12 @@ function indexedXScale(labels) {
   };
 }
 
+function indexedTooltip(labels) {
+  // Default candlestick tooltip title is just the raw x-index (e.g. "5"), which is meaningless
+  // now that the axis is index-based -- this maps it back to the real date/time for that candle.
+  return { callbacks: { title: (items) => (items.length ? (labels[Math.round(items[0].parsed.x)] ?? "") : "") } };
+}
+
 // ---------- Price chart (candlestick) ----------
 document.getElementById("chartBtn").onclick = async () => {
   const sym = document.getElementById("chartSymbolInput").value.trim().toUpperCase();
@@ -1711,7 +1720,7 @@ document.getElementById("chartBtn").onclick = async () => {
           x: indexedXScale(labels),
           y: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } }
         },
-        plugins: { legend: { labels: { color: "#e6e8ec" } } }
+        plugins: { legend: { labels: { color: "#e6e8ec" } }, tooltip: indexedTooltip(labels) }
       }
     });
     status.textContent = d.clamped_to_days ? `Lookback clamped to ${d.clamped_to_days} days for this interval.` : "";
@@ -2238,14 +2247,12 @@ async function armAutoTrade() {
   if (!loggedIn) { alert("Connect your Kite account first."); return; }
   const body = { mode: autoPendingMode };
   if (autoPendingMode === "auto") {
-    const phrase = "I UNDERSTAND THIS PLACES REAL ORDERS AUTOMATICALLY";
-    const typed = prompt(
+    const understood = confirm(
       "AUTO mode places REAL option-buy orders on your live Zerodha account with no per-trade " +
-      "click, the instant a breakout signal qualifies. To confirm you understand this, type " +
-      "exactly:\n\n" + phrase
+      "click, the instant a breakout signal qualifies.\n\nClick OK to arm it, or Cancel to stay in Manual mode."
     );
-    if (typed !== phrase) { alert("Phrase didn't match exactly — Auto mode was NOT armed."); return; }
-    body.ack = phrase;
+    if (!understood) return;
+    body.ack = true;
   }
   try {
     const r = await apiFetch("/api/autotrade/arm", {
@@ -2357,6 +2364,7 @@ async function pollAutoTradeState() {
     }
     renderAutoScanTable(autoLastCandidates, s.mode);
     renderAutoOpenPosition(d.open_trades && d.open_trades[0]);
+    updateAutoPositionChart(d.open_trades && d.open_trades[0]);
     renderAutoLog(d.recent_trades || []);
   } catch (e) { /* silent — next poll will retry */ }
 }
@@ -2416,6 +2424,61 @@ async function scanAutoTradeNow() {
     renderAutoScanTable(autoLastCandidates, modeBtn);
     status.textContent = d.errors && d.errors.length ? `Done, with notes: ${d.errors.join(" | ")}` : "Done.";
   } catch (e) { status.textContent = "Request failed: " + e; }
+}
+
+let autoPositionChartInstance = null;
+let positionChartTradeKey = null;
+let positionChartPoints = [];
+
+function updateAutoPositionChart(trade) {
+  const wrap = document.getElementById("autoPositionChartWrap");
+  if (!trade) {
+    wrap.style.display = "none";
+    positionChartTradeKey = null;
+    positionChartPoints = [];
+    if (autoPositionChartInstance) { autoPositionChartInstance.destroy(); autoPositionChartInstance = null; }
+    return;
+  }
+  const key = `${trade.tradingsymbol}@${trade.opened_at}`;
+  if (key !== positionChartTradeKey) {
+    // New position (or first time we've seen one) -- start a fresh in-memory series. This is
+    // built live from quote polls, not historical data, since it's tracking the CURRENT trade.
+    positionChartTradeKey = key;
+    positionChartPoints = [{ t: Date.now(), ltp: trade.entry_price }];
+  }
+  const last = positionChartPoints[positionChartPoints.length - 1];
+  if (!last || trade.last_ltp !== last.ltp) {
+    positionChartPoints.push({ t: Date.now(), ltp: trade.last_ltp });
+  }
+  wrap.style.display = "block";
+
+  const labels = positionChartPoints.map(p => new Date(p.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  const ltpSeries = positionChartPoints.map(p => p.ltp);
+  const flat = (val) => positionChartPoints.map(() => val);
+
+  const datasets = [
+    { label: "Live LTP", data: ltpSeries, borderColor: "#5b8def", backgroundColor: "rgba(91,141,239,.12)",
+      fill: true, pointRadius: 0, tension: .15, borderWidth: 2 },
+    { label: "Entry", data: flat(trade.entry_price), borderColor: "#8b93a3", borderDash: [4,4], pointRadius: 0, borderWidth: 1 },
+    { label: "Target", data: flat(trade.target_price), borderColor: "#34c77b", borderDash: [6,3], pointRadius: 0, borderWidth: 1.5 },
+    { label: trade.trail_active ? "Trailing stop" : "Stop-loss", data: flat(trade.sl_price),
+      borderColor: "#e5484d", borderDash: [6,3], pointRadius: 0, borderWidth: 1.5 },
+  ];
+
+  if (autoPositionChartInstance) autoPositionChartInstance.destroy();
+  const ctx = document.getElementById("autoPositionChartCanvas").getContext("2d");
+  autoPositionChartInstance = new Chart(ctx, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      scales: {
+        x: { ticks: { color: "#8b93a3", maxTicksLimit: 8 }, grid: { color: "#262b36" } },
+        y: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } }
+      },
+      plugins: { legend: { labels: { color: "#e6e8ec" } } }
+    }
+  });
 }
 
 function renderAutoOpenPosition(trade) {
@@ -2490,7 +2553,7 @@ async function loadAutoChart() {
           x: indexedXScale(labels),
           y: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } }
         },
-        plugins: { legend: { labels: { color: "#e6e8ec" } } }
+        plugins: { legend: { labels: { color: "#e6e8ec" } }, tooltip: indexedTooltip(labels) }
       }
     });
     status.textContent = `Updated ${new Date().toLocaleTimeString()}` +
