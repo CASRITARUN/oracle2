@@ -116,6 +116,7 @@
 <div class="top-tabs">
   <button class="top-tab-btn active" id="tabBtnCondor" onclick="switchTopTab('condor')">Option Selling — Condor / Strangle</button>
   <button class="top-tab-btn" id="tabBtnCalendar" onclick="switchTopTab('calendar')">Double Calendar Spread</button>
+  <button class="top-tab-btn" id="tabBtnAuto" onclick="switchTopTab('auto')">⚡ Auto Trade Mode</button>
 </div>
 
 <div class="tab-page active" id="tabPageCondor">
@@ -519,6 +520,150 @@
 
 </div>
 </div><!-- /tabPageCalendar -->
+
+<div class="tab-page" id="tabPageAuto">
+<div class="wrap">
+
+  <div class="panel">
+    <h2>⚡ Auto Trade Mode — status</h2>
+    <div class="warn-box" style="margin-top:0;">
+      This is a rule-based intraday <b>breakout scanner + option buyer</b> — not a guaranteed-profit
+      system. It watches your configured symbols for a price breakout above/below their recent
+      trading range, buys the ATM option in that direction, and manages stop-loss/target/trailing-stop
+      itself. In <b>Manual</b> mode nothing is ever sent to your broker until you click "Execute".
+      In <b>Auto</b> mode it places that entry the moment a signal qualifies — real money, no click.
+      Only arm Auto mode with capital you can afford to lose, and keep an eye on your Zerodha app.
+    </div>
+    <div class="row" style="margin-top:14px;">
+      <span id="autoStatusPill" class="pill warn">Not armed</span>
+      <button class="toggle" id="autoModeManualBtn" onclick="setAutoModeChoice('manual')">Manual (review &amp; click)</button>
+      <button class="toggle" id="autoModeAutoBtn" onclick="setAutoModeChoice('auto')">Auto (self-executing)</button>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <button id="autoArmBtn" onclick="armAutoTrade()">Start</button>
+      <button class="secondary" id="autoDisarmBtn" onclick="disarmAutoTrade()">Stop scanning</button>
+      <button class="danger" id="autoCloseAllBtn" onclick="closeAllAutoTrades()">Kill switch — exit open position now</button>
+    </div>
+    <div class="metric-row" style="margin-top:14px;">
+      <div class="metric"><div class="k">Trades today</div><div class="v" id="autoTradesToday">0 / 3</div></div>
+      <div class="metric" id="autoPnlMetric"><div class="k">Realized P&amp;L today</div><div class="v" id="autoPnlToday">₹0</div></div>
+      <div class="metric"><div class="k">Last scan</div><div class="v" id="autoLastScan" style="font-size:13px;">—</div></div>
+    </div>
+    <div id="autoDisarmReasonBox" class="warn-box" style="display:none; margin-top:10px;"></div>
+    <div id="autoErrorBox" class="warn-box" style="display:none; margin-top:10px; border-color: rgba(229,72,77,.4); color:var(--red); background:rgba(229,72,77,.1);"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Settings</h2>
+    <div class="row" style="align-items:flex-start;">
+      <div>
+        <label class="inline">Universe — indices &amp; F&amp;O stocks
+          <input type="text" id="autoUniverseInput" list="foUniverseList" placeholder="type to search, e.g. RELIANCE" style="width:220px;" />
+          <button class="secondary small-btn" onclick="addAutoUniverseSymbol()">Add</button>
+        </label>
+        <datalist id="foUniverseList"></datalist>
+        <div id="autoUniverseTags" class="row" style="margin-top:8px;"></div>
+        <div class="legend" style="margin-top:4px;">
+          Stock options are usually monthly-expiry only (indices also get weekly) and can be far less
+          liquid than NIFTY/BANKNIFTY — wider bid-ask spreads mean your real fill may be noticeably
+          worse than the LTP shown. Consider a smaller budget per trade for stocks until you've
+          watched a few go through.
+        </div>
+      </div>
+      <label class="inline">Candle interval
+        <select id="autoInterval"><option value="5minute">5 min</option><option value="15minute">15 min</option><option value="60minute">60 min</option></select></label>
+      <label class="inline">Channel lookback <input type="number" id="autoLookback" value="20" min="5" max="100" /></label>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <label class="inline">Scan every (sec) <input type="number" id="autoPoll" value="20" min="10" max="300" /></label>
+      <label class="inline">Budget per trade (₹) <input type="number" id="autoCapital" value="15000" min="1000" step="500" /></label>
+      <label class="inline">Max trades / day <input type="number" id="autoMaxTrades" value="3" min="1" max="10" /></label>
+      <label class="inline">Max daily loss (₹) <input type="number" id="autoMaxLoss" value="5000" min="500" step="500" /></label>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <label class="inline">Stop-loss (% of premium) <input type="number" id="autoSlPct" value="30" min="5" max="90" /></label>
+      <label class="inline">Target (% of premium) <input type="number" id="autoTargetPct" value="60" min="5" max="300" /></label>
+      <label class="inline">Start trailing after (%) <input type="number" id="autoTrailAfter" value="30" min="5" max="300" /></label>
+      <label class="inline">Trailing giveback (pts) <input type="number" id="autoTrailGiveback" value="15" min="5" max="100" /></label>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <label class="inline">Min breakout size (x ATR) <input type="number" id="autoMinScore" value="0.5" min="0.1" max="5" step="0.1" /></label>
+      <label class="inline">Square-off time (24h) <input type="text" id="autoSquareOff" value="15:15" style="width:70px;" /></label>
+      <button class="secondary small-btn" onclick="saveAutoConfig()">Save settings</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Real-time chart</h2>
+    <div class="row">
+      <select id="autoChartSymbol"></select>
+      <span class="loading" id="autoChartStatus"></span>
+      <label class="inline"><input type="checkbox" id="autoChartLive" checked /> Live refresh (10s)</label>
+    </div>
+    <div class="chart-wrap"><canvas id="autoChartCanvas"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <h2>Breakout scanner — signals</h2>
+    <div class="row">
+      <button class="secondary small-btn" onclick="scanAutoTradeNow()">Scan now</button>
+      <span class="loading" id="autoScanStatus"></span>
+    </div>
+    <table id="autoScanTable" style="margin-top:12px; display:none;">
+      <thead><tr><th>Symbol</th><th>Direction</th><th>Strength</th><th>Volume</th><th>Reasoning</th><th></th></tr></thead>
+      <tbody id="autoScanBody"></tbody>
+    </table>
+    <div class="legend" id="autoScanEmpty">No breakout candidates yet — click "Scan now" or arm the loop above.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Live position monitor</h2>
+    <div id="autoOpenPositionBox">
+      <div class="legend">No auto-trade position currently open.</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Backtest</h2>
+    <div class="warn-box" style="margin-top:0;">
+      Kite doesn't expose historical order-book data for expired option contracts, so premiums here
+      are Black-Scholes <b>estimates</b> from real historical spot prices + a realized-volatility
+      estimate (editable below) — not a replay of actual historical fills. Lot sizes use each
+      symbol's current lot size. Charges use the same brokerage/STT/exchange/SEBI/GST/stamp-duty
+      model as live trading. Treat results as a sanity check of the breakout <i>rule</i>, not a
+      promise about the future.
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <label class="inline">Lookback (days) <input type="number" id="btDays" value="20" min="1" max="30" /></label>
+      <label class="inline">Assumed days-to-expiry <input type="number" id="btDte" value="3" min="0.5" max="30" step="0.5" /></label>
+      <label class="inline">Assumed IV % (blank = auto) <input type="number" id="btIv" placeholder="auto" min="1" max="200" /></label>
+      <label class="inline"><input type="checkbox" id="btRequireVol" checked /> Require volume confirmation</label>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <button onclick="runAutoTradeBacktest()">Run backtest</button>
+      <span class="loading" id="btStatus"></span>
+    </div>
+    <div id="btDisclaimer" class="legend" style="display:none; margin-top:10px;"></div>
+    <div class="metric-row" id="btSummaryRow" style="display:none; margin-top:12px;"></div>
+    <div class="chart-wrap" id="btEquityWrap" style="display:none; height:220px;"><canvas id="btEquityCanvas"></canvas></div>
+    <table id="btTradesTable" style="margin-top:14px; display:none;">
+      <thead><tr><th>Day</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Gross</th><th>Charges</th><th>Net</th><th>Reason</th></tr></thead>
+      <tbody id="btTradesBody"></tbody>
+    </table>
+    <div class="legend" id="btEmpty">No backtest run yet.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Trade log</h2>
+    <table id="autoLogTable" style="display:none;">
+      <thead><tr><th>Opened</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Reason</th></tr></thead>
+      <tbody id="autoLogBody"></tbody>
+    </table>
+    <div class="legend" id="autoLogEmpty">No trades yet today.</div>
+  </div>
+
+</div>
+</div><!-- /tabPageAuto -->
 
 <!-- Execute confirmation modal -->
 <div class="modal-overlay" id="execModal">
@@ -1630,13 +1775,21 @@ document.getElementById("refreshEventsBtn").onclick = loadEvents;
 // ============================================================================
 function switchTopTab(which) {
   const isCondor = which === "condor";
+  const isCalendar = which === "calendar";
+  const isAuto = which === "auto";
   document.getElementById("tabPageCondor").classList.toggle("active", isCondor);
-  document.getElementById("tabPageCalendar").classList.toggle("active", !isCondor);
+  document.getElementById("tabPageCalendar").classList.toggle("active", isCalendar);
+  document.getElementById("tabPageAuto").classList.toggle("active", isAuto);
   document.getElementById("tabBtnCondor").classList.toggle("active", isCondor);
-  document.getElementById("tabBtnCalendar").classList.toggle("active", !isCondor);
-  if (!isCondor && !window.__calWatchlistLoadedOnce) {
+  document.getElementById("tabBtnCalendar").classList.toggle("active", isCalendar);
+  document.getElementById("tabBtnAuto").classList.toggle("active", isAuto);
+  if (isCalendar && !window.__calWatchlistLoadedOnce) {
     window.__calWatchlistLoadedOnce = true;
     loadCalWatchlist();
+  }
+  if (isAuto && !window.__autoTradeInitedOnce) {
+    window.__autoTradeInitedOnce = true;
+    initAutoTradeTab();
   }
 }
 
@@ -1966,6 +2119,429 @@ async function removeCalPosition(id) {
 
 document.getElementById("calRefreshWatchlistBtn").onclick = loadCalWatchlist;
 setCalStrikeMode("otm_pct");
+</script>
+
+<script>
+// ============================================================================
+// Auto Trade Mode tab
+// ============================================================================
+let autoChartInstance = null;
+let autoPendingMode = "manual";
+let autoStatePollTimer = null;
+let autoChartTimer = null;
+let autoLastCandidates = [];
+
+let autoUniverseSymbols = ["NIFTY", "BANKNIFTY", "FINNIFTY"];
+let foUniverseAll = [];
+
+async function loadFoUniverseOptions() {
+  try {
+    const r = await apiFetch("/api/fo-universe");
+    const d = await r.json();
+    if (d.error) return;
+    foUniverseAll = [...(d.indices || []), ...(d.stocks || [])];
+    document.getElementById("foUniverseList").innerHTML =
+      foUniverseAll.map(s => `<option value="${s}"></option>`).join("");
+  } catch (e) { /* datalist just stays empty; free typing still works */ }
+}
+
+function renderAutoUniverseTags() {
+  const box = document.getElementById("autoUniverseTags");
+  box.innerHTML = autoUniverseSymbols.map(sym => `
+    <span class="pill ok" style="display:inline-flex; align-items:center; gap:6px;">
+      ${sym} <span style="cursor:pointer; font-weight:700;" onclick="removeAutoUniverseSymbol('${sym}')">&times;</span>
+    </span>`).join("") || `<span class="legend">No symbols added yet.</span>`;
+  const sel = document.getElementById("autoChartSymbol");
+  const current = sel.value;
+  sel.innerHTML = "";
+  autoUniverseSymbols.forEach(sym => {
+    const opt = document.createElement("option"); opt.value = sym; opt.textContent = sym; sel.appendChild(opt);
+  });
+  if (autoUniverseSymbols.includes(current)) sel.value = current;
+}
+
+function addAutoUniverseSymbol() {
+  const input = document.getElementById("autoUniverseInput");
+  const sym = input.value.trim().toUpperCase();
+  if (!sym) return;
+  if (foUniverseAll.length && !foUniverseAll.includes(sym)) {
+    if (!confirm(`"${sym}" isn't in your fetched F&O instrument list (or that list hasn't loaded yet — ` +
+                 `connect your Kite account first). Add it anyway?`)) return;
+  }
+  if (!autoUniverseSymbols.includes(sym)) autoUniverseSymbols.push(sym);
+  input.value = "";
+  renderAutoUniverseTags();
+}
+
+function removeAutoUniverseSymbol(sym) {
+  autoUniverseSymbols = autoUniverseSymbols.filter(s => s !== sym);
+  renderAutoUniverseTags();
+}
+
+function initAutoTradeTab() {
+  loadFoUniverseOptions();
+  renderAutoUniverseTags();
+  document.getElementById("autoChartSymbol").onchange = loadAutoChart;
+  document.getElementById("autoUniverseInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addAutoUniverseSymbol(); }
+  });
+  setAutoModeChoice("manual");
+  pollAutoTradeState();
+  loadAutoChart();
+  autoStatePollTimer = setInterval(pollAutoTradeState, 5000);
+  autoChartTimer = setInterval(() => {
+    if (document.getElementById("autoChartLive").checked) loadAutoChart();
+  }, 10000);
+}
+
+function setAutoModeChoice(mode) {
+  autoPendingMode = mode;
+  document.getElementById("autoModeManualBtn").classList.toggle("active", mode === "manual");
+  document.getElementById("autoModeAutoBtn").classList.toggle("active", mode === "auto");
+}
+
+async function armAutoTrade() {
+  const loggedIn = await checkSession();
+  if (!loggedIn) { alert("Connect your Kite account first."); return; }
+  const body = { mode: autoPendingMode };
+  if (autoPendingMode === "auto") {
+    const phrase = "I UNDERSTAND THIS PLACES REAL ORDERS AUTOMATICALLY";
+    const typed = prompt(
+      "AUTO mode places REAL option-buy orders on your live Zerodha account with no per-trade " +
+      "click, the instant a breakout signal qualifies. To confirm you understand this, type " +
+      "exactly:\n\n" + phrase
+    );
+    if (typed !== phrase) { alert("Phrase didn't match exactly — Auto mode was NOT armed."); return; }
+    body.ack = phrase;
+  }
+  try {
+    const r = await apiFetch("/api/autotrade/arm", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.error) { alert("Error: " + d.error); return; }
+    pollAutoTradeState();
+  } catch (e) { alert("Request failed: " + e); }
+}
+
+async function disarmAutoTrade() {
+  await apiFetch("/api/autotrade/disarm", {method: "POST"});
+  pollAutoTradeState();
+}
+
+async function closeAllAutoTrades() {
+  if (!confirm("Force-exit any currently open auto-trade position at market, right now?")) return;
+  try {
+    const r = await apiFetch("/api/autotrade/close-all", {method: "POST"});
+    const d = await r.json();
+    if (d.error) { alert("Error: " + d.error); return; }
+    pollAutoTradeState();
+  } catch (e) { alert("Request failed: " + e); }
+}
+
+async function saveAutoConfig() {
+  const body = {
+    universe: autoUniverseSymbols,
+    candle_interval: document.getElementById("autoInterval").value,
+    breakout_lookback: Number(document.getElementById("autoLookback").value),
+    poll_seconds: Number(document.getElementById("autoPoll").value),
+    capital_per_trade: Number(document.getElementById("autoCapital").value),
+    max_trades_per_day: Number(document.getElementById("autoMaxTrades").value),
+    max_daily_loss: Number(document.getElementById("autoMaxLoss").value),
+    sl_pct_of_premium: Number(document.getElementById("autoSlPct").value),
+    target_pct_of_premium: Number(document.getElementById("autoTargetPct").value),
+    trail_after_pct: Number(document.getElementById("autoTrailAfter").value),
+    trail_giveback_pct: Number(document.getElementById("autoTrailGiveback").value),
+    min_breakout_score: Number(document.getElementById("autoMinScore").value),
+    square_off_time: document.getElementById("autoSquareOff").value.trim(),
+  };
+  try {
+    const r = await apiFetch("/api/autotrade/config", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.error) { alert("Error: " + d.error); return; }
+    const sel = document.getElementById("autoChartSymbol");
+    sel.innerHTML = "";
+    body.universe.forEach(sym => {
+      const opt = document.createElement("option"); opt.value = sym; opt.textContent = sym; sel.appendChild(opt);
+    });
+    loadAutoChart();
+    alert("Settings saved.");
+  } catch (e) { alert("Request failed: " + e); }
+}
+
+async function pollAutoTradeState() {
+  const loggedIn = await checkSession();
+  if (!loggedIn) return;
+  try {
+    const r = await apiFetch("/api/autotrade/state");
+    const d = await r.json();
+    if (d.error) return;
+    const s = d.state;
+
+    const pill = document.getElementById("autoStatusPill");
+    if (!s.enabled) { pill.className = "pill warn"; pill.textContent = "Not armed"; }
+    else if (s.mode === "auto") { pill.className = "pill bad"; pill.textContent = "ARMED — Auto-executing"; }
+    else { pill.className = "pill ok"; pill.textContent = "Scanning — Manual (review & click)"; }
+
+    document.getElementById("autoTradesToday").textContent = `${s.trades_today} / ${s.max_trades_per_day}`;
+    const pnlEl = document.getElementById("autoPnlToday");
+    pnlEl.textContent = `₹${s.realized_pnl_today}`;
+    pnlEl.className = s.realized_pnl_today > 0 ? "v pnl-pos" : s.realized_pnl_today < 0 ? "v pnl-neg" : "v";
+    document.getElementById("autoLastScan").textContent = s.last_scan_at ? new Date(s.last_scan_at).toLocaleTimeString() : "—";
+
+    const drBox = document.getElementById("autoDisarmReasonBox");
+    if (s.disarm_reason) { drBox.style.display = "block"; drBox.textContent = s.disarm_reason; }
+    else { drBox.style.display = "none"; }
+
+    const errBox = document.getElementById("autoErrorBox");
+    if (s.last_error) { errBox.style.display = "block"; errBox.textContent = "Last error: " + s.last_error; }
+    else { errBox.style.display = "none"; }
+
+    autoLastCandidates = s.last_scan_candidates || [];
+    if (!window.__autoUniverseSyncedOnce && s.universe && s.universe.length) {
+      window.__autoUniverseSyncedOnce = true;
+      autoUniverseSymbols = s.universe.slice();
+      renderAutoUniverseTags();
+    }
+    renderAutoScanTable(autoLastCandidates, s.mode);
+    renderAutoOpenPosition(d.open_trades && d.open_trades[0]);
+    renderAutoLog(d.recent_trades || []);
+  } catch (e) { /* silent — next poll will retry */ }
+}
+
+function renderAutoScanTable(candidates, mode) {
+  const table = document.getElementById("autoScanTable");
+  const empty = document.getElementById("autoScanEmpty");
+  const tbody = document.getElementById("autoScanBody");
+  if (!candidates.length) { table.style.display = "none"; empty.style.display = "block"; return; }
+  empty.style.display = "none"; table.style.display = "table";
+  tbody.innerHTML = "";
+  candidates.forEach((c, idx) => {
+    const dirClass = c.direction === "CE" ? "buy" : "sell";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${c.symbol}</td>
+      <td class="${dirClass}">${c.direction === "CE" ? "Bullish breakout (buy CE)" : "Bearish breakdown (buy PE)"}</td>
+      <td>${c.score}x ATR</td>
+      <td>${c.volume_confirmed ? '<span class="pill ok">confirmed</span>' : '<span class="pill warn">weak</span>'}</td>
+      <td style="font-size:12px; color:var(--muted); max-width:340px;">${c.reasoning}</td>
+      <td>${mode === "manual" ? `<button class="small-btn" onclick="executeAutoSignal(${idx})">Execute</button>` : "<span class=\"legend\">auto-executes</span>"}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function executeAutoSignal(idx) {
+  const candidate = autoLastCandidates[idx];
+  if (!candidate) return;
+  if (!confirm(`Buy ATM ${candidate.direction} on ${candidate.symbol} right now at market, with your ` +
+               `configured stop-loss/target? This is a REAL order.`)) return;
+  try {
+    const r = await apiFetch("/api/autotrade/execute-signal", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({confirmed: true, candidate})
+    });
+    const d = await r.json();
+    if (d.error) { alert("Error: " + d.error); return; }
+    alert(`Placed: BUY ${d.trade.tradingsymbol} x${d.trade.quantity} @ ~₹${d.trade.entry_price}`);
+    pollAutoTradeState();
+  } catch (e) { alert("Request failed: " + e); }
+}
+
+async function scanAutoTradeNow() {
+  const status = document.getElementById("autoScanStatus");
+  status.textContent = "Scanning...";
+  try {
+    const r = await apiFetch("/api/autotrade/scan");
+    const d = await r.json();
+    if (d.error) { status.textContent = "Error: " + d.error; return; }
+    autoLastCandidates = d.candidates || [];
+    const modeBtn = document.getElementById("autoModeAutoBtn").classList.contains("active") ? "auto" : "manual";
+    renderAutoScanTable(autoLastCandidates, modeBtn);
+    status.textContent = d.errors && d.errors.length ? `Done, with notes: ${d.errors.join(" | ")}` : "Done.";
+  } catch (e) { status.textContent = "Request failed: " + e; }
+}
+
+function renderAutoOpenPosition(trade) {
+  const box = document.getElementById("autoOpenPositionBox");
+  if (!trade) { box.innerHTML = `<div class="legend">No auto-trade position currently open.</div>`; return; }
+  const pnl = (trade.last_ltp - trade.entry_price) * trade.quantity;
+  const pnlClass = pnl >= 0 ? "pnl-pos" : "pnl-neg";
+  box.innerHTML = `
+    <div class="leg-grid">
+      <div class="leg-card"><div class="k">Contract</div><div class="v" style="font-size:14px;">${trade.tradingsymbol}</div></div>
+      <div class="leg-card"><div class="k">Qty</div><div class="v">${trade.quantity}</div></div>
+      <div class="leg-card"><div class="k">Entry premium</div><div class="v">₹${trade.entry_price}</div></div>
+      <div class="leg-card"><div class="k">Live LTP</div><div class="v">₹${trade.last_ltp}</div></div>
+    </div>
+    <div class="metric-row">
+      <div class="metric ${pnl >= 0 ? 'profit' : 'loss'}"><div class="k">Live P&amp;L</div><div class="v ${pnlClass}">₹${pnl.toFixed(2)}</div></div>
+      <div class="metric"><div class="k">Stop-loss</div><div class="v">₹${trade.sl_price}${trade.trail_active ? ' (trailing)' : ''}</div></div>
+      <div class="metric"><div class="k">Target</div><div class="v">₹${trade.target_price}</div></div>
+    </div>
+    <div class="legend">${trade.reasoning}</div>`;
+}
+
+function renderAutoLog(trades) {
+  const table = document.getElementById("autoLogTable");
+  const empty = document.getElementById("autoLogEmpty");
+  const tbody = document.getElementById("autoLogBody");
+  if (!trades.length) { table.style.display = "none"; empty.style.display = "block"; return; }
+  empty.style.display = "none"; table.style.display = "table";
+  tbody.innerHTML = "";
+  trades.forEach(t => {
+    const pnlClass = t.realized_pnl > 0 ? "pnl-pos" : t.realized_pnl < 0 ? "pnl-neg" : "";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${new Date(t.opened_at).toLocaleString()}</td>
+      <td>${t.symbol}</td>
+      <td>${t.direction}</td>
+      <td>₹${t.entry_price}</td>
+      <td>${t.exit_price != null ? "₹" + t.exit_price : "—"}</td>
+      <td class="${pnlClass}">${t.realized_pnl != null ? "₹" + t.realized_pnl : "—"}</td>
+      <td style="font-size:12px; color:var(--muted);">${t.exit_reason || (t.status === "open" ? "still open" : "—")}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function loadAutoChart() {
+  const sym = document.getElementById("autoChartSymbol").value;
+  if (!sym) return;
+  const status = document.getElementById("autoChartStatus");
+  const loggedIn = await checkSession();
+  if (!loggedIn) { status.textContent = "Connect your Kite account first."; return; }
+  status.textContent = "Loading...";
+  try {
+    const r = await apiFetch(`/api/chart/${sym}?interval=5minute&days=5`);
+    const d = await r.json();
+    if (d.error) { status.textContent = "Error: " + d.error; return; }
+    if (!d.candles.length) { status.textContent = "No candle data returned."; return; }
+    const candleData = d.candles.map(c => ({ x: new Date(c.t).getTime(), o: c.o, h: c.h, l: c.l, c: c.c }));
+    const datasets = [{
+      label: sym, data: candleData, type: "candlestick",
+      color: { up: "#34c77b", down: "#e5484d", unchanged: "#8b93a3" }
+    }];
+    if (autoChartInstance) autoChartInstance.destroy();
+    const ctx = document.getElementById("autoChartCanvas").getContext("2d");
+    autoChartInstance = new Chart(ctx, {
+      type: "candlestick",
+      data: { datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: {
+          x: { type: "time", time: { unit: "hour" }, ticks: { color: "#8b93a3", maxTicksLimit: 8 }, grid: { color: "#262b36" } },
+          y: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } }
+        },
+        plugins: { legend: { labels: { color: "#e6e8ec" } } }
+      }
+    });
+    status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) { status.textContent = "Request failed: " + e; }
+}
+let btEquityChartInstance = null;
+
+async function runAutoTradeBacktest() {
+  const status = document.getElementById("btStatus");
+  const loggedIn = await checkSession();
+  if (!loggedIn) { status.textContent = "Connect your Kite account first."; return; }
+  status.textContent = "Running backtest — this can take a little while for wide date ranges...";
+  const body = {
+    universe: autoUniverseSymbols,
+    candle_interval: document.getElementById("autoInterval").value,
+    breakout_lookback: Number(document.getElementById("autoLookback").value),
+    days: Number(document.getElementById("btDays").value),
+    min_breakout_score: Number(document.getElementById("autoMinScore").value),
+    require_volume_confirmation: document.getElementById("btRequireVol").checked,
+    capital_per_trade: Number(document.getElementById("autoCapital").value),
+    sl_pct_of_premium: Number(document.getElementById("autoSlPct").value),
+    target_pct_of_premium: Number(document.getElementById("autoTargetPct").value),
+    trail_after_pct: Number(document.getElementById("autoTrailAfter").value),
+    trail_giveback_pct: Number(document.getElementById("autoTrailGiveback").value),
+    square_off_time: document.getElementById("autoSquareOff").value.trim(),
+    assumed_days_to_expiry: Number(document.getElementById("btDte").value),
+  };
+  const ivVal = document.getElementById("btIv").value;
+  if (ivVal) body.assumed_iv_pct = Number(ivVal);
+
+  try {
+    const r = await apiFetch("/api/autotrade/backtest", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.error) { status.textContent = "Error: " + d.error; return; }
+    status.textContent = d.notes && d.notes.length ? `Done, with notes: ${d.notes.join(" | ")}` : "Done.";
+    document.getElementById("btDisclaimer").style.display = "block";
+    document.getElementById("btDisclaimer").textContent = d.disclaimer;
+    renderBacktestSummary(d.summary);
+    renderBacktestEquityCurve(d.summary.equity_curve || []);
+    renderBacktestTrades(d.trades || []);
+  } catch (e) { status.textContent = "Request failed: " + e; }
+}
+
+function renderBacktestSummary(s) {
+  const row = document.getElementById("btSummaryRow");
+  const empty = document.getElementById("btEmpty");
+  if (!s || !s.total_trades) {
+    row.style.display = "none"; empty.style.display = "block"; empty.textContent = "No qualifying breakout trades found over this window — try a wider lookback or lower min breakout score.";
+    return;
+  }
+  empty.style.display = "none"; row.style.display = "flex";
+  const netClass = s.net_pnl >= 0 ? "profit" : "loss";
+  const pnlValClass = s.net_pnl >= 0 ? "pnl-pos" : "pnl-neg";
+  row.innerHTML = `
+    <div class="metric"><div class="k">Trades</div><div class="v">${s.total_trades}</div></div>
+    <div class="metric"><div class="k">Win rate</div><div class="v">${s.win_rate_pct}%</div></div>
+    <div class="metric"><div class="k">Gross P&amp;L</div><div class="v">₹${s.gross_pnl}</div></div>
+    <div class="metric"><div class="k">Total charges</div><div class="v">₹${s.total_charges}</div></div>
+    <div class="metric ${netClass}"><div class="k">Net P&amp;L (after charges)</div><div class="v ${pnlValClass}">₹${s.net_pnl}</div></div>
+    <div class="metric"><div class="k">Max drawdown</div><div class="v">₹${s.max_drawdown}</div></div>
+    <div class="metric"><div class="k">Profit factor</div><div class="v">${s.profit_factor ?? '—'}</div></div>
+    <div class="metric"><div class="k">Best / worst trade</div><div class="v" style="font-size:14px;">₹${s.best_trade} / ₹${s.worst_trade}</div></div>`;
+}
+
+function renderBacktestEquityCurve(curve) {
+  const wrap = document.getElementById("btEquityWrap");
+  if (!curve.length) { wrap.style.display = "none"; return; }
+  wrap.style.display = "block";
+  if (btEquityChartInstance) btEquityChartInstance.destroy();
+  const ctx = document.getElementById("btEquityCanvas").getContext("2d");
+  btEquityChartInstance = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: curve.map((_, i) => i + 1),
+      datasets: [{ label: "Cumulative net P&L (₹)", data: curve.map(p => p.equity),
+                   borderColor: "#5b8def", backgroundColor: "rgba(91,141,239,.1)", fill: true, pointRadius: 0, tension: .15 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } },
+        y: { ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } }
+      },
+      plugins: { legend: { labels: { color: "#e6e8ec" } } }
+    }
+  });
+}
+
+function renderBacktestTrades(trades) {
+  const table = document.getElementById("btTradesTable");
+  const tbody = document.getElementById("btTradesBody");
+  if (!trades.length) { table.style.display = "none"; return; }
+  table.style.display = "table";
+  tbody.innerHTML = "";
+  trades.forEach(t => {
+    const netClass = t.net_pnl >= 0 ? "pnl-pos" : "pnl-neg";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${t.day}</td><td>${t.symbol}</td><td>${t.direction}</td>
+      <td>₹${t.entry_premium}</td><td>₹${t.exit_premium}</td>
+      <td>₹${t.gross_pnl}</td><td>₹${t.charges}</td>
+      <td class="${netClass}">₹${t.net_pnl}</td>
+      <td style="font-size:12px; color:var(--muted);">${t.exit_reason}</td>`;
+    tbody.appendChild(tr);
+  });
+}
 </script>
 
 <script>
