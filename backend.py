@@ -55,7 +55,7 @@ import requests
 # ---------------------------------------------------------------------------
 API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
 API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
-REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo.wecon.in/api/callback")
+REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
 
 # If your network does TLS interception (common on office/government networks — you'll see
 # "self-signed certificate in certificate chain" errors), set this env var to allow the news
