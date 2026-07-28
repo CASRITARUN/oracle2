@@ -3453,6 +3453,33 @@ def _detect_breakout(candles, lookback):
     }
 
 
+def _annotate_candidate(result, symbol, lookback):
+    """Fills in symbol, timestamp, confidence bucket, and the plain-English reasoning string for a
+    raw _detect_breakout() result. Shared by scan_breakouts (full scan) and the single-symbol
+    rescan-one route (checking one candidate's CURRENT score on demand)."""
+    result["symbol"] = symbol
+    result["detected_at"] = now_ist().isoformat()
+    # Plain-English confidence bucket from the composite score -- NOT a probability-of-profit
+    # guarantee, just a rough ranking of "how many confirmations lined up" (used to decide what
+    # Auto mode is allowed to touch -- see the auto-mode qualification in the loop below).
+    result["confidence"] = "High" if result["score"] >= 3 else "Medium" if result["score"] >= 1.5 else "Low"
+    direction_word = "broke above" if result["direction"] == "CE" else "broke below"
+    trend_note = ("EMA9/21 trend agrees" if result["trend_aligned"] is True else
+                   "EMA9/21 trend disagrees (counter-trend, discounted)" if result["trend_aligned"] is False
+                   else "trend unavailable")
+    momentum_note = (f"RSI {result['rsi']} agrees" if result["momentum_aligned"] is True else
+                      f"RSI {result['rsi']} disagrees" if result["momentum_aligned"] is False
+                      else "RSI unavailable")
+    vol_note = (f"relative volume {result['rel_volume']}x average" if result["rel_volume"] is not None
+                else "no average-volume baseline yet")
+    result["reasoning"] = (
+        f"{symbol}: price {direction_word} its {lookback}-candle range ({result['breakout_level']}), "
+        f"now at {result['last_close']} -- {result['breakout_size_atr']}x ATR raw move; "
+        f"{trend_note}; {momentum_note}; {vol_note}. Composite score {result['score']}."
+    )
+    return result
+
+
 def scan_breakouts(universe, interval, lookback):
     """Ranked, fully-transparent list of breakout candidates across the given universe. Every
     candidate carries a plain-English `reasoning` string -- this IS the "why" shown in the UI, there
@@ -3469,27 +3496,7 @@ def scan_breakouts(universe, interval, lookback):
         result = _detect_breakout(candles, lookback)
         if not result:
             continue
-        result["symbol"] = symbol
-        result["detected_at"] = now_ist().isoformat()
-        # Plain-English confidence bucket from the composite score -- NOT a probability-of-profit
-        # guarantee, just a rough ranking of "how many confirmations lined up" (used to decide what
-        # Auto mode is allowed to touch -- see the auto-mode qualification in the loop below).
-        result["confidence"] = "High" if result["score"] >= 3 else "Medium" if result["score"] >= 1.5 else "Low"
-        direction_word = "broke above" if result["direction"] == "CE" else "broke below"
-        trend_note = ("EMA9/21 trend agrees" if result["trend_aligned"] is True else
-                       "EMA9/21 trend disagrees (counter-trend, discounted)" if result["trend_aligned"] is False
-                       else "trend unavailable")
-        momentum_note = (f"RSI {result['rsi']} agrees" if result["momentum_aligned"] is True else
-                          f"RSI {result['rsi']} disagrees" if result["momentum_aligned"] is False
-                          else "RSI unavailable")
-        vol_note = (f"relative volume {result['rel_volume']}x average" if result["rel_volume"] is not None
-                    else "no average-volume baseline yet")
-        result["reasoning"] = (
-            f"{symbol}: price {direction_word} its {lookback}-candle range ({result['breakout_level']}), "
-            f"now at {result['last_close']} -- {result['breakout_size_atr']}x ATR raw move; "
-            f"{trend_note}; {momentum_note}; {vol_note}. Composite score {result['score']}."
-        )
-        candidates.append(result)
+        candidates.append(_annotate_candidate(result, symbol, lookback))
     candidates.sort(key=lambda c: c["score"], reverse=True)
     return candidates, errors
 
@@ -3813,6 +3820,29 @@ def autotrade_close_all():
     save_autotrade_trades(trades)
     save_autotrade_state(state)
     return jsonify({"ok": True, "closed_any": closed_any, "trades": trades})
+
+
+@app.route("/api/autotrade/rescan-one", methods=["POST"])
+def autotrade_rescan_one():
+    """Re-checks ONE symbol right now and returns its CURRENT breakout score -- for when a
+    candidate has been sitting in the list since an earlier scan and you want to know whether it's
+    still breaking out (and how strongly) before deciding to trade it, without waiting for or
+    triggering a full universe rescan."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    symbol = body.get("symbol")
+    if not symbol:
+        return jsonify({"error": "symbol required"}), 400
+    state = load_autotrade_state()
+    candles, err = _fetch_recent_intraday(symbol, state["candle_interval"], state["breakout_lookback"])
+    if err:
+        return jsonify({"error": err}), 400
+    result = _detect_breakout(candles, state["breakout_lookback"])
+    if not result:
+        return jsonify({"candidate": None,
+                         "message": f"{symbol} is no longer breaking out -- price has moved back inside its range."})
+    return jsonify({"candidate": _annotate_candidate(result, symbol, state["breakout_lookback"])})
 
 
 @app.route("/api/autotrade/scan")
