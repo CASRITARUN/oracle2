@@ -536,13 +536,26 @@
     </div>
     <div class="row" style="margin-top:14px;">
       <span id="autoStatusPill" class="pill warn">Not armed</span>
-      <button class="toggle" id="autoModeManualBtn" onclick="setAutoModeChoice('manual')">Manual (review &amp; click)</button>
-      <button class="toggle" id="autoModeAutoBtn" onclick="setAutoModeChoice('auto')">Auto (self-executing)</button>
     </div>
-    <div class="row" style="margin-top:10px;">
-      <button id="autoArmBtn" onclick="armAutoTrade()">Start</button>
+    <div class="row" style="margin-top:10px; align-items:flex-start; gap:16px;">
+      <button class="toggle" id="autoArmManualBtn" onclick="armAutoTrade('manual')">Start scanning — Manual</button>
+      <button class="toggle" id="autoArmAutoBtn" onclick="armAutoTrade('auto')">Start scanning — Auto</button>
       <button class="secondary" id="autoDisarmBtn" onclick="disarmAutoTrade()">Stop scanning</button>
       <button class="danger" id="autoCloseAllBtn" onclick="closeAllAutoTrades()">Kill switch — exit open position now</button>
+    </div>
+    <div class="legend" style="margin-top:8px; max-width:720px;">
+      "Start scanning" arms the continuous background scanner (it keeps running and re-scanning
+      every poll interval until you click Stop). "Manual" shows you each signal and waits for you to
+      click Execute; "Auto" places the entry itself the instant a signal qualifies — no click. Either
+      way, the "Scan now" button further down is separate: it's a one-off, no-commitment preview scan
+      you can run any time, armed or not, to see current candidates without starting anything.
+    </div>
+    <div class="legend" style="margin-top:4px; max-width:720px;">
+      Stop-loss / target / trailing-stop management and auto-close apply to <b>any</b> open position —
+      whether it came from clicking Execute in Manual mode or from Auto mode — and keep running in the
+      background even after you click "Stop scanning". Stop scanning only stops NEW entries from being
+      taken; it does not stop watching a position you already have open. Use the kill switch to force
+      an immediate exit instead.
     </div>
     <div class="metric-row" style="margin-top:14px;">
       <div class="metric"><div class="k">Trades today</div><div class="v" id="autoTradesToday">0 / 3</div></div>
@@ -592,11 +605,28 @@
       <label class="inline">Scan every (sec) <input type="number" id="autoPoll" value="20" min="10" max="300" /></label>
       <label class="inline">Budget per trade (₹) <input type="number" id="autoCapital" value="15000" min="1000" step="500" /></label>
       <label class="inline">Max trades / day <input type="number" id="autoMaxTrades" value="3" min="1" max="10" /></label>
+      <label class="inline">Max concurrent positions <input type="number" id="autoMaxConcurrent" value="1" min="1" max="10" /></label>
       <label class="inline">Max daily loss (₹) <input type="number" id="autoMaxLoss" value="5000" min="500" step="500" /></label>
     </div>
+    <div class="row" style="margin-top:10px; align-items:flex-end;">
+      <label class="inline">Stop-loss mode
+        <select id="autoSlMode" onchange="onSlTargetModeChange()">
+          <option value="pct">% of premium</option>
+          <option value="points">Points (₹)</option>
+        </select>
+      </label>
+      <label class="inline" id="autoSlPctWrap">Stop-loss (% of premium) <input type="number" id="autoSlPct" value="30" min="5" max="90" /></label>
+      <label class="inline" id="autoSlPointsWrap" style="display:none;">Stop-loss (points off premium) <input type="number" id="autoSlPoints" value="5" min="0.5" step="0.5" /></label>
+      <label class="inline">Target mode
+        <select id="autoTargetMode" onchange="onSlTargetModeChange()">
+          <option value="pct">% of premium</option>
+          <option value="points">Points (₹)</option>
+        </select>
+      </label>
+      <label class="inline" id="autoTargetPctWrap">Target (% of premium) <input type="number" id="autoTargetPct" value="60" min="5" max="300" /></label>
+      <label class="inline" id="autoTargetPointsWrap" style="display:none;">Target (points over premium) <input type="number" id="autoTargetPoints" value="10" min="0.5" step="0.5" /></label>
+    </div>
     <div class="row" style="margin-top:10px;">
-      <label class="inline">Stop-loss (% of premium) <input type="number" id="autoSlPct" value="30" min="5" max="90" /></label>
-      <label class="inline">Target (% of premium) <input type="number" id="autoTargetPct" value="60" min="5" max="300" /></label>
       <label class="inline">Start trailing after (%) <input type="number" id="autoTrailAfter" value="30" min="5" max="300" /></label>
       <label class="inline">Trailing giveback (pts) <input type="number" id="autoTrailGiveback" value="15" min="5" max="100" /></label>
     </div>
@@ -640,7 +670,7 @@
       <span class="loading" id="autoScanStatus"></span>
     </div>
     <table id="autoScanTable" style="margin-top:12px; display:none;">
-      <thead><tr><th>Symbol</th><th>Direction</th><th>Score</th><th>Trend</th><th>RSI</th><th>Volume</th><th>Reasoning</th><th></th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Direction</th><th>Detected</th><th>Confidence</th><th>Score</th><th>Trend</th><th>RSI</th><th>Volume</th><th>Reasoning</th><th></th></tr></thead>
       <tbody id="autoScanBody"></tbody>
     </table>
     <div class="legend" id="autoScanEmpty">No breakout candidates yet — click "Scan now" or arm the loop above.</div>
@@ -650,6 +680,9 @@
     <h2>Live position monitor</h2>
     <div id="autoOpenPositionBox">
       <div class="legend">No auto-trade position currently open.</div>
+    </div>
+    <div class="row" id="autoPositionChartSelectorWrap" style="display:none; margin-top:10px;">
+      <label class="inline">Tracking chart for <select id="autoPositionChartSelect" onchange="updateAutoPositionChart(window.__lastOpenTrades, true)"></select></label>
     </div>
     <div class="chart-wrap" id="autoPositionChartWrap" style="display:none; height:220px; margin-top:10px;">
       <canvas id="autoPositionChartCanvas"></canvas>
@@ -2165,8 +2198,8 @@ setCalStrikeMode("otm_pct");
 // Auto Trade Mode tab
 // ============================================================================
 let autoChartInstance = null;
-let autoPendingMode = "manual";
 let autoStatePollTimer = null;
+let autoCurrentMode = null;
 let autoChartTimer = null;
 let autoLastCandidates = [];
 
@@ -2203,9 +2236,15 @@ function addAutoUniverseSymbol() {
   const input = document.getElementById("autoUniverseInput");
   const sym = input.value.trim().toUpperCase();
   if (!sym) return;
-  if (foUniverseAll.length && !foUniverseAll.includes(sym)) {
-    if (!confirm(`"${sym}" isn't in your fetched F&O instrument list (or that list hasn't loaded yet — ` +
-                 `connect your Kite account first). Add it anyway?`)) return;
+  if (foUniverseAll.length) {
+    if (!foUniverseAll.includes(sym)) {
+      alert(`"${sym}" doesn't have tradable F&O options (or isn't an index this scanner supports) — ` +
+            `pick from the dropdown suggestions instead.`);
+      return;
+    }
+  } else if (!confirm(`Couldn't load the valid symbol list yet (connect your Kite account first) — ` +
+                       `add "${sym}" anyway without validating it?`)) {
+    return;
   }
   if (!autoUniverseSymbols.includes(sym)) autoUniverseSymbols.push(sym);
   input.value = "";
@@ -2227,7 +2266,6 @@ function initAutoTradeTab() {
   document.getElementById("autoUniverseInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); addAutoUniverseSymbol(); }
   });
-  setAutoModeChoice("manual");
   pollAutoTradeState();
   loadAutoChart();
   autoStatePollTimer = setInterval(pollAutoTradeState, 5000);
@@ -2236,17 +2274,11 @@ function initAutoTradeTab() {
   }, 10000);
 }
 
-function setAutoModeChoice(mode) {
-  autoPendingMode = mode;
-  document.getElementById("autoModeManualBtn").classList.toggle("active", mode === "manual");
-  document.getElementById("autoModeAutoBtn").classList.toggle("active", mode === "auto");
-}
-
-async function armAutoTrade() {
+async function armAutoTrade(mode) {
   const loggedIn = await checkSession();
   if (!loggedIn) { alert("Connect your Kite account first."); return; }
-  const body = { mode: autoPendingMode };
-  if (autoPendingMode === "auto") {
+  const body = { mode };
+  if (mode === "auto") {
     const understood = confirm(
       "AUTO mode places REAL option-buy orders on your live Zerodha account with no per-trade " +
       "click, the instant a breakout signal qualifies.\n\nClick OK to arm it, or Cancel to stay in Manual mode."
@@ -2285,6 +2317,15 @@ function onScanAllFoToggle() {
   document.getElementById("autoManualUniverseBox").style.pointerEvents = on ? "none" : "auto";
 }
 
+function onSlTargetModeChange() {
+  const slPts = document.getElementById("autoSlMode").value === "points";
+  document.getElementById("autoSlPctWrap").style.display = slPts ? "none" : "";
+  document.getElementById("autoSlPointsWrap").style.display = slPts ? "" : "none";
+  const tgtPts = document.getElementById("autoTargetMode").value === "points";
+  document.getElementById("autoTargetPctWrap").style.display = tgtPts ? "none" : "";
+  document.getElementById("autoTargetPointsWrap").style.display = tgtPts ? "" : "none";
+}
+
 async function saveAutoConfig() {
   const body = {
     universe: autoUniverseSymbols,
@@ -2294,9 +2335,14 @@ async function saveAutoConfig() {
     poll_seconds: Number(document.getElementById("autoPoll").value),
     capital_per_trade: Number(document.getElementById("autoCapital").value),
     max_trades_per_day: Number(document.getElementById("autoMaxTrades").value),
+    max_concurrent_positions: Number(document.getElementById("autoMaxConcurrent").value),
     max_daily_loss: Number(document.getElementById("autoMaxLoss").value),
+    sl_mode: document.getElementById("autoSlMode").value,
     sl_pct_of_premium: Number(document.getElementById("autoSlPct").value),
+    sl_points: Number(document.getElementById("autoSlPoints").value),
+    target_mode: document.getElementById("autoTargetMode").value,
     target_pct_of_premium: Number(document.getElementById("autoTargetPct").value),
+    target_points: Number(document.getElementById("autoTargetPoints").value),
     trail_after_pct: Number(document.getElementById("autoTrailAfter").value),
     trail_giveback_pct: Number(document.getElementById("autoTrailGiveback").value),
     min_breakout_score: Number(document.getElementById("autoMinScore").value),
@@ -2331,6 +2377,9 @@ async function pollAutoTradeState() {
     if (!s.enabled) { pill.className = "pill warn"; pill.textContent = "Not armed"; }
     else if (s.mode === "auto") { pill.className = "pill bad"; pill.textContent = "ARMED — Auto-executing"; }
     else { pill.className = "pill ok"; pill.textContent = "Scanning — Manual (review & click)"; }
+    autoCurrentMode = s.enabled ? s.mode : null;
+    document.getElementById("autoArmManualBtn").classList.toggle("active", s.enabled && s.mode === "manual");
+    document.getElementById("autoArmAutoBtn").classList.toggle("active", s.enabled && s.mode === "auto");
 
     document.getElementById("autoTradesToday").textContent = `${s.trades_today} / ${s.max_trades_per_day}`;
     const pnlEl = document.getElementById("autoPnlToday");
@@ -2357,14 +2406,23 @@ async function pollAutoTradeState() {
       document.getElementById("autoScanAllFo").checked = !!s.scan_all_fo;
       onScanAllFoToggle();
     }
+    if (!window.__slTargetModeSyncedOnce) {
+      window.__slTargetModeSyncedOnce = true;
+      document.getElementById("autoSlMode").value = s.sl_mode || "pct";
+      document.getElementById("autoTargetMode").value = s.target_mode || "pct";
+      document.getElementById("autoSlPoints").value = s.sl_points ?? 5;
+      document.getElementById("autoTargetPoints").value = s.target_points ?? 10;
+      document.getElementById("autoMaxConcurrent").value = s.max_concurrent_positions ?? 1;
+      onSlTargetModeChange();
+    }
     if (s.scan_all_fo && s.last_scan_universe_size) {
       document.getElementById("autoLastScan").textContent =
         (s.last_scan_at ? new Date(s.last_scan_at).toLocaleTimeString() : "—") +
         ` (${s.last_scan_universe_size} scanned this cycle)`;
     }
     renderAutoScanTable(autoLastCandidates, s.mode);
-    renderAutoOpenPosition(d.open_trades && d.open_trades[0]);
-    updateAutoPositionChart(d.open_trades && d.open_trades[0]);
+    renderAutoOpenPosition(d.open_trades);
+    updateAutoPositionChart(d.open_trades);
     renderAutoLog(d.recent_trades || []);
   } catch (e) { /* silent — next poll will retry */ }
 }
@@ -2381,10 +2439,14 @@ function renderAutoScanTable(candidates, mode) {
     const trendPill = c.trend_aligned === true ? '<span class="pill ok">aligned</span>'
       : c.trend_aligned === false ? '<span class="pill warn">counter</span>'
       : '<span class="legend">n/a</span>';
+    const confClass = c.confidence === "High" ? "ok" : c.confidence === "Medium" ? "warn" : "bad";
+    const detectedTime = c.detected_at ? new Date(c.detected_at).toLocaleTimeString() : "—";
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${c.symbol}</td>
       <td class="${dirClass}">${c.direction === "CE" ? "Bullish breakout (buy CE)" : "Bearish breakdown (buy PE)"}</td>
+      <td style="font-size:12px; color:var(--muted);">${detectedTime}</td>
+      <td><span class="pill ${confClass}">${c.confidence || "—"}</span></td>
       <td>${c.score}</td>
       <td>${trendPill}</td>
       <td>${c.rsi != null ? c.rsi : "—"}</td>
@@ -2398,15 +2460,40 @@ function renderAutoScanTable(candidates, mode) {
 async function executeAutoSignal(idx) {
   const candidate = autoLastCandidates[idx];
   if (!candidate) return;
-  if (!confirm(`Buy ATM ${candidate.direction} on ${candidate.symbol} right now at market, with your ` +
-               `configured stop-loss/target? This is a REAL order.`)) return;
+  let preview;
+  try {
+    const pr = await apiFetch("/api/autotrade/preview-signal", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({symbol: candidate.symbol, direction: candidate.direction, breakout_level: candidate.breakout_level})
+    });
+    preview = await pr.json();
+    if (preview.error) { alert("Couldn't resolve a contract to buy: " + preview.error); return; }
+  } catch (e) { alert("Couldn't reach the server to preview this trade: " + e); return; }
+
+  const o = preview.order_info;
+  const totalCost = Math.round(o.premium * o.quantity);
+  const staleWarning = o.still_valid === false
+    ? `\n\n⚠️ WARNING: price has already moved back through the breakout level (${candidate.breakout_level}) ` +
+      `since this was detected — spot is now ${o.spot}. This breakout may already be over. You can still ` +
+      `proceed, but it's a materially weaker entry than when it was first flagged.\n`
+    : "";
+  const confirmMsg =
+    `About to BUY (real order, market price):\n\n` +
+    `  ${o.tradingsymbol}\n` +
+    `  Strike ${o.strike} ${candidate.direction} · expiry ${o.expiry}\n` +
+    `  Qty ${o.quantity} (${o.lots} lot${o.lots > 1 ? "s" : ""} of ${o.lot_size})\n` +
+    `  Live premium ~₹${o.premium} · est. total ~₹${totalCost}` +
+    staleWarning +
+    `\nStop-loss/target will be managed automatically from here. Proceed?`;
+  if (!confirm(confirmMsg)) return;
+
   try {
     const r = await apiFetch("/api/autotrade/execute-signal", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({confirmed: true, candidate})
     });
     const d = await r.json();
-    if (d.error) { alert("Error: " + d.error); return; }
+    if (d.error) { alert("Order failed: " + d.error); return; }
     alert(`Placed: BUY ${d.trade.tradingsymbol} x${d.trade.quantity} @ ~₹${d.trade.entry_price}`);
     pollAutoTradeState();
   } catch (e) { alert("Request failed: " + e); }
@@ -2420,41 +2507,63 @@ async function scanAutoTradeNow() {
     const d = await r.json();
     if (d.error) { status.textContent = "Error: " + d.error; return; }
     autoLastCandidates = d.candidates || [];
-    const modeBtn = document.getElementById("autoModeAutoBtn").classList.contains("active") ? "auto" : "manual";
-    renderAutoScanTable(autoLastCandidates, modeBtn);
+    renderAutoScanTable(autoLastCandidates, autoCurrentMode || "manual");
     status.textContent = d.errors && d.errors.length ? `Done, with notes: ${d.errors.join(" | ")}` : "Done.";
   } catch (e) { status.textContent = "Request failed: " + e; }
 }
 
 let autoPositionChartInstance = null;
-let positionChartTradeKey = null;
-let positionChartPoints = [];
 
-function updateAutoPositionChart(trade) {
+let positionChartHistories = {};  // tradeKey -> [{t, ltp}] -- kept per open trade, not just one
+
+function updateAutoPositionChart(trades, fromSelector) {
+  trades = trades || [];
+  window.__lastOpenTrades = trades;
   const wrap = document.getElementById("autoPositionChartWrap");
-  if (!trade) {
-    wrap.style.display = "none";
-    positionChartTradeKey = null;
-    positionChartPoints = [];
+  const selectorWrap = document.getElementById("autoPositionChartSelectorWrap");
+  const select = document.getElementById("autoPositionChartSelect");
+
+  if (!trades.length) {
+    wrap.style.display = "none"; selectorWrap.style.display = "none";
+    positionChartHistories = {};
     if (autoPositionChartInstance) { autoPositionChartInstance.destroy(); autoPositionChartInstance = null; }
     return;
   }
-  const key = `${trade.tradingsymbol}@${trade.opened_at}`;
-  if (key !== positionChartTradeKey) {
-    // New position (or first time we've seen one) -- start a fresh in-memory series. This is
-    // built live from quote polls, not historical data, since it's tracking the CURRENT trade.
-    positionChartTradeKey = key;
-    positionChartPoints = [{ t: Date.now(), ltp: trade.entry_price }];
+
+  // Keep a live in-memory LTP history per open trade (built from quote polls, not historical data).
+  const liveKeys = new Set();
+  trades.forEach(trade => {
+    const key = `${trade.tradingsymbol}@${trade.opened_at}`;
+    liveKeys.add(key);
+    if (!positionChartHistories[key]) positionChartHistories[key] = [{ t: Date.now(), ltp: trade.entry_price }];
+    const hist = positionChartHistories[key];
+    const last = hist[hist.length - 1];
+    if (!last || trade.last_ltp !== last.ltp) hist.push({ t: Date.now(), ltp: trade.last_ltp });
+  });
+  Object.keys(positionChartHistories).forEach(k => { if (!liveKeys.has(k)) delete positionChartHistories[k]; });
+
+  if (trades.length > 1) {
+    selectorWrap.style.display = "flex";
+    if (!fromSelector) {
+      const prevSelected = select.value;
+      select.innerHTML = trades.map(t => {
+        const key = `${t.tradingsymbol}@${t.opened_at}`;
+        return `<option value="${key}">${t.tradingsymbol}</option>`;
+      }).join("");
+      if (liveKeys.has(prevSelected)) select.value = prevSelected;
+    }
+  } else {
+    selectorWrap.style.display = "none";
   }
-  const last = positionChartPoints[positionChartPoints.length - 1];
-  if (!last || trade.last_ltp !== last.ltp) {
-    positionChartPoints.push({ t: Date.now(), ltp: trade.last_ltp });
-  }
+
+  const activeKey = trades.length > 1 && select.value ? select.value : `${trades[0].tradingsymbol}@${trades[0].opened_at}`;
+  const trade = trades.find(t => `${t.tradingsymbol}@${t.opened_at}` === activeKey) || trades[0];
+  const points = positionChartHistories[`${trade.tradingsymbol}@${trade.opened_at}`] || [];
   wrap.style.display = "block";
 
-  const labels = positionChartPoints.map(p => new Date(p.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
-  const ltpSeries = positionChartPoints.map(p => p.ltp);
-  const flat = (val) => positionChartPoints.map(() => val);
+  const labels = points.map(p => new Date(p.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  const ltpSeries = points.map(p => p.ltp);
+  const flat = (val) => points.map(() => val);
 
   const datasets = [
     { label: "Live LTP", data: ltpSeries, borderColor: "#5b8def", backgroundColor: "rgba(91,141,239,.12)",
@@ -2481,24 +2590,29 @@ function updateAutoPositionChart(trade) {
   });
 }
 
-function renderAutoOpenPosition(trade) {
+function renderAutoOpenPosition(trades) {
   const box = document.getElementById("autoOpenPositionBox");
-  if (!trade) { box.innerHTML = `<div class="legend">No auto-trade position currently open.</div>`; return; }
-  const pnl = (trade.last_ltp - trade.entry_price) * trade.quantity;
-  const pnlClass = pnl >= 0 ? "pnl-pos" : "pnl-neg";
-  box.innerHTML = `
-    <div class="leg-grid">
-      <div class="leg-card"><div class="k">Contract</div><div class="v" style="font-size:14px;">${trade.tradingsymbol}</div></div>
-      <div class="leg-card"><div class="k">Qty</div><div class="v">${trade.quantity}</div></div>
-      <div class="leg-card"><div class="k">Entry premium</div><div class="v">₹${trade.entry_price}</div></div>
-      <div class="leg-card"><div class="k">Live LTP</div><div class="v">₹${trade.last_ltp}</div></div>
-    </div>
-    <div class="metric-row">
-      <div class="metric ${pnl >= 0 ? 'profit' : 'loss'}"><div class="k">Live P&amp;L</div><div class="v ${pnlClass}">₹${pnl.toFixed(2)}</div></div>
-      <div class="metric"><div class="k">Stop-loss</div><div class="v">₹${trade.sl_price}${trade.trail_active ? ' (trailing)' : ''}</div></div>
-      <div class="metric"><div class="k">Target</div><div class="v">₹${trade.target_price}</div></div>
-    </div>
-    <div class="legend">${trade.reasoning}</div>`;
+  if (!trades || !trades.length) { box.innerHTML = `<div class="legend">No auto-trade position currently open.</div>`; return; }
+  box.innerHTML = trades.map(trade => {
+    const pnl = (trade.last_ltp - trade.entry_price) * trade.quantity;
+    const pnlClass = pnl >= 0 ? "pnl-pos" : "pnl-neg";
+    return `
+    <div style="border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px;">
+      <div class="leg-grid">
+        <div class="leg-card"><div class="k">Contract</div><div class="v" style="font-size:14px;">${trade.tradingsymbol}</div></div>
+        <div class="leg-card"><div class="k">Qty</div><div class="v">${trade.quantity}</div></div>
+        <div class="leg-card"><div class="k">Entry premium</div><div class="v">₹${trade.entry_price}</div></div>
+        <div class="leg-card"><div class="k">Live LTP</div><div class="v">₹${trade.last_ltp}</div></div>
+      </div>
+      <div class="metric-row">
+        <div class="metric ${pnl >= 0 ? 'profit' : 'loss'}"><div class="k">Live P&amp;L</div><div class="v ${pnlClass}">₹${pnl.toFixed(2)}</div></div>
+        <div class="metric"><div class="k">Stop-loss</div><div class="v">₹${trade.sl_price}${trade.trail_active ? ' (trailing)' : ''}</div></div>
+        <div class="metric"><div class="k">Target</div><div class="v">₹${trade.target_price}</div></div>
+        <div class="metric"><div class="k">Confidence at entry</div><div class="v" style="font-size:15px;">${trade.confidence || '—'}</div></div>
+      </div>
+      <div class="legend">Detected ${trade.detected_at ? new Date(trade.detected_at).toLocaleTimeString() : '—'} · ${trade.reasoning}</div>
+    </div>`;
+  }).join("");
 }
 
 function renderAutoLog(trades) {
