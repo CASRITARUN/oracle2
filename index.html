@@ -640,7 +640,7 @@
   <div class="panel">
     <h2>Real-time chart</h2>
     <div class="row" style="align-items:flex-end; gap:14px;">
-      <label class="inline">Symbol <select id="autoChartSymbol"></select></label>
+      <label class="inline">Symbol <input type="text" id="autoChartSymbol" list="foUniverseList" value="NIFTY" style="width:140px;" /></label>
       <label class="inline">Interval
         <select id="autoChartInterval">
           <option value="5minute">5 min</option>
@@ -668,9 +668,11 @@
     <div class="row">
       <button class="secondary small-btn" onclick="scanAutoTradeNow()">Scan now</button>
       <span class="loading" id="autoScanStatus"></span>
+      <label class="inline">Filter: min score <input type="number" id="autoScanMinScoreFilter" value="0" min="0" step="0.1" style="width:70px;" oninput="renderAutoScanTable(autoLastCandidates, autoCurrentMode || 'manual')" /></label>
+      <span class="legend">Scores update every scan cycle — use "Recheck" on a row for its score right now, or "Dismiss" to hide a stale row until the next scan.</span>
     </div>
     <table id="autoScanTable" style="margin-top:12px; display:none;">
-      <thead><tr><th>Symbol</th><th>Direction</th><th>Detected</th><th>Confidence</th><th>Score</th><th>Trend</th><th>RSI</th><th>Volume</th><th>Reasoning</th><th></th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Direction</th><th>Detected</th><th>Confidence</th><th>Score</th><th>Trend</th><th>RSI</th><th>Volume</th><th>Reasoning</th><th colspan="2"></th></tr></thead>
       <tbody id="autoScanBody"></tbody>
     </table>
     <div class="legend" id="autoScanEmpty">No breakout candidates yet — click "Scan now" or arm the loop above.</div>
@@ -2223,13 +2225,6 @@ function renderAutoUniverseTags() {
     <span class="pill ok" style="display:inline-flex; align-items:center; gap:6px;">
       ${sym} <span style="cursor:pointer; font-weight:700;" onclick="removeAutoUniverseSymbol('${sym}')">&times;</span>
     </span>`).join("") || `<span class="legend">No symbols added yet.</span>`;
-  const sel = document.getElementById("autoChartSymbol");
-  const current = sel.value;
-  sel.innerHTML = "";
-  autoUniverseSymbols.forEach(sym => {
-    const opt = document.createElement("option"); opt.value = sym; opt.textContent = sym; sel.appendChild(opt);
-  });
-  if (autoUniverseSymbols.includes(current)) sel.value = current;
 }
 
 function addAutoUniverseSymbol() {
@@ -2354,11 +2349,6 @@ async function saveAutoConfig() {
     });
     const d = await r.json();
     if (d.error) { alert("Error: " + d.error); return; }
-    const sel = document.getElementById("autoChartSymbol");
-    sel.innerHTML = "";
-    body.universe.forEach(sym => {
-      const opt = document.createElement("option"); opt.value = sym; opt.textContent = sym; sel.appendChild(opt);
-    });
     loadAutoChart();
     alert("Settings saved.");
   } catch (e) { alert("Request failed: " + e); }
@@ -2427,21 +2417,36 @@ async function pollAutoTradeState() {
   } catch (e) { /* silent — next poll will retry */ }
 }
 
+let dismissedCandidateKeys = new Set();
+
 function renderAutoScanTable(candidates, mode) {
   const table = document.getElementById("autoScanTable");
   const empty = document.getElementById("autoScanEmpty");
   const tbody = document.getElementById("autoScanBody");
-  if (!candidates.length) { table.style.display = "none"; empty.style.display = "block"; return; }
+  const minScore = Number(document.getElementById("autoScanMinScoreFilter").value) || 0;
+  const visible = candidates
+    .map((c, originalIdx) => ({ c, originalIdx }))
+    .filter(({ c }) => c.score >= minScore && !dismissedCandidateKeys.has(c.symbol + c.direction));
+  if (!visible.length) {
+    table.style.display = "none";
+    empty.style.display = "block";
+    empty.textContent = candidates.length
+      ? "No candidates match the current filter (or all were dismissed)."
+      : 'No breakout candidates yet — click "Scan now" or arm the loop above.';
+    return;
+  }
   empty.style.display = "none"; table.style.display = "table";
   tbody.innerHTML = "";
-  candidates.forEach((c, idx) => {
+  visible.forEach(({ c, originalIdx }) => {
     const dirClass = c.direction === "CE" ? "buy" : "sell";
     const trendPill = c.trend_aligned === true ? '<span class="pill ok">aligned</span>'
       : c.trend_aligned === false ? '<span class="pill warn">counter</span>'
       : '<span class="legend">n/a</span>';
     const confClass = c.confidence === "High" ? "ok" : c.confidence === "Medium" ? "warn" : "bad";
     const detectedTime = c.detected_at ? new Date(c.detected_at).toLocaleTimeString() : "—";
+    const rowId = `scanRow_${originalIdx}`;
     const tr = document.createElement("tr");
+    tr.id = rowId;
     tr.innerHTML = `
       <td>${c.symbol}</td>
       <td class="${dirClass}">${c.direction === "CE" ? "Bullish breakout (buy CE)" : "Bearish breakdown (buy PE)"}</td>
@@ -2452,9 +2457,48 @@ function renderAutoScanTable(candidates, mode) {
       <td>${c.rsi != null ? c.rsi : "—"}</td>
       <td>${c.volume_confirmed ? '<span class="pill ok">confirmed</span>' : '<span class="pill warn">weak</span>'}</td>
       <td style="font-size:12px; color:var(--muted); max-width:340px;">${c.reasoning}</td>
-      <td>${mode === "manual" ? `<button class="small-btn" onclick="executeAutoSignal(${idx})">Execute</button>` : "<span class=\"legend\">auto-executes</span>"}</td>`;
+      <td style="white-space:nowrap;">
+        ${mode === "manual" ? `<button class="small-btn" onclick="executeAutoSignal(${originalIdx})">Execute</button>` : `<span class="legend">auto-executes</span>`}
+        <button class="secondary small-btn" onclick="recheckAutoSignal(${originalIdx})" title="Fetch this symbol's current score right now">Recheck</button>
+        <button class="secondary small-btn" onclick="viewSymbolInChart('${c.symbol}')" title="Load this symbol into the real-time chart above">Chart</button>
+      </td>
+      <td><span style="cursor:pointer; font-weight:700; color:var(--muted);" onclick="dismissAutoSignal('${c.symbol}','${c.direction}')" title="Hide this row until the next scan">&times;</span></td>`;
     tbody.appendChild(tr);
   });
+}
+
+function dismissAutoSignal(symbol, direction) {
+  dismissedCandidateKeys.add(symbol + direction);
+  renderAutoScanTable(autoLastCandidates, autoCurrentMode || "manual");
+}
+
+async function recheckAutoSignal(idx) {
+  const candidate = autoLastCandidates[idx];
+  if (!candidate) return;
+  const row = document.getElementById(`scanRow_${idx}`);
+  if (row) row.style.opacity = "0.5";
+  try {
+    const r = await apiFetch("/api/autotrade/rescan-one", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({symbol: candidate.symbol})
+    });
+    const d = await r.json();
+    if (d.error) { alert("Error: " + d.error); if (row) row.style.opacity = "1"; return; }
+    if (!d.candidate) {
+      alert(d.message || `${candidate.symbol} is no longer breaking out.`);
+      dismissedCandidateKeys.add(candidate.symbol + candidate.direction);
+      renderAutoScanTable(autoLastCandidates, autoCurrentMode || "manual");
+      return;
+    }
+    autoLastCandidates[idx] = d.candidate;
+    renderAutoScanTable(autoLastCandidates, autoCurrentMode || "manual");
+  } catch (e) { alert("Request failed: " + e); if (row) row.style.opacity = "1"; }
+}
+
+function viewSymbolInChart(symbol) {
+  document.getElementById("autoChartSymbol").value = symbol;
+  loadAutoChart();
+  document.getElementById("autoChartSymbol").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 async function executeAutoSignal(idx) {
@@ -2507,6 +2551,7 @@ async function scanAutoTradeNow() {
     const d = await r.json();
     if (d.error) { status.textContent = "Error: " + d.error; return; }
     autoLastCandidates = d.candidates || [];
+    dismissedCandidateKeys.clear();
     renderAutoScanTable(autoLastCandidates, autoCurrentMode || "manual");
     status.textContent = d.errors && d.errors.length ? `Done, with notes: ${d.errors.join(" | ")}` : "Done.";
   } catch (e) { status.textContent = "Request failed: " + e; }
