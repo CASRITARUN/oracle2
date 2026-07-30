@@ -50,6 +50,8 @@ except ImportError:
 
 import numpy as np
 import requests
+from dataclasses import dataclass, field
+from typing import List, Optional, Callable, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------------
 # CONFIG — fill these in from https://developers.kite.trade (your app)
@@ -539,6 +541,617 @@ def implied_vol(price, S, K, T, opt_type, r=RISK_FREE_RATE):
         else:
             lo = mid
     return (lo + hi) / 2
+
+
+# ---------------------------------------------------------------------------
+# Greeks — Gamma / Theta / Vega (Delta/Price/IV are above) + portfolio aggregation, used by the
+# Dynamic Delta-Neutral Adjustment Engine further down. Reuses the exact same bs_price / bs_delta /
+# norm_cdf already defined above so every Greek across the whole app is priced identically.
+#
+# Sign convention: a SHORT leg (you sold it) contributes the NEGATIVE of the raw per-unit option
+# Greek to the portfolio; a LONG leg (bought, e.g. a hedge) contributes the raw (positive) Greek.
+# This is expressed by passing `quantity` already signed (negative = short, positive = long) — every
+# Greek is multiplied by that signed quantity, so the sign logic lives in exactly one place.
+# ---------------------------------------------------------------------------
+def norm_pdf(x):
+    return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
+
+
+def _d1_d2(S, K, T, r, sigma):
+    d1 = (math.log(S / K) + (r + sigma ** 2 / 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return d1, d2
+
+
+def bs_gamma(S, K, T, r, sigma):
+    """Identical for calls and puts at the same strike/expiry. Per 1-point move in the underlying."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    d1, _ = _d1_d2(S, K, T, r, sigma)
+    return norm_pdf(d1) / (S * sigma * math.sqrt(T))
+
+
+def bs_vega(S, K, T, r, sigma):
+    """Per 1 percentage point (0.01) change in IV — the convention traders actually quote."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    d1, _ = _d1_d2(S, K, T, r, sigma)
+    return S * norm_pdf(d1) * math.sqrt(T) / 100.0
+
+
+def bs_theta(S, K, T, r, sigma, opt_type):
+    """Per calendar day (annualized theta / 365)."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    d1, d2 = _d1_d2(S, K, T, r, sigma)
+    term1 = -(S * norm_pdf(d1) * sigma) / (2 * math.sqrt(T))
+    if opt_type == "CE":
+        term2 = -r * K * math.exp(-r * T) * norm_cdf(d2)
+    else:
+        term2 = r * K * math.exp(-r * T) * norm_cdf(-d2)
+    return (term1 + term2) / 365.0
+
+
+@dataclass
+class LegGreeks:
+    tradingsymbol: str
+    role: str            # "sell_call" | "sell_put" | "buy_call" | "buy_put" | ...
+    opt_type: str         # "CE" | "PE"
+    strike: float
+    quantity: int          # SIGNED: negative for short legs, positive for long legs
+    ltp: float
+    delta: float
+    gamma: float
+    theta: float
+    vega: float
+    mtm: float
+
+
+@dataclass
+class PortfolioGreeks:
+    symbol: str
+    spot: float
+    net_delta: float = 0.0
+    net_gamma: float = 0.0
+    net_theta: float = 0.0
+    net_vega: float = 0.0
+    mtm: float = 0.0
+    legs: List[LegGreeks] = field(default_factory=list)
+
+    def as_dict(self):
+        return {
+            "symbol": self.symbol, "spot": self.spot,
+            "net_delta": round(self.net_delta, 2), "net_gamma": round(self.net_gamma, 4),
+            "net_theta": round(self.net_theta, 2), "net_vega": round(self.net_vega, 2),
+            "mtm": round(self.mtm, 2),
+            "legs": [vars(l) for l in self.legs],
+        }
+
+
+class PortfolioGreeksEngine:
+    """Computes per-leg and portfolio-level Greeks from plain dicts. The caller is responsible for
+    fetching live spot/LTP/IV and passing them in."""
+
+    def __init__(self, risk_free_rate=RISK_FREE_RATE):
+        self.r = risk_free_rate
+
+    def leg_greeks(self, *, opt_type, strike, spot, T, iv, ltp, quantity, role, tradingsymbol,
+                   entry_premium=None):
+        delta = bs_delta(spot, strike, T, self.r, iv, opt_type) * quantity
+        gamma = bs_gamma(spot, strike, T, self.r, iv) * quantity
+        theta = bs_theta(spot, strike, T, self.r, iv, opt_type) * quantity
+        vega = bs_vega(spot, strike, T, self.r, iv) * quantity
+        mtm = 0.0
+        if entry_premium is not None:
+            # Short leg profits when ltp falls below entry premium; long leg profits when ltp rises.
+            per_unit_pnl = (entry_premium - ltp) if quantity < 0 else (ltp - entry_premium)
+            mtm = per_unit_pnl * abs(quantity)
+        return LegGreeks(tradingsymbol, role, opt_type, strike, quantity, ltp,
+                          round(delta, 4), round(gamma, 6), round(theta, 4), round(vega, 4),
+                          round(mtm, 2))
+
+    def portfolio_greeks(self, symbol, spot, legs):
+        """legs: iterable of dicts, each with opt_type, strike, T, iv, ltp, quantity (signed), role,
+        tradingsymbol, and optionally entry_premium (for MTM)."""
+        pg = PortfolioGreeks(symbol=symbol, spot=spot)
+        for leg in legs:
+            lg = self.leg_greeks(**leg)
+            pg.legs.append(lg)
+            pg.net_delta += lg.delta
+            pg.net_gamma += lg.gamma
+            pg.net_theta += lg.theta
+            pg.net_vega += lg.vega
+            pg.mtm += lg.mtm
+        return pg
+
+
+# ---------------------------------------------------------------------------
+# Risk Management — configurable gates for the Delta Neutral Adjustment Engine. Every check here is
+# a pure function of (limits, current numbers) -> (allowed: bool, reason: str); nothing in this
+# section places or cancels orders, it only decides whether the Adjustment Engine / Execution code
+# further down is ALLOWED to act.
+# ---------------------------------------------------------------------------
+@dataclass
+class RiskLimits:
+    max_adjustments_per_day: int = 6
+    max_loss_per_position: float = 15000.0        # Rs, absolute MTM loss on a single position
+    max_daily_mtm_loss: float = 25000.0            # Rs, absolute MTM loss across ALL positions today
+    min_premium_for_adjustment: float = 8.0        # Rs; don't roll/adjust into a leg worth less than this
+    profit_targets_pct: Tuple[float, ...] = (25.0, 50.0, 70.0, 90.0)   # staged profit-booking levels
+    stop_loss_pct: float = 200.0                   # % of credit received; exit if MTM loss exceeds this
+
+
+class RiskManager:
+    def __init__(self, limits: RiskLimits):
+        self.limits = limits
+
+    def can_adjust(self, *, adjustments_today: int, position_mtm: float, daily_mtm: float,
+                    proposed_leg_premium: Optional[float] = None) -> Tuple[bool, str]:
+        if adjustments_today >= self.limits.max_adjustments_per_day:
+            return False, f"Max adjustments/day reached ({self.limits.max_adjustments_per_day})"
+        if position_mtm <= -abs(self.limits.max_loss_per_position):
+            return False, f"Position MTM loss (Rs {position_mtm:.0f}) exceeds max loss per position"
+        if daily_mtm <= -abs(self.limits.max_daily_mtm_loss):
+            return False, f"Daily MTM loss (Rs {daily_mtm:.0f}) exceeds max daily loss for this symbol"
+        if proposed_leg_premium is not None and proposed_leg_premium < self.limits.min_premium_for_adjustment:
+            return False, (f"Proposed leg premium Rs {proposed_leg_premium:.2f} is below the minimum "
+                            f"Rs {self.limits.min_premium_for_adjustment} required to bother adjusting")
+        return True, "OK"
+
+    def breached_daily_loss(self, daily_mtm: float) -> bool:
+        return daily_mtm <= -abs(self.limits.max_daily_mtm_loss)
+
+    def profit_target_hit(self, credit_received: float, current_mtm: float) -> Optional[float]:
+        """Returns the highest configured profit-target % that's been reached, or None. Positions
+        are meant to be closed in FULL the moment any configured target is hit."""
+        if credit_received <= 0:
+            return None
+        pct_captured = (current_mtm / credit_received) * 100.0
+        hit = [t for t in sorted(self.limits.profit_targets_pct) if pct_captured >= t]
+        return max(hit) if hit else None
+
+    def stop_loss_hit(self, credit_received: float, current_mtm: float) -> bool:
+        if credit_received <= 0:
+            return False
+        loss_pct = (-current_mtm / credit_received) * 100.0
+        return loss_pct >= self.limits.stop_loss_pct
+
+
+# ---------------------------------------------------------------------------
+# Adjustment Engine — Scenario A/B logic and a transparent multi-factor scorer (this IS the "AI
+# Recommendation Engine" from the spec, implemented as an inspectable weighted-score model rather
+# than an opaque trained model, so every number that drives a decision is loggable and auditable).
+#
+# --- Why net delta goes NEGATIVE when the market moves UP (easy to get backwards) ---
+# Selling a call is a short-delta position (lose as price rises, like being short the underlying);
+# selling a put is a long-delta position (lose as price falls, like being long the underlying). In a
+# roughly delta-neutral short strangle/condor, both are sized to net close to zero. If the underlying
+# RISES: the short call moves closer to the money -> its delta magnitude grows -> your (negative)
+# delta exposure from that leg grows more negative; the short put moves further OTM -> its delta
+# shrinks toward zero -> your (positive) exposure from that leg shrinks. Both effects push net
+# portfolio delta MORE NEGATIVE as spot rises (consistent with losing money as price rises = negative
+# delta). The mirror is true on the way down:
+#     net_delta very NEGATIVE  <=>  market has moved UP, the CALL side is under stress  (Scenario A)
+#     net_delta very POSITIVE  <=>  market has moved DOWN, the PUT side is under stress (Scenario B)
+# ---------------------------------------------------------------------------
+@dataclass
+class AdjustmentCandidate:
+    action: str                  # "roll_put_up" | "roll_call_down" | "roll_call_further_otm" |
+                                  # "roll_put_further_otm" | "convert_iron_fly" | "add_hedge" | "no_action"
+    description: str
+    legs_to_close: list = field(default_factory=list)   # leg dicts to buy back / sell to close
+    legs_to_open: list = field(default_factory=list)    # leg dicts describing the new legs
+    expected_delta_after: float = 0.0
+    additional_premium: float = 0.0     # Rs collected (positive) or paid (negative) net of this adjustment
+    margin_impact: float = 0.0          # Rs, additional margin this adjustment is expected to require
+    risk_reduction_score: float = 0.0   # 0-1: how much closer to delta-neutral this gets you
+    probability_of_profit: float = 0.0  # 0-1
+    expected_drawdown: float = 0.0      # Rs, rough worst-case add-on risk from taking this action
+    score: float = 0.0
+    reasoning: str = ""
+
+
+class AdjustmentEngine:
+    def __init__(self, delta_threshold=10.0, gamma_threshold=None, weights=None):
+        self.delta_threshold = delta_threshold
+        self.gamma_threshold = gamma_threshold
+        # Weighted composite score — every factor normalized to a comparable 0..1-ish scale before
+        # weighting, so no single factor dominates purely because of its raw units (Rs vs a
+        # probability vs a percentage). Weights are configurable from Settings.
+        self.weights = weights or {
+            "expected_profit": 0.30, "risk_reduction": 0.30, "additional_premium": 0.15,
+            "margin_impact": 0.10, "probability_of_profit": 0.10, "expected_drawdown": 0.05,
+        }
+
+    def needs_adjustment(self, net_delta: float, net_gamma: Optional[float] = None):
+        """Ignore small delta changes — only trigger on a genuine, configured threshold breach."""
+        if abs(net_delta) < self.delta_threshold:
+            return False, "Delta within threshold, no action needed"
+        return True, f"Net delta {net_delta:+.1f} exceeds threshold +/-{self.delta_threshold}"
+
+    def scenario(self, net_delta: float) -> str:
+        """See class docstring above for the sign derivation. "up" = call side under stress (market
+        has risen); "down" = put side under stress (market has fallen)."""
+        return "up" if net_delta < 0 else "down"
+
+    def generate_candidates(self, position, portfolio_greeks, candidate_fetcher: Callable) -> List[AdjustmentCandidate]:
+        """Builds every viable AdjustmentCandidate for the current breach, per the priority list:
+        roll the threatened short strike further away, OR roll the calmer side's short strike closer
+        (collects more premium and adds offsetting delta), OR convert to an Iron Fly if that
+        materially flattens delta, OR add a standalone hedge if no roll alone brings delta back in
+        range. `candidate_fetcher(scenario, position, portfolio_greeks) -> list[dict]` supplies the
+        actual tradable strikes/premiums (live option chain)."""
+        scenario = self.scenario(portfolio_greeks.net_delta)
+        raw = candidate_fetcher(scenario, position, portfolio_greeks) or []
+        candidates = [AdjustmentCandidate(**c) for c in raw]
+        if not candidates:
+            candidates.append(AdjustmentCandidate(
+                action="no_action",
+                description="No viable roll/hedge candidate found within the configured strike/delta range",
+                expected_delta_after=portfolio_greeks.net_delta))
+        return candidates
+
+    def _score_candidate(self, cand: AdjustmentCandidate) -> AdjustmentCandidate:
+        expected_profit_norm = min(max(cand.additional_premium / 500.0, -1.0), 1.0)
+        risk_reduction_norm = min(max(cand.risk_reduction_score, 0.0), 1.0)
+        additional_premium_norm = min(max(cand.additional_premium / 500.0, -1.0), 1.0)
+        margin_norm = 1.0 - min(max(cand.margin_impact / 50000.0, 0.0), 1.0)
+        pop_norm = min(max(cand.probability_of_profit, 0.0), 1.0)
+        drawdown_norm = 1.0 - min(max(cand.expected_drawdown / 20000.0, 0.0), 1.0)
+
+        w = self.weights
+        score = (w["expected_profit"] * expected_profit_norm
+                 + w["risk_reduction"] * risk_reduction_norm
+                 + w["additional_premium"] * additional_premium_norm
+                 + w["margin_impact"] * margin_norm
+                 + w["probability_of_profit"] * pop_norm
+                 + w["expected_drawdown"] * drawdown_norm)
+        cand.score = round(score, 4)
+        cand.reasoning = (
+            f"{cand.action}: expected_profit={expected_profit_norm:.2f}, risk_reduction={risk_reduction_norm:.2f}, "
+            f"premium={additional_premium_norm:.2f}, margin={margin_norm:.2f}, pop={pop_norm:.2f}, "
+            f"drawdown={drawdown_norm:.2f} -> composite score {cand.score}"
+        )
+        return cand
+
+    def recommend(self, position, portfolio_greeks, candidate_fetcher: Callable):
+        """Full pipeline: threshold check -> generate candidates -> score -> pick the best.
+        Returns (recommended: AdjustmentCandidate | None, all_candidates: list, trigger_reason: str)."""
+        trigger, reason = self.needs_adjustment(portfolio_greeks.net_delta, portfolio_greeks.net_gamma)
+        if not trigger:
+            return None, [], reason
+        candidates = self.generate_candidates(position, portfolio_greeks, candidate_fetcher)
+        for c in candidates:
+            self._score_candidate(c)
+        candidates.sort(key=lambda c: c.score, reverse=True)
+        best = candidates[0] if candidates else None
+        return best, candidates, reason
+
+
+# ---------------------------------------------------------------------------
+# Execution wrapper — thin and deliberately dependency-injected: it takes backend's OWN
+# place_basket_orders function as an argument rather than calling the broker directly, so there is
+# exactly one place in this file that ever calls the real broker order-placement API.
+# ---------------------------------------------------------------------------
+@dataclass
+class ExecutionResult:
+    ok: bool
+    orders: list = field(default_factory=list)
+    error: str = None
+
+
+class AdjustmentExecutor:
+    def __init__(self, place_orders_fn: Callable[[List[Dict[str, Any]], str, str], list], product="NRML"):
+        self.place_orders_fn = place_orders_fn
+        self.product = product
+
+    def _build_legs(self, candidate):
+        legs = []
+        for leg in candidate.legs_to_close:
+            legs.append({
+                "leg": f"close_{leg['role']}", "tradingsymbol": leg["tradingsymbol"],
+                "transaction_type": "BUY" if leg["quantity"] < 0 else "SELL",
+                "quantity": abs(leg["quantity"]),
+            })
+        for leg in candidate.legs_to_open:
+            legs.append({
+                "leg": f"open_{leg['role']}", "tradingsymbol": leg["tradingsymbol"],
+                "transaction_type": "SELL" if leg["role"].startswith("sell") else "BUY",
+                "quantity": abs(leg["quantity"]),
+            })
+        return legs
+
+    def execute(self, candidate, execution_mode="track"):
+        """In "track" mode (default, matches the auto-trade engine's paper-trading pattern), no real
+        order is sent — fills are simulated immediately so downstream P&L/logging behaves exactly as
+        it would live."""
+        legs = self._build_legs(candidate)
+        if not legs:
+            return ExecutionResult(ok=True, orders=[])
+        if execution_mode == "track":
+            simulated = [{"status": "placed", "order_id": f"TRACK-ADJ-{i}", **leg}
+                         for i, leg in enumerate(legs)]
+            return ExecutionResult(ok=True, orders=simulated)
+        results = self.place_orders_fn(legs, self.product, "MARKET")
+        failed = [r for r in results if r.get("status") != "placed"]
+        return ExecutionResult(ok=not failed, orders=results,
+                                error=None if not failed else f"{len(failed)} leg(s) failed to place")
+
+
+# ---------------------------------------------------------------------------
+# Adjustment logging — structured, append-only JSON-lines log of every adjustment considered/taken.
+# ---------------------------------------------------------------------------
+class AdjustmentLogger:
+    def __init__(self, log_path):
+        self.log_path = log_path
+        self._lock = threading.Lock()
+        d = os.path.dirname(log_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+
+    def log_adjustment(self, *, ts, symbol, spot, delta_before, delta_after, action,
+                        premium_collected, reason, execution_mode, candidates_considered=None):
+        entry = {
+            "ts": ts, "symbol": symbol, "spot": spot,
+            "delta_before": round(delta_before, 2), "delta_after": round(delta_after, 2),
+            "action": action,
+            "premium_collected": round(premium_collected, 2) if premium_collected else 0.0,
+            "reason": reason, "execution_mode": execution_mode,
+            "candidates_considered": candidates_considered or [],
+        }
+        with self._lock:
+            with open(self.log_path, "a") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+        return entry
+
+    def read_recent(self, limit=200):
+        if not os.path.exists(self.log_path):
+            return []
+        with self._lock:
+            with open(self.log_path, "r") as f:
+                lines = f.readlines()
+        out = []
+        for line in lines[-limit:]:
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+        out.reverse()
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Backtesting — approximate historical backtest for the Iron Condor / Strangle + Delta-Neutral
+# Adjustment strategy.
+#
+# READ THIS BEFORE TRUSTING ANY NUMBER THIS PRODUCES: Kite's historical-data API only returns
+# underlying spot/futures OHLC — it does NOT provide historical options-chain prices, per-strike
+# historical IV, or bid/ask history. This backtester RECONSTRUCTS option prices from historical
+# underlying daily closes using the same Black-Scholes pricer (bs_price/bs_delta above) plus a
+# user-supplied (or flat, default) IV assumption. That makes it a reasonable approximation of
+# strategy BEHAVIOR — how often delta breaches would trigger, how adjustments affect risk, roughly
+# how theta accrues — but the exact Rupee P&L numbers are indicative, not a substitute for
+# forward-testing in Track mode against real option prices before ever going live.
+# ---------------------------------------------------------------------------
+@dataclass
+class TradeResult:
+    entry_date: str
+    exit_date: str
+    entry_credit: float
+    exit_debit: float
+    pnl: float
+    holding_days: float
+    adjustments: int
+
+
+@dataclass
+class BacktestReport:
+    trades: List[TradeResult] = field(default_factory=list)
+    caveat: str = ("Option prices are Black-Scholes reconstructions from underlying daily closes + "
+                    "an assumed/derived IV, NOT real historical option quotes. Treat results as "
+                    "directional/behavioral, not exact P&L.")
+
+    def summary(self, starting_capital=500000.0):
+        if not self.trades:
+            return {"error": "No trades generated over this period", "caveat": self.caveat}
+        pnls = np.array([t.pnl for t in self.trades])
+        wins = pnls[pnls > 0]
+        losses = pnls[pnls <= 0]
+        total_return = float(pnls.sum())
+        total_days = sum(t.holding_days for t in self.trades) or 1
+        years = max(total_days / 365.0, 1 / 365.0)
+        annual_return_pct = (((starting_capital + total_return) / starting_capital) ** (1 / years) - 1) * 100
+        equity_curve = starting_capital + np.cumsum(pnls)
+        running_max = np.maximum.accumulate(equity_curve)
+        drawdown = (equity_curve - running_max) / running_max
+        max_drawdown_pct = float(drawdown.min() * 100)
+        trade_returns = pnls / starting_capital
+        sharpe = (float(np.mean(trade_returns) / np.std(trade_returns)) * math.sqrt(252)
+                  if np.std(trade_returns) > 0 else 0.0)
+        downside = trade_returns[trade_returns < 0]
+        sortino = (float(np.mean(trade_returns) / np.std(downside)) * math.sqrt(252)
+                   if len(downside) and np.std(downside) > 0 else 0.0)
+        calmar = (annual_return_pct / abs(max_drawdown_pct)) if max_drawdown_pct != 0 else 0.0
+        profit_factor = (float(wins.sum() / abs(losses.sum())) if losses.sum() != 0
+                          else (float("inf") if wins.sum() > 0 else 0.0))
+        return {
+            "total_return": round(total_return, 2),
+            "annual_return_pct": round(annual_return_pct, 2),
+            "win_rate_pct": round(float(len(wins) / len(pnls) * 100), 2),
+            "avg_winner": round(float(wins.mean()), 2) if len(wins) else 0.0,
+            "avg_loser": round(float(losses.mean()), 2) if len(losses) else 0.0,
+            "max_drawdown_pct": round(max_drawdown_pct, 2),
+            "sharpe_ratio": round(sharpe, 2),
+            "sortino_ratio": round(sortino, 2),
+            "calmar_ratio": round(calmar, 2),
+            "profit_factor": round(profit_factor, 2) if profit_factor != float("inf") else None,
+            "avg_holding_days": round(float(np.mean([t.holding_days for t in self.trades])), 2),
+            "avg_adjustments_per_trade": round(float(np.mean([t.adjustments for t in self.trades])), 2),
+            "num_trades": len(self.trades),
+            "caveat": self.caveat,
+        }
+
+
+class Backtester:
+    def __init__(self, delta_threshold_frac=0.10, profit_target_pct=50.0, stop_loss_pct=200.0,
+                 risk_free_rate=RISK_FREE_RATE, flat_iv_pct=None):
+        """delta_threshold_frac is in RAW delta units (e.g. 0.10) since this backtester works
+        per-share/per-unit rather than tracking actual lot-sized quantities."""
+        self.delta_threshold = delta_threshold_frac
+        self.profit_target_pct = profit_target_pct
+        self.stop_loss_pct = stop_loss_pct
+        self.r = risk_free_rate
+        self.flat_iv = (flat_iv_pct / 100.0) if flat_iv_pct else None
+
+    def run(self, daily_closes: List[float], dates: List[str], target_delta=0.18,
+            wing_width_pct=2.5, expiry_days=7, iv_series: Optional[List[float]] = None):
+        """Walks forward day by day, opening a fresh Iron Condor every `expiry_days`, applying the
+        delta-threshold roll rule daily, and closing on profit target / stop loss / expiry —
+        whichever comes first."""
+        report = BacktestReport()
+        i, n = 0, len(daily_closes)
+        while i < n - 1:
+            entry_spot = daily_closes[i]
+            iv = (iv_series[i] if iv_series else self.flat_iv) or 0.15
+            T_entry = expiry_days / 365.0
+            call_k = self._strike_for_delta(entry_spot, T_entry, iv, target_delta, "CE")
+            put_k = self._strike_for_delta(entry_spot, T_entry, iv, target_delta, "PE")
+            hedge_call_k = call_k * (1 + wing_width_pct / 100.0)
+            hedge_put_k = put_k * (1 - wing_width_pct / 100.0)
+            credit = (bs_price(entry_spot, call_k, T_entry, self.r, iv, "CE")
+                      + bs_price(entry_spot, put_k, T_entry, self.r, iv, "PE")
+                      - bs_price(entry_spot, hedge_call_k, T_entry, self.r, iv, "CE")
+                      - bs_price(entry_spot, hedge_put_k, T_entry, self.r, iv, "PE"))
+            adjustments = 0
+            j, exit_debit = i, None
+            while j < min(i + expiry_days, n - 1):
+                j += 1
+                spot_j = daily_closes[j]
+                T_rem = max((expiry_days - (j - i)) / 365.0, 1 / 365.0)
+                iv_j = (iv_series[j] if iv_series else self.flat_iv) or iv
+                net_delta = self._position_delta(spot_j, call_k, put_k, hedge_call_k, hedge_put_k, T_rem, iv_j)
+                if abs(net_delta) > self.delta_threshold:
+                    # Simple roll: shift the threatened side's short strike 30% of the way toward
+                    # spot (a coarse, backtest-appropriate version of "roll put up" / "roll call OTM").
+                    if net_delta < 0:
+                        put_k = put_k + (spot_j - put_k) * 0.3
+                    else:
+                        call_k = call_k - (call_k - spot_j) * 0.3
+                    adjustments += 1
+                debit_now = (bs_price(spot_j, call_k, T_rem, self.r, iv_j, "CE")
+                             + bs_price(spot_j, put_k, T_rem, self.r, iv_j, "PE")
+                             - bs_price(spot_j, hedge_call_k, T_rem, self.r, iv_j, "CE")
+                             - bs_price(spot_j, hedge_put_k, T_rem, self.r, iv_j, "PE"))
+                pnl_now = credit - debit_now
+                if credit > 0 and (pnl_now / credit * 100) >= self.profit_target_pct:
+                    exit_debit = debit_now
+                    break
+                if credit > 0 and (-pnl_now / credit * 100) >= self.stop_loss_pct:
+                    exit_debit = debit_now
+                    break
+            if exit_debit is None:
+                T_final = max((expiry_days - (j - i)) / 365.0, 0.0)
+                iv_final = (iv_series[j] if iv_series else self.flat_iv) or iv
+                exit_debit = (bs_price(daily_closes[j], call_k, T_final, self.r, iv_final, "CE")
+                              + bs_price(daily_closes[j], put_k, T_final, self.r, iv_final, "PE")
+                              - bs_price(daily_closes[j], hedge_call_k, T_final, self.r, iv_final, "CE")
+                              - bs_price(daily_closes[j], hedge_put_k, T_final, self.r, iv_final, "PE"))
+            pnl = credit - exit_debit
+            report.trades.append(TradeResult(dates[i], dates[j], round(credit, 2), round(exit_debit, 2),
+                                              round(pnl, 2), j - i, adjustments))
+            i = j + 1
+        return report
+
+    def _strike_for_delta(self, S, T, iv, target_delta, opt_type):
+        lo, hi = S * 0.8, S * 1.2
+        for _ in range(40):
+            mid = (lo + hi) / 2
+            delta = bs_delta(S, mid, T, self.r, iv, opt_type)
+            if opt_type == "CE":
+                if delta > target_delta:
+                    lo = mid
+                else:
+                    hi = mid
+            else:
+                if abs(delta) > target_delta:
+                    hi = mid
+                else:
+                    lo = mid
+        return round((lo + hi) / 2, 1)
+
+    def _position_delta(self, S, call_k, put_k, hedge_call_k, hedge_put_k, T, iv):
+        return (-bs_delta(S, call_k, T, self.r, iv, "CE") - bs_delta(S, put_k, T, self.r, iv, "PE")
+                + bs_delta(S, hedge_call_k, T, self.r, iv, "CE") + bs_delta(S, hedge_put_k, T, self.r, iv, "PE"))
+
+
+# ---------------------------------------------------------------------------
+# Delta Neutral Engine config + JSON-file persisted state — mirrors the AUTOTRADE_DEFAULTS /
+# load_autotrade_state pattern already used above, so both subsystems are operated the same way
+# (arm/disarm, a fixed set of configurable keys, daily counters that roll over at day-change).
+# ---------------------------------------------------------------------------
+DELTA_ENGINE_STATE_FILE = os.path.join(os.path.dirname(__file__), "delta_engine_state.json")
+_delta_engine_state_lock = threading.Lock()
+
+DELTA_ENGINE_DEFAULTS = {
+    "enabled": False,                # armed or not — monitoring/adjustment never runs unless True
+    # "track" (default, paper — no real orders) or "live". Mirrors the autotrade execution_mode
+    # safety pattern exactly: NOT settable via the bulk config route, only via a dedicated ack-gated
+    # route, so a stray "Save settings" click can never flip this to real orders.
+    "execution_mode": "track",
+    "symbols": ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
+    "delta_threshold": 10.0,         # absolute net portfolio delta that triggers an adjustment
+    "gamma_threshold": None,         # optional secondary confirmation; None = delta alone triggers
+    "max_adjustments_per_day": 6,
+    "max_loss_per_position": 15000.0,
+    "max_daily_mtm_loss": 25000.0,
+    "min_premium_for_adjustment": 8.0,
+    "profit_targets_pct": [25, 50, 70, 90],
+    "stop_loss_pct": 200.0,
+    "hedge_distance_pct": 2.5,
+    "delta_range_low": 0.15,
+    "delta_range_high": 0.20,
+    "expiry_selection": "nearest",   # "nearest" | "next"
+    "spot_poll_seconds": 1,          # underlying spot LTP refresh cadence (the "tick" loop)
+    "greeks_poll_seconds": 5,        # option-chain/premium refresh cadence (heavier call, rate-limited)
+    # Every risk counter below is keyed BY SYMBOL, not pooled -- a bad day on BANKNIFTY never eats
+    # into NIFTY's adjustment budget or vice versa, and each is evaluated independently.
+    "adjustments_today_by_symbol": {},   # {"NIFTY": 2, "BANKNIFTY": 0, ...}
+    "daily_mtm_by_symbol": {},           # {"NIFTY": -1200.0, ...}
+    "paused_symbols_today": [],          # symbols whose OWN daily-loss limit tripped -- new adjustments
+                                          # are skipped for just that symbol for the rest of the day;
+                                          # profit-target/stop-loss closing still applies to it as normal
+    "day": None,
+    "last_recommendation": None,
+    "last_scan_at": None,
+    "last_error": None,
+    "disarm_reason": None,
+}
+
+DELTA_ENGINE_CONFIGURABLE_KEYS = (
+    "symbols", "delta_threshold", "gamma_threshold", "max_adjustments_per_day",
+    "max_loss_per_position", "max_daily_mtm_loss", "min_premium_for_adjustment",
+    "profit_targets_pct", "stop_loss_pct", "hedge_distance_pct", "delta_range_low",
+    "delta_range_high", "expiry_selection", "spot_poll_seconds", "greeks_poll_seconds",
+)
+
+
+def dn_load_state():
+    if not os.path.exists(DELTA_ENGINE_STATE_FILE):
+        return dict(DELTA_ENGINE_DEFAULTS)
+    try:
+        with open(DELTA_ENGINE_STATE_FILE, "r") as f:
+            state = json.load(f)
+        merged = dict(DELTA_ENGINE_DEFAULTS)
+        merged.update(state)
+        return merged
+    except Exception:
+        return dict(DELTA_ENGINE_DEFAULTS)
+
+
+def dn_save_state(state):
+    with _delta_engine_state_lock:
+        with open(DELTA_ENGINE_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2, default=str)
 
 
 # ---------------------------------------------------------------------------
@@ -4147,7 +4760,547 @@ def autotrade_execute_signal():
     return jsonify({"ok": True, "trade": trade})
 
 
+# =============================================================================
+# Dynamic Delta-Neutral Adjustment Engine — ADD-ON to the existing Iron Condor / Hedged Short
+# Strangle strategy above. Never touches how a position is opened (build_strategy, execute_confirm
+# are untouched); it only watches already-open positions you explicitly attach to it and proposes/
+# executes adjustments once net delta drifts too far. See greeks.py / risk_management.py /
+# adjustment_engine.py / execution.py / delta_neutral_logging.py / backtesting.py /
+# delta_neutral_state.py for the individual modules this wires together.
+# =============================================================================
+DELTA_POSITIONS_FILE = os.path.join(os.path.dirname(__file__), "delta_engine_positions.json")
+DELTA_LOG_FILE = os.path.join(os.path.dirname(__file__), "delta_engine_log.jsonl")
+_delta_positions_lock = threading.Lock()
+
+_delta_greeks_engine = PortfolioGreeksEngine(risk_free_rate=RISK_FREE_RATE)
+_delta_logger = AdjustmentLogger(DELTA_LOG_FILE)
+
+# Tick-level spot cache: refreshed by a dedicated 1-second-cadence thread per configured symbol so
+# the "monitor spot every tick" requirement doesn't depend on the heavier option-chain refresh rate.
+# A true broker websocket (KiteTicker) tick feed is a straightforward future upgrade of just this
+# cache's refresh mechanism -- everything downstream reads from this dict, not from the network call
+# directly, so swapping REST polling for a websocket callback later doesn't touch any other module.
+_delta_spot_cache = {}
+_delta_spot_cache_lock = threading.Lock()
+
+SPOT_INDEX_TRADINGSYMBOL = {
+    "NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK",
+    "FINNIFTY": "NSE:NIFTY FIN SERVICE", "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+}
+
+
+def load_delta_positions():
+    if not os.path.exists(DELTA_POSITIONS_FILE):
+        return []
+    try:
+        with open(DELTA_POSITIONS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_delta_positions(positions):
+    with _delta_positions_lock:
+        with open(DELTA_POSITIONS_FILE, "w") as f:
+            json.dump(positions, f, indent=2, default=str)
+
+
+def _delta_spot_poll_loop():
+    """Refreshes _delta_spot_cache at dn_state's spot_poll_seconds cadence (default 1s) for every
+    symbol currently being monitored -- this is the tick-level spot watch. Cheap: one LTP call per
+    symbol, not the full option chain."""
+    while True:
+        try:
+            state = dn_load_state()
+            if state.get("enabled"):
+                monitored_symbols = {p["symbol"] for p in load_delta_positions() if p["status"] == "monitoring"}
+                for sym in monitored_symbols:
+                    inst = SPOT_INDEX_TRADINGSYMBOL.get(sym)
+                    if not inst:
+                        continue
+                    try:
+                        ltp_data = kite.ltp([inst])
+                        price = ltp_data.get(inst, {}).get("last_price")
+                        if price:
+                            with _delta_spot_cache_lock:
+                                _delta_spot_cache[sym] = price
+                    except Exception:
+                        pass
+            time.sleep(max(state.get("spot_poll_seconds", 1), 1))
+        except Exception:
+            time.sleep(2)
+
+
+def _make_delta_candidate_fetcher(position, chain_data, state):
+    """Returns a candidate_fetcher closure bound to one already-fetched live option chain snapshot
+    (avoids re-hitting the API once per candidate). Builds real, tradable roll/hedge candidates —
+    see adjustment_engine.py's module docstring for the up/down scenario -> threatened-side mapping."""
+    calls = sorted([o for o in chain_data["chain"] if o["instrument_type"] == "CE"], key=lambda x: x["strike"])
+    puts = sorted([o for o in chain_data["chain"] if o["instrument_type"] == "PE"], key=lambda x: x["strike"])
+    legs = position["legs"]
+    qty = position["quantity"]
+    low, high = state.get("delta_range_low", 0.15), state.get("delta_range_high", 0.20)
+    mid_target = (low + high) / 2
+    hedge_pct = state.get("hedge_distance_pct", 2.5) / 100.0
+    min_premium = state.get("min_premium_for_adjustment", 8.0)
+
+    def find_by_delta(options, target, sign):
+        return min(options, key=lambda o: abs(o["delta"] - sign * target)) if options else None
+
+    def leg_dict(o, role):
+        return {"tradingsymbol": o["tradingsymbol"], "strike": o["strike"], "role": role,
+                "quantity": -qty if role.startswith("sell") else qty, "ltp": o["ltp"], "delta": o["delta"]}
+
+    def close_leg(role):
+        return {"tradingsymbol": legs[role]["tradingsymbol"], "role": role, "quantity": -qty}
+
+    def fetcher(scenario, pos, portfolio_greeks):
+        candidates = []
+        if scenario == "up":
+            # Priority 1: roll the short PUT upward -- collects more premium AND adds offsetting
+            # positive delta (see adjustment_engine.py docstring for why this offsets negative net delta).
+            cur_put_k = legs["sell_put"]["strike"]
+            pool = [o for o in puts if o["strike"] > cur_put_k]
+            new_put = find_by_delta(pool, mid_target, -1)
+            if new_put and new_put["ltp"] >= min_premium:
+                delta_gain = abs(new_put["delta"] - legs["sell_put"]["delta"]) * qty
+                candidates.append(dict(
+                    action="roll_put_up",
+                    description=f"Roll short put {cur_put_k} -> {new_put['strike']} (more premium, offsetting positive delta)",
+                    legs_to_close=[close_leg("sell_put")], legs_to_open=[leg_dict(new_put, "sell_put")],
+                    expected_delta_after=portfolio_greeks.net_delta + delta_gain,
+                    additional_premium=(new_put["ltp"] - legs["sell_put"]["ltp"]) * qty,
+                    margin_impact=0.0, risk_reduction_score=min(1.0, delta_gain / max(state.get("delta_threshold", 10.0), 1)),
+                    probability_of_profit=0.60, expected_drawdown=abs(new_put["strike"] - cur_put_k) * qty * 0.3,
+                ))
+            # Priority 2: roll the short CALL further OTM -- directly cuts the threatened leg's delta.
+            cur_call_k = legs["sell_call"]["strike"]
+            pool = [o for o in calls if o["strike"] > cur_call_k]
+            new_call = find_by_delta(pool, mid_target, +1)
+            if new_call:
+                delta_gain = abs(new_call["delta"] - legs["sell_call"]["delta"]) * qty
+                candidates.append(dict(
+                    action="roll_call_further_otm",
+                    description=f"Roll short call {cur_call_k} -> {new_call['strike']} further OTM (cuts delta exposure directly)",
+                    legs_to_close=[close_leg("sell_call")], legs_to_open=[leg_dict(new_call, "sell_call")],
+                    expected_delta_after=portfolio_greeks.net_delta + delta_gain,
+                    additional_premium=(new_call["ltp"] - legs["sell_call"]["ltp"]) * qty,
+                    margin_impact=0.0, risk_reduction_score=min(1.0, delta_gain / max(state.get("delta_threshold", 10.0), 1)),
+                    probability_of_profit=0.55, expected_drawdown=abs(new_call["strike"] - cur_call_k) * qty * 0.3,
+                ))
+        else:  # "down" -- mirror image, put side under stress
+            cur_call_k = legs["sell_call"]["strike"]
+            pool = [o for o in calls if o["strike"] < cur_call_k]
+            new_call = find_by_delta(pool, mid_target, +1)
+            if new_call and new_call["ltp"] >= min_premium:
+                delta_gain = abs(new_call["delta"] - legs["sell_call"]["delta"]) * qty
+                candidates.append(dict(
+                    action="roll_call_down",
+                    description=f"Roll short call {cur_call_k} -> {new_call['strike']} (more premium, offsetting negative delta)",
+                    legs_to_close=[close_leg("sell_call")], legs_to_open=[leg_dict(new_call, "sell_call")],
+                    expected_delta_after=portfolio_greeks.net_delta - delta_gain,
+                    additional_premium=(new_call["ltp"] - legs["sell_call"]["ltp"]) * qty,
+                    margin_impact=0.0, risk_reduction_score=min(1.0, delta_gain / max(state.get("delta_threshold", 10.0), 1)),
+                    probability_of_profit=0.60, expected_drawdown=abs(new_call["strike"] - cur_call_k) * qty * 0.3,
+                ))
+            cur_put_k = legs["sell_put"]["strike"]
+            pool = [o for o in puts if o["strike"] < cur_put_k]
+            new_put = find_by_delta(pool, mid_target, -1)
+            if new_put:
+                delta_gain = abs(new_put["delta"] - legs["sell_put"]["delta"]) * qty
+                candidates.append(dict(
+                    action="roll_put_further_otm",
+                    description=f"Roll short put {cur_put_k} -> {new_put['strike']} further OTM (cuts delta exposure directly)",
+                    legs_to_close=[close_leg("sell_put")], legs_to_open=[leg_dict(new_put, "sell_put")],
+                    expected_delta_after=portfolio_greeks.net_delta - delta_gain,
+                    additional_premium=(new_put["ltp"] - legs["sell_put"]["ltp"]) * qty,
+                    margin_impact=0.0, risk_reduction_score=min(1.0, delta_gain / max(state.get("delta_threshold", 10.0), 1)),
+                    probability_of_profit=0.55, expected_drawdown=abs(new_put["strike"] - cur_put_k) * qty * 0.3,
+                ))
+
+        # Convert to Iron Fly: only meaningful for an existing iron_condor (hedges already in place) --
+        # rolls BOTH short strikes to ATM for extra premium in exchange for a much tighter profit zone.
+        if position.get("strategy_type") == "iron_condor" and calls and puts:
+            atm_call = min(calls, key=lambda o: abs(o["strike"] - portfolio_greeks.spot))
+            atm_put = min(puts, key=lambda o: abs(o["strike"] - portfolio_greeks.spot))
+            added_premium = ((atm_call["ltp"] - legs["sell_call"]["ltp"]) + (atm_put["ltp"] - legs["sell_put"]["ltp"])) * qty
+            candidates.append(dict(
+                action="convert_iron_fly",
+                description=f"Convert to Iron Fly: roll both shorts to ATM ({atm_call['strike']}/{atm_put['strike']}) for extra premium, tighter body",
+                legs_to_close=[close_leg("sell_call"), close_leg("sell_put")],
+                legs_to_open=[leg_dict(atm_call, "sell_call"), leg_dict(atm_put, "sell_put")],
+                expected_delta_after=(atm_call["delta"] + atm_put["delta"]) * qty,
+                additional_premium=added_premium, margin_impact=2000.0, risk_reduction_score=0.9,
+                probability_of_profit=0.45,   # tighter body -> lower POP even though delta-neutral
+                expected_drawdown=abs(portfolio_greeks.spot - legs["sell_call"]["strike"]) * qty * 0.2,
+            ))
+
+        # Add-hedge fallback: only meaningful for a naked strangle (an iron condor already carries
+        # hedges) -- buys a protective option on the threatened side to hard-cap runaway delta/risk.
+        if position.get("strategy_type") == "naked_strangle":
+            if scenario == "up" and calls:
+                target_k = legs["sell_call"]["strike"] * (1 + hedge_pct)
+                hedge_opt = min(calls, key=lambda o: abs(o["strike"] - target_k))
+                candidates.append(dict(
+                    action="add_hedge",
+                    description=f"Buy protective call {hedge_opt['strike']} ({hedge_pct*100:.1f}% OTM of short call) to cap runaway risk",
+                    legs_to_close=[], legs_to_open=[leg_dict(hedge_opt, "buy_call")],
+                    expected_delta_after=portfolio_greeks.net_delta + abs(hedge_opt["delta"]) * qty,
+                    additional_premium=-hedge_opt["ltp"] * qty, margin_impact=-5000.0,
+                    risk_reduction_score=0.8, probability_of_profit=0.5, expected_drawdown=hedge_opt["ltp"] * qty,
+                ))
+            elif scenario == "down" and puts:
+                target_k = legs["sell_put"]["strike"] * (1 - hedge_pct)
+                hedge_opt = min(puts, key=lambda o: abs(o["strike"] - target_k))
+                candidates.append(dict(
+                    action="add_hedge",
+                    description=f"Buy protective put {hedge_opt['strike']} ({hedge_pct*100:.1f}% OTM of short put) to cap runaway risk",
+                    legs_to_close=[], legs_to_open=[leg_dict(hedge_opt, "buy_put")],
+                    expected_delta_after=portfolio_greeks.net_delta - abs(hedge_opt["delta"]) * qty,
+                    additional_premium=-hedge_opt["ltp"] * qty, margin_impact=-5000.0,
+                    risk_reduction_score=0.8, probability_of_profit=0.5, expected_drawdown=hedge_opt["ltp"] * qty,
+                ))
+        return candidates
+    return fetcher
+
+
+def _delta_position_portfolio_greeks(position, chain_data, spot):
+    """Builds a PortfolioGreeks snapshot for one monitored position from a fresh chain fetch."""
+    chain_by_symbol = {o["tradingsymbol"]: o for o in chain_data["chain"]}
+    T = chain_data["T"]
+    qty = position["quantity"]
+    leg_inputs = []
+    for role, leg in position["legs"].items():
+        live = chain_by_symbol.get(leg["tradingsymbol"])
+        ltp = live["ltp"] if live else leg["ltp"]
+        iv = (live["iv"] / 100.0) if live else 0.15
+        opt_type = "CE" if "call" in role else "PE"
+        leg_inputs.append({
+            "opt_type": opt_type, "strike": leg["strike"], "spot": spot, "T": T, "iv": iv, "ltp": ltp,
+            "quantity": -qty if role.startswith("sell") else qty, "role": role,
+            "tradingsymbol": leg["tradingsymbol"], "entry_premium": leg["ltp"],
+        })
+    return _delta_greeks_engine.portfolio_greeks(position["symbol"], spot, leg_inputs)
+
+
+def _delta_engine_loop():
+    """Background monitor loop for the Delta Neutral Adjustment Engine -- disarmed by default, only
+    watches/acts on positions you've explicitly attached via /api/delta-engine/track/<pos_id>.
+    Recomputes portfolio Greeks and evaluates the adjustment threshold at greeks_poll_seconds
+    cadence (default 5s -- option-chain fetches are comparatively expensive/rate-limited); the
+    underlying spot itself is refreshed far more often by _delta_spot_poll_loop (default 1s).
+
+    Every symbol is analyzed and decided on INDEPENDENTLY: each attached position gets its own
+    Greeks, its own delta-threshold check, its own adjustment recommendation, and its own
+    adjustments-per-day / daily-loss budget (state["adjustments_today_by_symbol"] /
+    ["daily_mtm_by_symbol"]). A breach on one symbol never affects another -- it only pauses further
+    NEW adjustments on that specific symbol for the rest of the day; profit-target/stop-loss exits
+    keep working per-position as normal regardless of pause state."""
+    while True:
+        try:
+            state = dn_load_state()
+            today_str = now_ist().strftime("%Y-%m-%d")
+            if state.get("day") != today_str:
+                state["day"] = today_str
+                state["adjustments_today_by_symbol"] = {}
+                state["daily_mtm_by_symbol"] = {}
+                state["paused_symbols_today"] = []
+                dn_save_state(state)
+
+            if not state.get("enabled"):
+                time.sleep(2)
+                continue
+
+            adj_by_symbol = state.get("adjustments_today_by_symbol", {})
+            mtm_by_symbol = state.get("daily_mtm_by_symbol", {})
+            paused_symbols = set(state.get("paused_symbols_today", []))
+
+            risk_mgr = RiskManager(RiskLimits(
+                max_adjustments_per_day=state.get("max_adjustments_per_day", 6),
+                max_loss_per_position=state.get("max_loss_per_position", 15000.0),
+                max_daily_mtm_loss=state.get("max_daily_mtm_loss", 25000.0),
+                min_premium_for_adjustment=state.get("min_premium_for_adjustment", 8.0),
+                profit_targets_pct=tuple(state.get("profit_targets_pct", [25, 50, 70, 90])),
+                stop_loss_pct=state.get("stop_loss_pct", 200.0),
+            ))
+            engine = AdjustmentEngine(delta_threshold=state.get("delta_threshold", 10.0),
+                                       gamma_threshold=state.get("gamma_threshold"))
+            executor = AdjustmentExecutor(place_basket_orders, product="NRML")
+
+            positions = load_delta_positions()
+            for position in positions:
+                if position["status"] != "monitoring":
+                    continue
+                symbol = position["symbol"]
+                try:
+                    chain_data, err = get_chain_for_symbol(symbol)
+                    if err:
+                        state["last_error"] = f"{symbol}: {err.get('error')}"
+                        continue
+                    with _delta_spot_cache_lock:
+                        spot = _delta_spot_cache.get(symbol, chain_data["spot"])
+                    pg = _delta_position_portfolio_greeks(position, chain_data, spot)
+                    position["last_greeks"] = pg.as_dict()
+                    # Accumulate THIS symbol's daily MTM only -- separate bucket per symbol, never
+                    # pooled with any other symbol's positions.
+                    mtm_by_symbol[symbol] = round(mtm_by_symbol.get(symbol, 0.0) + pg.mtm, 2)
+
+                    # Profit target / stop loss check FIRST -- exit all legs beats any adjustment,
+                    # and this always applies regardless of whether the symbol is paused.
+                    hit_target = risk_mgr.profit_target_hit(position.get("entry_credit", 0.0), pg.mtm)
+                    hit_sl = risk_mgr.stop_loss_hit(position.get("entry_credit", 0.0), pg.mtm)
+                    if hit_target or hit_sl:
+                        reason = f"Profit target {hit_target}% reached" if hit_target else f"Stop loss ({state.get('stop_loss_pct')}%) hit"
+                        close_legs = [{"tradingsymbol": leg["tradingsymbol"], "role": role,
+                                       "quantity": -position["quantity"] if role.startswith("sell") else position["quantity"]}
+                                      for role, leg in position["legs"].items()]
+                        close_candidate = AdjustmentCandidate(action="close_all", description=reason,
+                                                               legs_to_close=close_legs)
+                        executor.execute(close_candidate, execution_mode=state.get("execution_mode", "track"))
+                        position["status"] = "closed"
+                        position["closed_at"] = now_ist().isoformat()
+                        position["exit_reason"] = reason
+                        position["realized_pnl"] = pg.mtm
+                        _delta_logger.log_adjustment(ts=now_ist().isoformat(), symbol=symbol,
+                            spot=spot, delta_before=pg.net_delta, delta_after=0.0, action="close_all",
+                            premium_collected=pg.mtm, reason=reason, execution_mode=state.get("execution_mode", "track"))
+                        continue
+
+                    # This symbol's OWN daily-loss budget -- checked independently of every other symbol.
+                    if risk_mgr.breached_daily_loss(mtm_by_symbol[symbol]) and symbol not in paused_symbols:
+                        paused_symbols.add(symbol)
+                        state["last_error"] = f"{symbol}: daily MTM loss (Rs {mtm_by_symbol[symbol]:.0f}) breached its own limit -- new adjustments paused for {symbol} only for the rest of today"
+
+                    recommended, all_candidates, trigger_reason = engine.recommend(
+                        position, pg, _make_delta_candidate_fetcher(position, chain_data, state))
+                    state["last_recommendation"] = {
+                        "symbol": symbol, "trigger_reason": trigger_reason,
+                        "recommended": vars(recommended) if recommended else None,
+                        "all_candidates": [vars(c) for c in all_candidates],
+                        "at": now_ist().isoformat(),
+                    }
+                    if recommended is None or recommended.action == "no_action":
+                        continue
+                    if symbol in paused_symbols:
+                        state["last_error"] = f"{symbol} is paused for today (its own daily-loss limit tripped) -- adjustment skipped"
+                        continue
+
+                    proposed_premium = abs(recommended.legs_to_open[0]["ltp"]) if recommended.legs_to_open else None
+                    allowed, gate_reason = risk_mgr.can_adjust(
+                        adjustments_today=adj_by_symbol.get(symbol, 0), position_mtm=pg.mtm,
+                        daily_mtm=mtm_by_symbol[symbol], proposed_leg_premium=proposed_premium)
+                    if not allowed:
+                        state["last_error"] = f"{symbol}: {gate_reason}"
+                        continue
+
+                    result = executor.execute(recommended, execution_mode=state.get("execution_mode", "track"))
+                    if result.ok:
+                        for opened in recommended.legs_to_open:
+                            position["legs"][opened["role"]] = {
+                                "strike": opened["strike"], "ltp": opened["ltp"], "tradingsymbol": opened["tradingsymbol"],
+                            }
+                        adj_by_symbol[symbol] = adj_by_symbol.get(symbol, 0) + 1
+                        _delta_logger.log_adjustment(
+                            ts=now_ist().isoformat(), symbol=symbol, spot=spot,
+                            delta_before=pg.net_delta, delta_after=recommended.expected_delta_after,
+                            action=recommended.action, premium_collected=recommended.additional_premium,
+                            reason=trigger_reason, execution_mode=state.get("execution_mode", "track"),
+                            candidates_considered=[c.action for c in all_candidates])
+                    else:
+                        state["last_error"] = f"{symbol}: adjustment execution failed: {result.error}"
+                except Exception as e:
+                    state["last_error"] = f"{symbol}: {e}"
+
+            state["adjustments_today_by_symbol"] = adj_by_symbol
+            state["daily_mtm_by_symbol"] = mtm_by_symbol
+            state["paused_symbols_today"] = sorted(paused_symbols)
+            state["last_scan_at"] = now_ist().isoformat()
+
+            save_delta_positions(positions)
+            dn_save_state(state)
+        except Exception as e:
+            try:
+                state = dn_load_state()
+                state["last_error"] = str(e)
+                dn_save_state(state)
+            except Exception:
+                pass
+        time.sleep(max(dn_load_state().get("greeks_poll_seconds", 5), 2))
+
+
+# --- Delta Neutral Engine API routes ---
+@app.route("/api/delta-engine/state")
+def delta_engine_state():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    return jsonify(dn_load_state())
+
+
+@app.route("/api/delta-engine/config", methods=["POST"])
+def delta_engine_config():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    state = dn_load_state()
+    for key in DELTA_ENGINE_CONFIGURABLE_KEYS:
+        if key in body:
+            state[key] = body[key]
+    dn_save_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/delta-engine/set-execution-mode", methods=["POST"])
+def delta_engine_set_execution_mode():
+    """Same ack-gated pattern as /api/autotrade/set-execution-mode -- kept OUT of the bulk config
+    route so a stray Settings save can never silently switch this to placing real orders."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    mode = body.get("mode")
+    if mode not in ("live", "track"):
+        return jsonify({"error": "mode must be 'live' or 'track'"}), 400
+    if mode == "live" and body.get("ack") is not True:
+        return jsonify({"error": "Switching to Live mode requires explicit confirmation (ack: true) "
+                                  "that future adjustments will place REAL orders on your live Zerodha account."}), 400
+    state = dn_load_state()
+    state["execution_mode"] = mode
+    dn_save_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/delta-engine/arm", methods=["POST"])
+def delta_engine_arm():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    state = dn_load_state()
+    state["enabled"], state["disarm_reason"] = True, None
+    dn_save_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/delta-engine/disarm", methods=["POST"])
+def delta_engine_disarm():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    state = dn_load_state()
+    state["enabled"] = False
+    dn_save_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/delta-engine/track/<pos_id>", methods=["POST"])
+def delta_engine_track(pos_id):
+    """Attaches an already-built Iron Condor / Strangle position (from positions.json, built via the
+    existing /api/strategy endpoint) to the Delta Neutral Engine for monitoring. Does not place any
+    order itself -- the position must already be a real (or, in execution_mode="track", intended)
+    open position."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    position = find_position(pos_id)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+    if position.get("strategy_type") not in ("iron_condor", "naked_strangle"):
+        return jsonify({"error": "Only Iron Condor / Naked Strangle positions are supported by the Delta Neutral Engine"}), 400
+    legs = position["legs"]
+    credit_per_share = sum(v["ltp"] for k, v in legs.items() if k.startswith("sell")) \
+        - sum(v["ltp"] for k, v in legs.items() if k.startswith("buy"))
+    tracked = {
+        "id": pos_id, "symbol": position["symbol"], "strategy_type": position["strategy_type"],
+        "legs": {k: {"strike": v["strike"], "ltp": v["ltp"], "tradingsymbol": v["tradingsymbol"]} for k, v in legs.items()},
+        "quantity": position.get("quantity", position["lot_size"]), "lot_size": position["lot_size"],
+        "entry_credit": round(credit_per_share * position.get("quantity", position["lot_size"]), 2),
+        "status": "monitoring", "added_at": now_ist().isoformat(), "closed_at": None,
+        "exit_reason": None, "realized_pnl": None, "last_greeks": None,
+    }
+    positions = load_delta_positions()
+    positions = [p for p in positions if p["id"] != pos_id]
+    positions.append(tracked)
+    save_delta_positions(positions)
+    return jsonify({"ok": True, "tracked": tracked})
+
+
+@app.route("/api/delta-engine/resume/<symbol>", methods=["POST"])
+def delta_engine_resume_symbol(symbol):
+    """Manually un-pauses a symbol whose own daily-loss limit tripped earlier today, if you've
+    reviewed it and want the engine to resume proposing/executing adjustments for it (profit-target
+    and stop-loss exits keep working for a paused symbol regardless -- this only affects new
+    adjustments)."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    symbol = symbol.upper()
+    state = dn_load_state()
+    paused = [s for s in state.get("paused_symbols_today", []) if s != symbol]
+    state["paused_symbols_today"] = paused
+    dn_save_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/delta-engine/positions")
+def delta_engine_positions():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    return jsonify({"positions": load_delta_positions()})
+
+
+@app.route("/api/delta-engine/positions/<pos_id>/untrack", methods=["POST"])
+def delta_engine_untrack(pos_id):
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    positions = load_delta_positions()
+    for p in positions:
+        if p["id"] == pos_id:
+            p["status"] = "closed"
+            p["closed_at"] = now_ist().isoformat()
+            p["exit_reason"] = "Manually untracked"
+    save_delta_positions(positions)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/delta-engine/logs")
+def delta_engine_logs():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    limit = int(request.args.get("limit", 200))
+    return jsonify({"logs": _delta_logger.read_recent(limit)})
+
+
+@app.route("/api/delta-engine/backtest", methods=["POST"])
+def delta_engine_backtest():
+    """Runs the approximate (Black-Scholes-reconstructed, see backtesting.py docstring) historical
+    backtest over a symbol's daily closes. Uses the SAME historical-OHLC fetch already used by the
+    breakout scanner (_fetch_recent_intraday's daily-interval sibling) so no new data source is needed."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    symbol = (body.get("symbol") or "NIFTY").upper()
+    days_back = int(body.get("days_back", 365))
+    flat_iv_pct = body.get("flat_iv_pct", 15.0)
+    token, tok_err = resolve_token_for_symbol(symbol)
+    if tok_err:
+        return jsonify({"error": tok_err}), 400
+    to_date = now_ist().date()
+    from_date = to_date - timedelta(days=days_back + 10)
+    try:
+        candles = kite.historical_data(token, from_date, to_date, "day")
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch historical data for {symbol}: {e}"}), 400
+    if not candles or len(candles) < 10:
+        return jsonify({"error": f"Not enough historical data returned for {symbol}"}), 400
+    closes = [float(c["close"]) for c in candles]
+    dates = [str(c["date"])[:10] for c in candles]
+
+    bt = Backtester(delta_threshold_frac=body.get("delta_threshold_frac", 0.10),
+                     profit_target_pct=body.get("profit_target_pct", 50.0),
+                     stop_loss_pct=body.get("stop_loss_pct", 200.0), flat_iv_pct=flat_iv_pct)
+    report = bt.run(closes, dates, target_delta=body.get("target_delta", 0.18),
+                     wing_width_pct=body.get("wing_width_pct", 2.5),
+                     expiry_days=body.get("expiry_days", 7))
+    return jsonify(report.summary(starting_capital=body.get("starting_capital", 500000.0)))
+
+
 threading.Thread(target=_autotrade_loop, daemon=True).start()
+threading.Thread(target=_delta_engine_loop, daemon=True).start()
+threading.Thread(target=_delta_spot_poll_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
