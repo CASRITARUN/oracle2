@@ -920,169 +920,6 @@ class AdjustmentLogger:
         return out
 
 
-# ---------------------------------------------------------------------------
-# Backtesting — approximate historical backtest for the Iron Condor / Strangle + Delta-Neutral
-# Adjustment strategy.
-#
-# READ THIS BEFORE TRUSTING ANY NUMBER THIS PRODUCES: Kite's historical-data API only returns
-# underlying spot/futures OHLC — it does NOT provide historical options-chain prices, per-strike
-# historical IV, or bid/ask history. This backtester RECONSTRUCTS option prices from historical
-# underlying daily closes using the same Black-Scholes pricer (bs_price/bs_delta above) plus a
-# user-supplied (or flat, default) IV assumption. That makes it a reasonable approximation of
-# strategy BEHAVIOR — how often delta breaches would trigger, how adjustments affect risk, roughly
-# how theta accrues — but the exact Rupee P&L numbers are indicative, not a substitute for
-# forward-testing in Track mode against real option prices before ever going live.
-# ---------------------------------------------------------------------------
-@dataclass
-class TradeResult:
-    entry_date: str
-    exit_date: str
-    entry_credit: float
-    exit_debit: float
-    pnl: float
-    holding_days: float
-    adjustments: int
-
-
-@dataclass
-class BacktestReport:
-    trades: List[TradeResult] = field(default_factory=list)
-    caveat: str = ("Option prices are Black-Scholes reconstructions from underlying daily closes + "
-                    "an assumed/derived IV, NOT real historical option quotes. Treat results as "
-                    "directional/behavioral, not exact P&L.")
-
-    def summary(self, starting_capital=500000.0):
-        if not self.trades:
-            return {"error": "No trades generated over this period", "caveat": self.caveat}
-        pnls = np.array([t.pnl for t in self.trades])
-        wins = pnls[pnls > 0]
-        losses = pnls[pnls <= 0]
-        total_return = float(pnls.sum())
-        total_days = sum(t.holding_days for t in self.trades) or 1
-        years = max(total_days / 365.0, 1 / 365.0)
-        annual_return_pct = (((starting_capital + total_return) / starting_capital) ** (1 / years) - 1) * 100
-        equity_curve = starting_capital + np.cumsum(pnls)
-        running_max = np.maximum.accumulate(equity_curve)
-        drawdown = (equity_curve - running_max) / running_max
-        max_drawdown_pct = float(drawdown.min() * 100)
-        trade_returns = pnls / starting_capital
-        sharpe = (float(np.mean(trade_returns) / np.std(trade_returns)) * math.sqrt(252)
-                  if np.std(trade_returns) > 0 else 0.0)
-        downside = trade_returns[trade_returns < 0]
-        sortino = (float(np.mean(trade_returns) / np.std(downside)) * math.sqrt(252)
-                   if len(downside) and np.std(downside) > 0 else 0.0)
-        calmar = (annual_return_pct / abs(max_drawdown_pct)) if max_drawdown_pct != 0 else 0.0
-        profit_factor = (float(wins.sum() / abs(losses.sum())) if losses.sum() != 0
-                          else (float("inf") if wins.sum() > 0 else 0.0))
-        return {
-            "total_return": round(total_return, 2),
-            "annual_return_pct": round(annual_return_pct, 2),
-            "win_rate_pct": round(float(len(wins) / len(pnls) * 100), 2),
-            "avg_winner": round(float(wins.mean()), 2) if len(wins) else 0.0,
-            "avg_loser": round(float(losses.mean()), 2) if len(losses) else 0.0,
-            "max_drawdown_pct": round(max_drawdown_pct, 2),
-            "sharpe_ratio": round(sharpe, 2),
-            "sortino_ratio": round(sortino, 2),
-            "calmar_ratio": round(calmar, 2),
-            "profit_factor": round(profit_factor, 2) if profit_factor != float("inf") else None,
-            "avg_holding_days": round(float(np.mean([t.holding_days for t in self.trades])), 2),
-            "avg_adjustments_per_trade": round(float(np.mean([t.adjustments for t in self.trades])), 2),
-            "num_trades": len(self.trades),
-            "caveat": self.caveat,
-        }
-
-
-class Backtester:
-    def __init__(self, delta_threshold_frac=0.10, profit_target_pct=50.0, stop_loss_pct=200.0,
-                 risk_free_rate=RISK_FREE_RATE, flat_iv_pct=None):
-        """delta_threshold_frac is in RAW delta units (e.g. 0.10) since this backtester works
-        per-share/per-unit rather than tracking actual lot-sized quantities."""
-        self.delta_threshold = delta_threshold_frac
-        self.profit_target_pct = profit_target_pct
-        self.stop_loss_pct = stop_loss_pct
-        self.r = risk_free_rate
-        self.flat_iv = (flat_iv_pct / 100.0) if flat_iv_pct else None
-
-    def run(self, daily_closes: List[float], dates: List[str], target_delta=0.18,
-            wing_width_pct=2.5, expiry_days=7, iv_series: Optional[List[float]] = None):
-        """Walks forward day by day, opening a fresh Iron Condor every `expiry_days`, applying the
-        delta-threshold roll rule daily, and closing on profit target / stop loss / expiry —
-        whichever comes first."""
-        report = BacktestReport()
-        i, n = 0, len(daily_closes)
-        while i < n - 1:
-            entry_spot = daily_closes[i]
-            iv = (iv_series[i] if iv_series else self.flat_iv) or 0.15
-            T_entry = expiry_days / 365.0
-            call_k = self._strike_for_delta(entry_spot, T_entry, iv, target_delta, "CE")
-            put_k = self._strike_for_delta(entry_spot, T_entry, iv, target_delta, "PE")
-            hedge_call_k = call_k * (1 + wing_width_pct / 100.0)
-            hedge_put_k = put_k * (1 - wing_width_pct / 100.0)
-            credit = (bs_price(entry_spot, call_k, T_entry, self.r, iv, "CE")
-                      + bs_price(entry_spot, put_k, T_entry, self.r, iv, "PE")
-                      - bs_price(entry_spot, hedge_call_k, T_entry, self.r, iv, "CE")
-                      - bs_price(entry_spot, hedge_put_k, T_entry, self.r, iv, "PE"))
-            adjustments = 0
-            j, exit_debit = i, None
-            while j < min(i + expiry_days, n - 1):
-                j += 1
-                spot_j = daily_closes[j]
-                T_rem = max((expiry_days - (j - i)) / 365.0, 1 / 365.0)
-                iv_j = (iv_series[j] if iv_series else self.flat_iv) or iv
-                net_delta = self._position_delta(spot_j, call_k, put_k, hedge_call_k, hedge_put_k, T_rem, iv_j)
-                if abs(net_delta) > self.delta_threshold:
-                    # Simple roll: shift the threatened side's short strike 30% of the way toward
-                    # spot (a coarse, backtest-appropriate version of "roll put up" / "roll call OTM").
-                    if net_delta < 0:
-                        put_k = put_k + (spot_j - put_k) * 0.3
-                    else:
-                        call_k = call_k - (call_k - spot_j) * 0.3
-                    adjustments += 1
-                debit_now = (bs_price(spot_j, call_k, T_rem, self.r, iv_j, "CE")
-                             + bs_price(spot_j, put_k, T_rem, self.r, iv_j, "PE")
-                             - bs_price(spot_j, hedge_call_k, T_rem, self.r, iv_j, "CE")
-                             - bs_price(spot_j, hedge_put_k, T_rem, self.r, iv_j, "PE"))
-                pnl_now = credit - debit_now
-                if credit > 0 and (pnl_now / credit * 100) >= self.profit_target_pct:
-                    exit_debit = debit_now
-                    break
-                if credit > 0 and (-pnl_now / credit * 100) >= self.stop_loss_pct:
-                    exit_debit = debit_now
-                    break
-            if exit_debit is None:
-                T_final = max((expiry_days - (j - i)) / 365.0, 0.0)
-                iv_final = (iv_series[j] if iv_series else self.flat_iv) or iv
-                exit_debit = (bs_price(daily_closes[j], call_k, T_final, self.r, iv_final, "CE")
-                              + bs_price(daily_closes[j], put_k, T_final, self.r, iv_final, "PE")
-                              - bs_price(daily_closes[j], hedge_call_k, T_final, self.r, iv_final, "CE")
-                              - bs_price(daily_closes[j], hedge_put_k, T_final, self.r, iv_final, "PE"))
-            pnl = credit - exit_debit
-            report.trades.append(TradeResult(dates[i], dates[j], round(credit, 2), round(exit_debit, 2),
-                                              round(pnl, 2), j - i, adjustments))
-            i = j + 1
-        return report
-
-    def _strike_for_delta(self, S, T, iv, target_delta, opt_type):
-        lo, hi = S * 0.8, S * 1.2
-        for _ in range(40):
-            mid = (lo + hi) / 2
-            delta = bs_delta(S, mid, T, self.r, iv, opt_type)
-            if opt_type == "CE":
-                if delta > target_delta:
-                    lo = mid
-                else:
-                    hi = mid
-            else:
-                if abs(delta) > target_delta:
-                    hi = mid
-                else:
-                    lo = mid
-        return round((lo + hi) / 2, 1)
-
-    def _position_delta(self, S, call_k, put_k, hedge_call_k, hedge_put_k, T, iv):
-        return (-bs_delta(S, call_k, T, self.r, iv, "CE") - bs_delta(S, put_k, T, self.r, iv, "PE")
-                + bs_delta(S, hedge_call_k, T, self.r, iv, "CE") + bs_delta(S, hedge_put_k, T, self.r, iv, "PE"))
-
 
 # ---------------------------------------------------------------------------
 # Delta Neutral Engine config + JSON-file persisted state — mirrors the AUTOTRADE_DEFAULTS /
@@ -4983,19 +4820,113 @@ def _delta_position_portfolio_greeks(position, chain_data, spot):
     return _delta_greeks_engine.portfolio_greeks(position["symbol"], spot, leg_inputs)
 
 
+def _execute_delta_adjustment(position, candidate, trigger_reason, all_candidate_actions=None):
+    """Executes ONE specific adjustment candidate against one position -- shared by the manual
+    /api/delta-engine/suggestions/<id>/execute route (the only normal path now) and reusable for any
+    future automation. Risk gates are re-checked fresh here regardless of what was true when the
+    suggestion was first generated, so a stale approval can never bypass current limits."""
+    state = dn_load_state()
+    symbol = position["symbol"]
+    adj_by_symbol = state.get("adjustments_today_by_symbol", {})
+    mtm_by_symbol = state.get("daily_mtm_by_symbol", {})
+    paused_symbols = set(state.get("paused_symbols_today", []))
+    if symbol in paused_symbols:
+        return False, f"{symbol} is paused for today (its own daily-loss limit tripped) -- adjustment blocked"
+
+    risk_mgr = RiskManager(RiskLimits(
+        max_adjustments_per_day=state.get("max_adjustments_per_day", 6),
+        max_loss_per_position=state.get("max_loss_per_position", 15000.0),
+        max_daily_mtm_loss=state.get("max_daily_mtm_loss", 25000.0),
+        min_premium_for_adjustment=state.get("min_premium_for_adjustment", 8.0),
+        profit_targets_pct=tuple(state.get("profit_targets_pct", [25, 50, 70, 90])),
+        stop_loss_pct=state.get("stop_loss_pct", 200.0),
+    ))
+    position_mtm = (position.get("last_greeks") or {}).get("mtm", 0.0)
+    proposed_premium = abs(candidate.legs_to_open[0]["ltp"]) if candidate.legs_to_open else None
+    allowed, gate_reason = risk_mgr.can_adjust(
+        adjustments_today=adj_by_symbol.get(symbol, 0), position_mtm=position_mtm,
+        daily_mtm=mtm_by_symbol.get(symbol, 0.0), proposed_leg_premium=proposed_premium)
+    if not allowed:
+        return False, gate_reason
+
+    executor = AdjustmentExecutor(place_basket_orders, product="NRML")
+    result = executor.execute(candidate, execution_mode=state.get("execution_mode", "track"))
+    if not result.ok:
+        return False, f"Execution failed: {result.error}"
+
+    for opened in candidate.legs_to_open:
+        position["legs"][opened["role"]] = {
+            "strike": opened["strike"], "ltp": opened["ltp"], "tradingsymbol": opened["tradingsymbol"],
+        }
+    position["pending_suggestion"] = None
+    adj_by_symbol[symbol] = adj_by_symbol.get(symbol, 0) + 1
+    state["adjustments_today_by_symbol"] = adj_by_symbol
+    dn_save_state(state)
+    _delta_logger.log_adjustment(
+        ts=now_ist().isoformat(), symbol=symbol, spot=position.get("last_greeks", {}).get("spot"),
+        delta_before=position.get("last_greeks", {}).get("net_delta", 0.0),
+        delta_after=candidate.expected_delta_after, action=candidate.action,
+        premium_collected=candidate.additional_premium, reason=trigger_reason,
+        execution_mode=state.get("execution_mode", "track"),
+        candidates_considered=all_candidate_actions or [candidate.action])
+    return True, "Executed"
+
+
+def _close_delta_position_legs(position, roles, reason):
+    """Closes some or all legs of a monitored position on demand -- independent of the automatic
+    profit-target/stop-loss logic, so you can act on your own judgment any time, in Track or Live."""
+    state = dn_load_state()
+    legs = position["legs"]
+    roles = roles or list(legs.keys())
+    close_legs = []
+    for role in roles:
+        if role not in legs:
+            continue
+        close_legs.append({"tradingsymbol": legs[role]["tradingsymbol"], "role": role,
+                            "quantity": -position["quantity"] if role.startswith("sell") else position["quantity"]})
+    if not close_legs:
+        return False, "No matching open legs found to close"
+    candidate = AdjustmentCandidate(action="manual_close", description=reason, legs_to_close=close_legs)
+    executor = AdjustmentExecutor(place_basket_orders, product="NRML")
+    result = executor.execute(candidate, execution_mode=state.get("execution_mode", "track"))
+    if not result.ok:
+        return False, f"Close failed: {result.error}"
+    for role in roles:
+        legs.pop(role, None)
+    pnl_closed = (position.get("last_greeks") or {}).get("mtm", 0.0) if not legs else None
+    if not legs:
+        position["status"] = "closed"
+        position["closed_at"] = now_ist().isoformat()
+        position["exit_reason"] = reason
+        position["realized_pnl"] = pnl_closed
+        position["pending_suggestion"] = None
+    _delta_logger.log_adjustment(
+        ts=now_ist().isoformat(), symbol=position["symbol"], spot=(position.get("last_greeks") or {}).get("spot"),
+        delta_before=(position.get("last_greeks") or {}).get("net_delta", 0.0), delta_after=0.0,
+        action="manual_close", premium_collected=0.0, reason=reason,
+        execution_mode=state.get("execution_mode", "track"), candidates_considered=[])
+    return True, "Closed"
+
+
 def _delta_engine_loop():
     """Background monitor loop for the Delta Neutral Adjustment Engine -- disarmed by default, only
-    watches/acts on positions you've explicitly attached via /api/delta-engine/track/<pos_id>.
-    Recomputes portfolio Greeks and evaluates the adjustment threshold at greeks_poll_seconds
-    cadence (default 5s -- option-chain fetches are comparatively expensive/rate-limited); the
-    underlying spot itself is refreshed far more often by _delta_spot_poll_loop (default 1s).
+    watches/acts on positions you've explicitly attached (via the Condor/Strangle builder's Position
+    ID, or directly from your live broker positions). Recomputes portfolio Greeks and evaluates the
+    adjustment threshold at greeks_poll_seconds cadence (default 5s); the underlying spot itself is
+    refreshed far more often by _delta_spot_poll_loop (default 1s).
 
-    Every symbol is analyzed and decided on INDEPENDENTLY: each attached position gets its own
-    Greeks, its own delta-threshold check, its own adjustment recommendation, and its own
-    adjustments-per-day / daily-loss budget (state["adjustments_today_by_symbol"] /
-    ["daily_mtm_by_symbol"]). A breach on one symbol never affects another -- it only pauses further
-    NEW adjustments on that specific symbol for the rest of the day; profit-target/stop-loss exits
-    keep working per-position as normal regardless of pause state."""
+    IMPORTANT: this loop only ever ANALYZES and SUGGESTS. When a delta breach is detected it scores
+    every candidate adjustment (probability of profit, risk reduction, expected extra premium, etc.)
+    and stores them as position["pending_suggestion"] -- it does NOT execute anything automatically.
+    You review the suggestion in the dashboard and choose whether/which one to execute, in Track or
+    Live, via /api/delta-engine/suggestions/<id>/execute. The one thing that DOES still happen
+    automatically is closing a position on a configured profit target or stop loss being hit -- that
+    is risk protection, not a trading decision, so it isn't gated behind manual approval.
+
+    Every symbol is analyzed and decided on INDEPENDENTLY: its own Greeks, its own delta-threshold
+    check, its own adjustments-per-day / daily-loss budget. A breach on one symbol only pauses NEW
+    adjustments for that specific symbol for the rest of the day; profit-target/stop-loss exits keep
+    working per-position regardless of pause state."""
     while True:
         try:
             state = dn_load_state()
@@ -5045,8 +4976,8 @@ def _delta_engine_loop():
                     # pooled with any other symbol's positions.
                     mtm_by_symbol[symbol] = round(mtm_by_symbol.get(symbol, 0.0) + pg.mtm, 2)
 
-                    # Profit target / stop loss check FIRST -- exit all legs beats any adjustment,
-                    # and this always applies regardless of whether the symbol is paused.
+                    # Profit target / stop loss -- the ONE thing that stays automatic (risk
+                    # protection, not a discretionary trading decision). Exit all legs immediately.
                     hit_target = risk_mgr.profit_target_hit(position.get("entry_credit", 0.0), pg.mtm)
                     hit_sl = risk_mgr.stop_loss_hit(position.get("entry_credit", 0.0), pg.mtm)
                     if hit_target or hit_sl:
@@ -5061,6 +4992,7 @@ def _delta_engine_loop():
                         position["closed_at"] = now_ist().isoformat()
                         position["exit_reason"] = reason
                         position["realized_pnl"] = pg.mtm
+                        position["pending_suggestion"] = None
                         _delta_logger.log_adjustment(ts=now_ist().isoformat(), symbol=symbol,
                             spot=spot, delta_before=pg.net_delta, delta_after=0.0, action="close_all",
                             premium_collected=pg.mtm, reason=reason, execution_mode=state.get("execution_mode", "track"))
@@ -5076,38 +5008,32 @@ def _delta_engine_loop():
                     state["last_recommendation"] = {
                         "symbol": symbol, "trigger_reason": trigger_reason,
                         "recommended": vars(recommended) if recommended else None,
-                        "all_candidates": [vars(c) for c in all_candidates],
                         "at": now_ist().isoformat(),
                     }
                     if recommended is None or recommended.action == "no_action":
-                        continue
-                    if symbol in paused_symbols:
-                        state["last_error"] = f"{symbol} is paused for today (its own daily-loss limit tripped) -- adjustment skipped"
+                        position["pending_suggestion"] = None
                         continue
 
-                    proposed_premium = abs(recommended.legs_to_open[0]["ltp"]) if recommended.legs_to_open else None
-                    allowed, gate_reason = risk_mgr.can_adjust(
-                        adjustments_today=adj_by_symbol.get(symbol, 0), position_mtm=pg.mtm,
-                        daily_mtm=mtm_by_symbol[symbol], proposed_leg_premium=proposed_premium)
-                    if not allowed:
-                        state["last_error"] = f"{symbol}: {gate_reason}"
-                        continue
+                    # Annotate each candidate with whether it's currently executable, so the
+                    # dashboard can show "blocked: <reason>" without you having to click Execute
+                    # to find out -- but the ACTUAL gate is always re-checked fresh at execute time.
+                    annotated = []
+                    for c in all_candidates:
+                        proposed_premium = abs(c.legs_to_open[0]["ltp"]) if c.legs_to_open else None
+                        ok, reason_txt = risk_mgr.can_adjust(
+                            adjustments_today=adj_by_symbol.get(symbol, 0), position_mtm=pg.mtm,
+                            daily_mtm=mtm_by_symbol[symbol], proposed_leg_premium=proposed_premium)
+                        if symbol in paused_symbols:
+                            ok, reason_txt = False, f"{symbol} paused today (daily-loss limit)"
+                        cd = vars(c)
+                        cd["executable"] = ok
+                        cd["block_reason"] = None if ok else reason_txt
+                        annotated.append(cd)
 
-                    result = executor.execute(recommended, execution_mode=state.get("execution_mode", "track"))
-                    if result.ok:
-                        for opened in recommended.legs_to_open:
-                            position["legs"][opened["role"]] = {
-                                "strike": opened["strike"], "ltp": opened["ltp"], "tradingsymbol": opened["tradingsymbol"],
-                            }
-                        adj_by_symbol[symbol] = adj_by_symbol.get(symbol, 0) + 1
-                        _delta_logger.log_adjustment(
-                            ts=now_ist().isoformat(), symbol=symbol, spot=spot,
-                            delta_before=pg.net_delta, delta_after=recommended.expected_delta_after,
-                            action=recommended.action, premium_collected=recommended.additional_premium,
-                            reason=trigger_reason, execution_mode=state.get("execution_mode", "track"),
-                            candidates_considered=[c.action for c in all_candidates])
-                    else:
-                        state["last_error"] = f"{symbol}: adjustment execution failed: {result.error}"
+                    position["pending_suggestion"] = {
+                        "trigger_reason": trigger_reason, "detected_at": now_ist().isoformat(),
+                        "candidates": annotated,
+                    }
                 except Exception as e:
                     state["last_error"] = f"{symbol}: {e}"
 
@@ -5210,10 +5136,101 @@ def delta_engine_track(pos_id):
         "quantity": position.get("quantity", position["lot_size"]), "lot_size": position["lot_size"],
         "entry_credit": round(credit_per_share * position.get("quantity", position["lot_size"]), 2),
         "status": "monitoring", "added_at": now_ist().isoformat(), "closed_at": None,
-        "exit_reason": None, "realized_pnl": None, "last_greeks": None,
+        "exit_reason": None, "realized_pnl": None, "last_greeks": None, "pending_suggestion": None,
     }
     positions = load_delta_positions()
     positions = [p for p in positions if p["id"] != pos_id]
+    positions.append(tracked)
+    save_delta_positions(positions)
+    return jsonify({"ok": True, "tracked": tracked})
+
+
+def _classify_broker_legs_for_symbol(symbol):
+    """Finds every open NFO option leg under a given underlying (e.g. "SBIN") straight from your
+    live Zerodha positions (the same data as the "Open F&O positions" table), and classifies each
+    one as sell_call / buy_call / sell_put / buy_put using Kite's own authoritative instrument dump
+    (strike/instrument_type per tradingsymbol) rather than guessing from the tradingsymbol text.
+    This is what lets you attach a position you opened directly in Zerodha (or anywhere else) --
+    no positions.json entry from this app's own Condor/Strangle builder is required."""
+    symbol = symbol.upper()
+    nfo, _ = get_instruments()
+    meta_by_symbol = {i["tradingsymbol"]: i for i in nfo if i.get("name") == symbol and i.get("segment") == "NFO-OPT"}
+    pos = kite.positions()
+    net = pos.get("net", [])
+    legs_by_role = {}
+    quantity = None
+    lot_size = None
+    for p in net:
+        ts = p.get("tradingsymbol")
+        if p.get("exchange") != "NFO" or ts not in meta_by_symbol:
+            continue
+        qty = int(p.get("quantity") or 0)
+        if qty == 0:
+            continue
+        meta = meta_by_symbol[ts]
+        opt_type = meta.get("instrument_type")
+        role = ("sell_" if qty < 0 else "buy_") + ("call" if opt_type == "CE" else "put")
+        if role in legs_by_role:
+            return None, (f"Found more than one open {role.replace('_', ' ')} leg on {symbol} -- "
+                           f"this engine expects one clean 4-leg (or 2-leg) condor/strangle shape per "
+                           f"symbol. Close/simplify down to one leg per role before attaching.")
+        legs_by_role[role] = {
+            "strike": meta.get("strike"), "tradingsymbol": ts,
+            "ltp": p.get("last_price"), "entry_price": p.get("average_price"),
+        }
+        quantity = abs(qty)
+        lot_size = meta.get("lot_size")
+    if not legs_by_role or "sell_call" not in legs_by_role or "sell_put" not in legs_by_role:
+        return None, (f"No open short call + short put pair found for {symbol} in your live Zerodha "
+                       f"positions. This engine needs at least both short legs of the condor/strangle "
+                       f"to be open right now.")
+    strategy_type = "iron_condor" if {"buy_call", "buy_put"} <= legs_by_role.keys() else "naked_strangle"
+    return {"symbol": symbol, "strategy_type": strategy_type, "legs": legs_by_role,
+            "quantity": quantity, "lot_size": lot_size}, None
+
+
+@app.route("/api/delta-engine/broker-legs/<symbol>")
+def delta_engine_broker_legs(symbol):
+    """Preview what would be attached for a symbol before committing -- lets the UI show the
+    detected legs/strikes so you can confirm it matched the right position."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    result, err = _classify_broker_legs_for_symbol(symbol)
+    if err:
+        return jsonify({"error": err}), 400
+    return jsonify(result)
+
+
+@app.route("/api/delta-engine/attach-broker", methods=["POST"])
+def delta_engine_attach_broker():
+    """Attaches a position for monitoring straight from your LIVE Zerodha broker positions -- for
+    a condor/strangle you opened outside this tool's own Condor/Strangle builder tab (e.g. placed
+    directly in Kite), so there's no positions.json Position ID to type in. Just give the underlying
+    symbol (e.g. "SBIN") and this finds and classifies the open legs itself."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    symbol = (body.get("symbol") or "").strip().upper()
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+    result, err = _classify_broker_legs_for_symbol(symbol)
+    if err:
+        return jsonify({"error": err}), 400
+    legs = result["legs"]
+    credit_per_share = (sum(v["entry_price"] for k, v in legs.items() if k.startswith("sell"))
+                         - sum(v["entry_price"] for k, v in legs.items() if k.startswith("buy")))
+    pos_id = f"BROKER-{symbol}-{int(time.time())}"
+    tracked = {
+        "id": pos_id, "symbol": symbol, "strategy_type": result["strategy_type"],
+        "legs": {k: {"strike": v["strike"], "ltp": v["entry_price"], "tradingsymbol": v["tradingsymbol"]}
+                 for k, v in legs.items()},
+        "quantity": result["quantity"], "lot_size": result["lot_size"],
+        "entry_credit": round(credit_per_share * result["quantity"], 2),
+        "source": "broker", "status": "monitoring", "added_at": now_ist().isoformat(),
+        "closed_at": None, "exit_reason": None, "realized_pnl": None, "last_greeks": None,
+        "pending_suggestion": None,
+    }
+    positions = load_delta_positions()
     positions.append(tracked)
     save_delta_positions(positions)
     return jsonify({"ok": True, "tracked": tracked})
@@ -5256,46 +5273,93 @@ def delta_engine_untrack(pos_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/delta-engine/suggestions")
+def delta_engine_suggestions():
+    """Every pending adjustment suggestion, one per monitored position that currently has a delta
+    breach -- each candidate carries its probability of profit, risk-reduction score, expected extra
+    premium, and whether it's currently executable given today's risk budget. Nothing here has been
+    or will be executed automatically; you choose what (if anything) to act on."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    positions = load_delta_positions()
+    out = []
+    for p in positions:
+        if p["status"] == "monitoring" and p.get("pending_suggestion"):
+            out.append({"position_id": p["id"], "symbol": p["symbol"], **p["pending_suggestion"]})
+    return jsonify({"suggestions": out})
+
+
+@app.route("/api/delta-engine/suggestions/<pos_id>/execute", methods=["POST"])
+def delta_engine_execute_suggestion(pos_id):
+    """Executes ONE specific candidate from a position's current pending suggestion -- the only way
+    an adjustment is ever placed. Runs in whichever execution_mode (Track/Live) is currently set."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    action = body.get("action")
+    if not action:
+        return jsonify({"error": "action is required (the candidate's action name to execute)"}), 400
+    positions = load_delta_positions()
+    position = next((p for p in positions if p["id"] == pos_id), None)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+    suggestion = position.get("pending_suggestion")
+    if not suggestion:
+        return jsonify({"error": "No pending suggestion for this position -- it may have already been acted on or cleared"}), 400
+    candidate_dict = next((c for c in suggestion["candidates"] if c["action"] == action), None)
+    if not candidate_dict:
+        return jsonify({"error": f"No candidate with action '{action}' in the current suggestion"}), 400
+    candidate = AdjustmentCandidate(**{k: v for k, v in candidate_dict.items() if k in AdjustmentCandidate.__dataclass_fields__})
+    ok, message = _execute_delta_adjustment(position, candidate, suggestion["trigger_reason"],
+                                             all_candidate_actions=[c["action"] for c in suggestion["candidates"]])
+    save_delta_positions(positions)
+    if not ok:
+        return jsonify({"error": message}), 400
+    return jsonify({"ok": True, "message": message, "position": position})
+
+
+@app.route("/api/delta-engine/suggestions/<pos_id>/dismiss", methods=["POST"])
+def delta_engine_dismiss_suggestion(pos_id):
+    """Clears the current pending suggestion without executing anything -- the next monitoring cycle
+    will re-evaluate and generate a fresh one if the breach is still there."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    positions = load_delta_positions()
+    for p in positions:
+        if p["id"] == pos_id:
+            p["pending_suggestion"] = None
+    save_delta_positions(positions)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/delta-engine/positions/<pos_id>/close-legs", methods=["POST"])
+def delta_engine_close_legs(pos_id):
+    """Manually closes some or all legs of a monitored position, in Track or Live (whichever
+    execution_mode is currently set), independent of the automatic profit-target/stop-loss logic --
+    for when you'd rather act on your own judgment. Body: {"roles": ["sell_call", ...]} -- omit or
+    pass an empty list to close every open leg."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    roles = body.get("roles") or []
+    positions = load_delta_positions()
+    position = next((p for p in positions if p["id"] == pos_id), None)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+    reason = body.get("reason") or ("Manual close (all legs)" if not roles else f"Manual close: {', '.join(roles)}")
+    ok, message = _close_delta_position_legs(position, roles, reason)
+    save_delta_positions(positions)
+    if not ok:
+        return jsonify({"error": message}), 400
+    return jsonify({"ok": True, "message": message, "position": position})
+
+
 @app.route("/api/delta-engine/logs")
 def delta_engine_logs():
     if not require_session():
         return jsonify({"error": "not_logged_in"}), 401
     limit = int(request.args.get("limit", 200))
     return jsonify({"logs": _delta_logger.read_recent(limit)})
-
-
-@app.route("/api/delta-engine/backtest", methods=["POST"])
-def delta_engine_backtest():
-    """Runs the approximate (Black-Scholes-reconstructed, see backtesting.py docstring) historical
-    backtest over a symbol's daily closes. Uses the SAME historical-OHLC fetch already used by the
-    breakout scanner (_fetch_recent_intraday's daily-interval sibling) so no new data source is needed."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    symbol = (body.get("symbol") or "NIFTY").upper()
-    days_back = int(body.get("days_back", 365))
-    flat_iv_pct = body.get("flat_iv_pct", 15.0)
-    token, tok_err = resolve_token_for_symbol(symbol)
-    if tok_err:
-        return jsonify({"error": tok_err}), 400
-    to_date = now_ist().date()
-    from_date = to_date - timedelta(days=days_back + 10)
-    try:
-        candles = kite.historical_data(token, from_date, to_date, "day")
-    except Exception as e:
-        return jsonify({"error": f"Could not fetch historical data for {symbol}: {e}"}), 400
-    if not candles or len(candles) < 10:
-        return jsonify({"error": f"Not enough historical data returned for {symbol}"}), 400
-    closes = [float(c["close"]) for c in candles]
-    dates = [str(c["date"])[:10] for c in candles]
-
-    bt = Backtester(delta_threshold_frac=body.get("delta_threshold_frac", 0.10),
-                     profit_target_pct=body.get("profit_target_pct", 50.0),
-                     stop_loss_pct=body.get("stop_loss_pct", 200.0), flat_iv_pct=flat_iv_pct)
-    report = bt.run(closes, dates, target_delta=body.get("target_delta", 0.18),
-                     wing_width_pct=body.get("wing_width_pct", 2.5),
-                     expiry_days=body.get("expiry_days", 7))
-    return jsonify(report.summary(starting_capital=body.get("starting_capital", 500000.0)))
 
 
 threading.Thread(target=_autotrade_loop, daemon=True).start()
