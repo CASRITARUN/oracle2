@@ -3344,32 +3344,139 @@ def broker_positions():
     independent of which strategy or basket a leg originally came from. For each open NFO leg this
     returns the entry (average) price, live LTP, and running P&L reported by Kite itself, so the
     Order Management tab can show exactly what your account currently holds and let you price and
-    fire an exit — for one leg or several at once — straight from here."""
+    fire an exit — for one leg or several at once — straight from here. Also groups every leg by its
+    UNDERLYING (e.g. all 4 SBIN option legs roll up under "SBIN") and returns a per-symbol total P&L,
+    since a single leg's P&L in isolation isn't the number that matters for a multi-leg position."""
     if not require_session():
         return jsonify({"error": "not_logged_in"}), 401
     try:
+        nfo, _ = get_instruments()
+        underlying_by_symbol = {i["tradingsymbol"]: i.get("name") for i in nfo if i.get("segment") in ("NFO-OPT", "NFO-FUT")}
         pos = kite.positions()
         net = pos.get("net", [])
         rows = []
+        totals_by_symbol = {}
         for p in net:
             if p.get("exchange") != "NFO":
                 continue
             qty = int(p.get("quantity") or 0)
             if qty == 0:
                 continue  # already flat — nothing open on this tradingsymbol
+            ts = p.get("tradingsymbol")
+            underlying = underlying_by_symbol.get(ts, ts)
+            pnl = p.get("pnl") or 0.0
             rows.append({
-                "tradingsymbol": p.get("tradingsymbol"),
+                "tradingsymbol": ts,
+                "underlying": underlying,
                 "product": p.get("product"),
                 "quantity": qty,
                 "side": "LONG" if qty > 0 else "SHORT",
                 "average_price": p.get("average_price"),
                 "last_price": p.get("last_price"),
-                "pnl": p.get("pnl"),
+                "pnl": pnl,
                 "close_price": p.get("close_price"),
             })
-        return jsonify({"positions": rows})
+            totals_by_symbol[underlying] = round(totals_by_symbol.get(underlying, 0.0) + pnl, 2)
+        return jsonify({"positions": rows, "totals_by_symbol": totals_by_symbol})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/broker-positions/simulate", methods=["POST"])
+def broker_positions_simulate():
+    """"What if" scenario simulator for your CURRENT live position on one underlying: estimates P&L
+    across a grid of spot price moves (%) and days forward from today, using Black-Scholes with each
+    leg's OWN implied volatility (backed out from its current live LTP) held constant except for any
+    optional iv_shift_pct you apply. This is a forward-looking estimate, not a backtest -- it answers
+    "if the stock moves X% over the next N days, roughly what happens to my P&L", including time
+    decay (theta) via the shrinking time-to-expiry as the day offset increases."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    symbol = (body.get("symbol") or "").strip().upper()
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+    price_moves_pct = body.get("price_moves_pct") or [-10, -7, -5, -3, -1, 0, 1, 3, 5, 7, 10]
+    day_offsets = body.get("day_offsets") or [0, 1, 3, 7]
+    iv_shift_pct = float(body.get("iv_shift_pct", 0.0))
+
+    nfo, _ = get_instruments()
+    meta_by_symbol = {i["tradingsymbol"]: i for i in nfo if i.get("name") == symbol and i.get("segment") == "NFO-OPT"}
+    try:
+        pos = kite.positions()
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch live positions: {e}"}), 400
+    net = pos.get("net", [])
+    legs_raw = []
+    for p in net:
+        ts = p.get("tradingsymbol")
+        if p.get("exchange") != "NFO" or ts not in meta_by_symbol:
+            continue
+        qty = int(p.get("quantity") or 0)
+        if qty == 0:
+            continue
+        legs_raw.append({"tradingsymbol": ts, "quantity": qty, "entry_price": p.get("average_price"),
+                          "meta": meta_by_symbol[ts]})
+    if not legs_raw:
+        return jsonify({"error": f"No open NFO option legs found for {symbol} in your live positions"}), 400
+
+    try:
+        chain_data, chain_err = get_chain_for_symbol(symbol)
+        spot = chain_data["spot"] if not chain_err else None
+    except Exception:
+        spot = None
+    if not spot:
+        return jsonify({"error": f"Could not fetch current spot price for {symbol}"}), 400
+
+    try:
+        quotes = kite.quote([f"NFO:{leg['tradingsymbol']}" for leg in legs_raw])
+    except Exception:
+        quotes = {}
+
+    today = now_ist().date()
+    sim_legs = []
+    for leg in legs_raw:
+        meta = leg["meta"]
+        expiry_date = meta.get("expiry")
+        expiry_date = expiry_date.date() if hasattr(expiry_date, "date") else expiry_date
+        T_days = max((expiry_date - today).days, 0) if expiry_date else 7
+        q = quotes.get(f"NFO:{leg['tradingsymbol']}", {})
+        ltp = extract_price(q) or leg["entry_price"]
+        T_now = max(T_days / 365.0, 1 / 365.0)
+        iv = implied_vol(ltp, spot, meta["strike"], T_now, meta["instrument_type"])
+        if not iv or iv <= 0:
+            iv = 0.15
+        sim_legs.append({
+            "tradingsymbol": leg["tradingsymbol"], "opt_type": meta["instrument_type"], "strike": meta["strike"],
+            "quantity": leg["quantity"], "entry_price": leg["entry_price"], "T_days": T_days, "iv": iv,
+        })
+
+    grid = {}
+    for d in day_offsets:
+        row = []
+        for pct in price_moves_pct:
+            sim_spot = spot * (1 + pct / 100.0)
+            total_pnl = 0.0
+            for leg in sim_legs:
+                T_remaining = max((leg["T_days"] - d) / 365.0, 0.0)
+                iv_shifted = max(leg["iv"] * (1 + iv_shift_pct / 100.0), 0.01)
+                price = bs_price(sim_spot, leg["strike"], T_remaining, RISK_FREE_RATE, iv_shifted, leg["opt_type"])
+                per_unit = (leg["entry_price"] - price) if leg["quantity"] < 0 else (price - leg["entry_price"])
+                total_pnl += per_unit * abs(leg["quantity"])
+            row.append({"price_move_pct": pct, "spot_price": round(sim_spot, 2), "pnl": round(total_pnl, 2)})
+        grid[str(d)] = row
+
+    return jsonify({
+        "symbol": symbol, "spot": spot,
+        "legs": [{"tradingsymbol": l["tradingsymbol"], "opt_type": l["opt_type"], "strike": l["strike"],
+                   "quantity": l["quantity"], "days_to_expiry": l["T_days"], "iv_pct": round(l["iv"] * 100, 1)}
+                  for l in sim_legs],
+        "price_moves_pct": price_moves_pct, "day_offsets": day_offsets, "grid": grid,
+        "caveat": ("Assumes each leg's implied volatility stays constant (aside from any IV shift you "
+                    "apply) as the spot price moves -- in reality IV often falls on a rally and rises on "
+                    "a selloff, which this does not model unless you set an IV shift yourself. Treat this "
+                    "as an estimate to plan around, not a guaranteed outcome."),
+    })
 
 
 @app.route("/api/broker-positions/exit", methods=["POST"])
