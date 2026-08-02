@@ -3565,10 +3565,36 @@ function renderSkewResults(results) {
         <div class="leg-card"><div class="k">Net credit/share</div><div class="v" style="font-size:13px;">${r.net_credit_per_share != null ? "₹" + r.net_credit_per_share : "-"}</div></div>
         <div class="leg-card"><div class="k">IV skew (put-call)</div><div class="v" style="font-size:13px;">${r.iv_skew} pts</div></div>
       </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="small-btn" onclick="addSkewCandidateToTrade('${r.symbol}', ${i})">Add to Trade</button>
+        <span class="loading" id="skewAddStatus_${i}"></span>
+      </div>
       <div class="legend" style="margin-top:6px; font-size:11px;">Scanned ${new Date(r.scanned_at).toLocaleTimeString()}</div>
     </div>
   `;
   }).join("");
+}
+
+async function addSkewCandidateToTrade(symbol, idx) {
+  const status = document.getElementById(`skewAddStatus_${idx}`);
+  const loggedIn = await checkSession();
+  if (!loggedIn) { status.textContent = "Connect your Kite account first (top right)."; return; }
+  status.textContent = "Adding at current market price...";
+  const deltaLow = Number(document.getElementById("skewDeltaLow").value) || 0.15;
+  const deltaHigh = Number(document.getElementById("skewDeltaHigh").value) || 0.20;
+  const targetDelta = (deltaLow + deltaHigh) / 2;
+  const wingWidthPct = (Number(document.getElementById("skewHedgeDist").value) || 2.5) / 100;
+  try {
+    const r = await apiFetch("/api/watchlist/add", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({symbol, target_delta: targetDelta, wing_width_pct: wingWidthPct,
+                             strategy_type: "iron_condor", lots: 1})
+    });
+    const d = await r.json();
+    if (d.error) { status.textContent = "Error: " + d.error; return; }
+    status.textContent = "Added. See Trade Section on the Condor tab.";
+    loadWatchlist();
+  } catch (e) { status.textContent = "Request failed: " + e; }
 }
 </script>
 
