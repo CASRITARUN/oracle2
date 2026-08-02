@@ -3546,37 +3546,46 @@ function renderSkewResults(results) {
   box.innerHTML = results.map((r, i) => {
     const trendBad = r.trend && r.trend.avoid_premium_selling;
     const trendPillClass = trendBad ? "bad" : (r.trend && r.trend.regime === "Range Bound" ? "ok" : "warn");
+    const dteTxt = r.days_to_expiry != null ? `${r.days_to_expiry}d to expiry (${r.expiry})` : "expiry unknown";
+    const banned = !!r.fo_banned_today;
     return `
-    <div style="border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px;">
-      <div style="display:flex; justify-content:space-between; align-items:baseline;">
-        <div>#${i + 1} <b>${r.symbol}</b> — spot ₹${r.spot}</div>
-        <div style="display:flex; gap:6px;">
-          <span class="pill ok" style="font-size:11px;">Safety score ${r.safety_score}/100</span>
+    <div style="border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px; ${banned ? "opacity:.75;" : ""}">
+      <div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:6px;">
+        <div>#${i + 1} <b>${r.symbol}</b> — spot ₹${r.spot} <span class="legend" style="font-size:11px;">· ${dteTxt}</span></div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          ${banned ? `<span class="pill bad" style="font-size:11px;">F&amp;O BAN — can't open new</span>` : ""}
+          <span class="pill ${banned ? "warn" : "ok"}" style="font-size:11px;">Safety score ${r.safety_score}/100</span>
           <span class="pill ${r.richer_side === "put" ? "bad" : "warn"}" style="font-size:11px;">${r.richer_side.toUpperCase()} richer by ${r.skew_pct}%</span>
           <span class="pill ${trendPillClass}" style="font-size:11px;">${r.trend ? r.trend.regime : "Trend unknown"}</span>
         </div>
       </div>
       <div class="legend" style="margin-top:6px;">${r.reasoning}</div>
+      ${r.event_before_expiry ? `<div class="warn-box">Event before expiry: ${r.event_before_expiry.label} (${r.event_before_expiry.date})</div>` : ""}
       <div class="leg-grid" style="margin-top:8px;">
         <div class="leg-card"><div class="k">Sell Call</div><div class="v" style="font-size:13px;">${r.call.strike} @ ₹${r.call.premium} (Δ${r.call.delta}, OI ${r.call.oi ?? "-"})</div></div>
         <div class="leg-card"><div class="k">Sell Put</div><div class="v" style="font-size:13px;">${r.put.strike} @ ₹${r.put.premium} (Δ${r.put.delta}, OI ${r.put.oi ?? "-"})</div></div>
         ${r.call_hedge ? `<div class="leg-card"><div class="k">Hedge Call</div><div class="v" style="font-size:13px;">${r.call_hedge.strike} @ ₹${r.call_hedge.premium}</div></div>` : ""}
         ${r.put_hedge ? `<div class="leg-card"><div class="k">Hedge Put</div><div class="v" style="font-size:13px;">${r.put_hedge.strike} @ ₹${r.put_hedge.premium}</div></div>` : ""}
         <div class="leg-card"><div class="k">Net credit/share</div><div class="v" style="font-size:13px;">${r.net_credit_per_share != null ? "₹" + r.net_credit_per_share : "-"}</div></div>
+        <div class="leg-card"><div class="k">Max loss/share</div><div class="v" style="font-size:13px;">${r.max_loss_per_share != null ? "₹" + r.max_loss_per_share : "-"}</div></div>
         <div class="leg-card"><div class="k">IV skew (put-call)</div><div class="v" style="font-size:13px;">${r.iv_skew} pts</div></div>
       </div>
       <div class="row" style="margin-top:10px;">
-        <button class="small-btn" onclick="addSkewCandidateToTrade('${r.symbol}', ${i})">Add to Trade</button>
+        <button class="small-btn" onclick="addSkewCandidateToTrade('${r.symbol}', ${i}, ${banned})">Add to Trade</button>
         <span class="loading" id="skewAddStatus_${i}"></span>
       </div>
-      <div class="legend" style="margin-top:6px; font-size:11px;">Scanned ${new Date(r.scanned_at).toLocaleTimeString()}</div>
+      <div class="legend" style="margin-top:6px; font-size:11px;">Scanned ${new Date(r.scanned_at).toLocaleTimeString()}${r.fo_banned_today === null ? " · run the Screener tab once to enable F&O ban checks" : ""}</div>
     </div>
   `;
   }).join("");
 }
 
-async function addSkewCandidateToTrade(symbol, idx) {
+async function addSkewCandidateToTrade(symbol, idx, banned) {
   const status = document.getElementById(`skewAddStatus_${idx}`);
+  if (banned) {
+    const proceed = confirm(`${symbol} is in the F&O ban period today. It can still be tracked here as a paper position, but a real order (via Execute in the Trade Section) will be rejected by your broker until the ban lifts. Add as paper anyway?`);
+    if (!proceed) { status.textContent = "Skipped (F&O banned today)."; return; }
+  }
   const loggedIn = await checkSession();
   if (!loggedIn) { status.textContent = "Connect your Kite account first (top right)."; return; }
   status.textContent = "Adding at current market price...";
