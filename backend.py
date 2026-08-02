@@ -5469,6 +5469,310 @@ def delta_engine_logs():
     return jsonify({"logs": _delta_logger.read_recent(limit)})
 
 
+# =============================================================================
+# Premium Skew Scanner — for a symmetric (equal-delta) Iron Condor, the call-side and put-side
+# premiums are USUALLY close but rarely identical; sometimes one side is priced noticeably richer
+# than the other at the same delta. This scans a universe of stocks/indices, finds the call and put
+# nearest your configured delta for each, and ranks them by how lopsided that premium is right now.
+# It does NOT predict tomorrow's price — it only surfaces where today's skew is largest so you can
+# decide whether to sell into it. Skew can persist for good reasons (an upcoming event, structural
+# put-skew in that name) as well as revert -- see the caveat returned with every scan.
+# =============================================================================
+SKEW_SCANNER_FILE = os.path.join(os.path.dirname(__file__), "skew_scanner_state.json")
+SKEW_SCANNER_RESULTS_FILE = os.path.join(os.path.dirname(__file__), "skew_scanner_results.json")
+_skew_scanner_lock = threading.Lock()
+SKEW_SCAN_CHUNK_SIZE = 15   # symbols scanned per batch, staggered -- kept modest since each symbol
+                             # now costs an extra historical-data call (for trend) on top of the chain fetch
+
+SKEW_SCANNER_DEFAULTS = {
+    "delta_low": 0.15,
+    "delta_high": 0.20,
+    "hedge_distance_pct": 2.5,
+    "scan_all_fo": True,            # scan the whole live F&O universe, batch by batch
+    "universe": [],                 # used only when scan_all_fo is False
+    "min_skew_pct": 15.0,           # only keep candidates at least this lopsided
+    "_scan_cursor": 0,
+    "last_scan_at": None,
+    "last_batch_errors": [],
+}
+SKEW_SCANNER_CONFIGURABLE_KEYS = ("delta_low", "delta_high", "hedge_distance_pct", "scan_all_fo",
+                                   "universe", "min_skew_pct")
+
+
+def load_skew_scanner_state():
+    state = dict(SKEW_SCANNER_DEFAULTS)
+    if os.path.exists(SKEW_SCANNER_FILE):
+        try:
+            with open(SKEW_SCANNER_FILE, "r") as f:
+                state.update(json.load(f))
+        except Exception:
+            pass
+    return state
+
+
+def save_skew_scanner_state(state):
+    with _skew_scanner_lock:
+        with open(SKEW_SCANNER_FILE, "w") as f:
+            json.dump(state, f, indent=2, default=str)
+
+
+def load_skew_scanner_results():
+    if not os.path.exists(SKEW_SCANNER_RESULTS_FILE):
+        return []
+    try:
+        with open(SKEW_SCANNER_RESULTS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_skew_scanner_results(results):
+    with _skew_scanner_lock:
+        with open(SKEW_SCANNER_RESULTS_FILE, "w") as f:
+            json.dump(results, f, indent=2, default=str)
+
+
+def _skew_scan_universe_batch(state):
+    """Same rotating-chunk pattern as _effective_scan_universe -- covers the whole F&O list
+    progressively across repeated batches instead of one huge slow request. Returns
+    (chunk, universe_size, pass_complete) so the caller (and the UI) knows when a full rotation
+    through the universe has just finished, to auto-stop a continuous scan."""
+    if not state.get("scan_all_fo"):
+        uni = state.get("universe") or []
+        return uni, len(uni), True   # a manual list is always fully covered in one batch
+    try:
+        full = list(INDEX_SYMBOLS.keys()) + fo_stock_universe()
+    except Exception:
+        uni = state.get("universe") or []
+        return uni, len(uni), True
+    if not full:
+        return [], 0, True
+    cursor = state.get("_scan_cursor", 0) % len(full)
+    rotated = full[cursor:] + full[:cursor]
+    chunk = rotated[:SKEW_SCAN_CHUNK_SIZE]
+    new_cursor = (cursor + SKEW_SCAN_CHUNK_SIZE) % len(full)
+    pass_complete = new_cursor <= cursor   # wrapped back to/past the start
+    state["_scan_cursor"] = new_cursor
+    return chunk, len(full), pass_complete
+
+
+def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
+    """Finds the call and put nearest the target delta for one symbol and scores how lopsided their
+    premiums are. Returns (candidate_dict_or_None, error_or_None)."""
+    try:
+        chain_data, err = get_chain_for_symbol(symbol)
+    except Exception as e:
+        return None, str(e)
+    if err:
+        return None, err.get("error", "chain fetch failed")
+    chain = chain_data.get("chain") or []
+    spot = chain_data.get("spot")
+    if not spot:
+        return None, "No spot price"
+    target_delta = (delta_low + delta_high) / 2.0
+
+    calls = [o for o in chain if o.get("instrument_type") == "CE" and o.get("delta") is not None]
+    puts = [o for o in chain if o.get("instrument_type") == "PE" and o.get("delta") is not None]
+    if not calls or not puts:
+        return None, "Incomplete option chain"
+
+    call_leg = min(calls, key=lambda o: abs(o["delta"] - target_delta))
+    put_leg = min(puts, key=lambda o: abs(abs(o["delta"]) - target_delta))
+    tolerance = 0.05
+    if not (delta_low - tolerance <= call_leg["delta"] <= delta_high + tolerance):
+        return None, "No call strike close enough to the target delta range"
+    if not (delta_low - tolerance <= abs(put_leg["delta"]) <= delta_high + tolerance):
+        return None, "No put strike close enough to the target delta range"
+
+    call_premium, put_premium = call_leg.get("ltp"), put_leg.get("ltp")
+    if not call_premium or not put_premium or call_premium <= 0 or put_premium <= 0:
+        return None, "Zero/invalid premium on one side"
+
+    richer_side = "put" if put_premium > call_premium else "call"
+    avg_premium = (call_premium + put_premium) / 2.0
+    skew_pct = abs(put_premium - call_premium) / avg_premium * 100.0
+    iv_skew = round((put_leg.get("iv") or 0) - (call_leg.get("iv") or 0), 2)
+
+    call_hedge_target = call_leg["strike"] * (1 + hedge_distance_pct / 100.0)
+    put_hedge_target = put_leg["strike"] * (1 - hedge_distance_pct / 100.0)
+    call_hedge = min(calls, key=lambda o: abs(o["strike"] - call_hedge_target)) if calls else None
+    put_hedge = min(puts, key=lambda o: abs(o["strike"] - put_hedge_target)) if puts else None
+    net_credit = None
+    if call_hedge and put_hedge and call_hedge.get("ltp") is not None and put_hedge.get("ltp") is not None:
+        net_credit = round((call_premium + put_premium) - (call_hedge["ltp"] + put_hedge["ltp"]), 2)
+
+    call_dist_pct = round((call_leg["strike"] - spot) / spot * 100.0, 2)
+    put_dist_pct = round((spot - put_leg["strike"]) / spot * 100.0, 2)
+
+    # Trend check -- the single biggest way a condor loses money is selling premium into a real,
+    # sustained move rather than a range. A rich skew in a stock that's actually trending hard is a
+    # warning sign, not a green light, so this is checked and factored into the safety score below.
+    time.sleep(HISTORICAL_CALL_STAGGER_SECONDS)
+    trend_info = get_trend_regime(symbol)
+
+    # Liquidity check on the actual strikes you'd trade -- thin OI means wide spreads / bad fills,
+    # regardless of how attractive the skew looks on screen.
+    min_oi = min(call_leg.get("oi") or 0, put_leg.get("oi") or 0)
+
+    safety_score, safety_notes = _skew_safety_score(skew_pct, trend_info, min_oi, net_credit)
+
+    reasoning = (
+        f"At ~{target_delta:.2f} delta, the {richer_side} side is priced {skew_pct:.1f}% richer than "
+        f"the other: call {call_premium} @ {call_leg['strike']} ({call_dist_pct:+.1f}% from spot) vs "
+        f"put {put_premium} @ {put_leg['strike']} ({put_dist_pct:+.1f}% from spot); IV skew (put minus "
+        f"call) {iv_skew:+.1f} pts. {safety_notes}"
+    )
+
+    return {
+        "symbol": symbol, "spot": spot, "scanned_at": now_ist().isoformat(),
+        "call": {"strike": call_leg["strike"], "premium": call_premium, "delta": round(call_leg["delta"], 3),
+                  "iv": call_leg.get("iv"), "oi": call_leg.get("oi"), "tradingsymbol": call_leg["tradingsymbol"],
+                  "distance_pct": call_dist_pct},
+        "put": {"strike": put_leg["strike"], "premium": put_premium, "delta": round(put_leg["delta"], 3),
+                 "iv": put_leg.get("iv"), "oi": put_leg.get("oi"), "tradingsymbol": put_leg["tradingsymbol"],
+                 "distance_pct": put_dist_pct},
+        "call_hedge": ({"strike": call_hedge["strike"], "premium": call_hedge.get("ltp"),
+                         "tradingsymbol": call_hedge["tradingsymbol"]} if call_hedge else None),
+        "put_hedge": ({"strike": put_hedge["strike"], "premium": put_hedge.get("ltp"),
+                        "tradingsymbol": put_hedge["tradingsymbol"]} if put_hedge else None),
+        "richer_side": richer_side, "skew_pct": round(skew_pct, 2), "iv_skew": iv_skew,
+        "net_credit_per_share": net_credit, "min_oi": min_oi,
+        "trend": ({"regime": trend_info.get("regime"), "adx14": trend_info.get("adx14"),
+                    "avoid_premium_selling": trend_info.get("avoid_premium_selling")}
+                   if not trend_info.get("error") else {"regime": "Unknown", "error": trend_info["error"]}),
+        "safety_score": safety_score, "reasoning": reasoning,
+    }, None
+
+
+def _skew_safety_score(skew_pct, trend_info, min_oi, net_credit):
+    """Composite 0-100 'how reasonable is it to sell into this skew' score. Transparent and
+    rule-based -- NOT a prediction of tomorrow's move, just a blend of the raw opportunity size
+    with the two things most likely to hurt you if ignored: trading against a real trend, and
+    trading illiquid strikes. Always investigate the actual candidate yourself before acting."""
+    notes = []
+
+    # Opportunity size -- up to 40 points, capped so an extreme outlier doesn't dominate the score
+    # (an extremely large skew is often extreme for a REASON, e.g. an event, not just noise).
+    skew_component = min(skew_pct, 60) / 60 * 40
+
+    # Trend suitability -- up to 30 points. This is the biggest single risk factor for a condor.
+    if trend_info.get("error"):
+        trend_component = 12
+        notes.append("Trend regime unavailable (not enough history) -- treat as unconfirmed.")
+    elif trend_info.get("avoid_premium_selling"):
+        trend_component = 0
+        notes.append(f"CAUTION: {trend_info.get('regime')} -- this stock is trending, a bad environment for a condor regardless of the skew.")
+    elif trend_info.get("regime") == "Range Bound":
+        trend_component = 30
+        notes.append("Range Bound -- a favorable environment for selling premium.")
+    else:
+        trend_component = 16
+        notes.append(f"{trend_info.get('regime')} -- workable but not ideal for premium selling.")
+
+    # Liquidity -- up to 20 points, based on the thinner of the two short strikes' open interest.
+    if min_oi >= 500000:
+        liquidity_component = 20
+    elif min_oi >= 100000:
+        liquidity_component = 14
+    elif min_oi >= 20000:
+        liquidity_component = 8
+    else:
+        liquidity_component = 2
+        notes.append("Thin open interest on these strikes -- expect wider spreads and worse fills.")
+
+    # Credit sanity -- 10 points if the condor still nets a real positive credit after hedges.
+    credit_component = 10 if (net_credit or 0) > 0 else 0
+    if credit_component == 0:
+        notes.append("Net credit after hedges is at or below zero at these strikes -- check pricing before acting.")
+
+    total = round(skew_component + trend_component + liquidity_component + credit_component, 1)
+    return total, " ".join(notes)
+
+
+@app.route("/api/skew-scanner/state")
+def skew_scanner_state_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    return jsonify(load_skew_scanner_state())
+
+
+@app.route("/api/skew-scanner/config", methods=["POST"])
+def skew_scanner_config():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    state = load_skew_scanner_state()
+    for key in SKEW_SCANNER_CONFIGURABLE_KEYS:
+        if key in body:
+            state[key] = body[key]
+    save_skew_scanner_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/skew-scanner/scan-batch", methods=["POST"])
+def skew_scanner_scan_batch():
+    """Scans the next chunk of the configured universe (rotating -- click again to cover more of the
+    F&O list), scores each symbol's call/put premium skew at your configured delta, and merges fresh
+    results into the persisted results list (existing entries for the same symbol are replaced with
+    the latest scan, not duplicated)."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    state = load_skew_scanner_state()
+    delta_low, delta_high = state.get("delta_low", 0.15), state.get("delta_high", 0.20)
+    hedge_distance_pct = state.get("hedge_distance_pct", 2.5)
+    min_skew_pct = state.get("min_skew_pct", 15.0)
+
+    batch, universe_size, pass_complete = _skew_scan_universe_batch(state)
+    results_by_symbol = {r["symbol"]: r for r in load_skew_scanner_results()}
+    errors = []
+    for idx, symbol in enumerate(batch):
+        if idx > 0:
+            time.sleep(HISTORICAL_CALL_STAGGER_SECONDS)
+        candidate, err = _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct)
+        if err:
+            errors.append(f"{symbol}: {err}")
+            continue
+        if candidate["skew_pct"] >= min_skew_pct:
+            results_by_symbol[symbol] = candidate
+        elif symbol in results_by_symbol:
+            # No longer qualifies -- drop the stale entry rather than show an outdated skew.
+            del results_by_symbol[symbol]
+
+    # Ranked by SAFETY SCORE by default (opportunity size blended with trend + liquidity), not raw
+    # skew% -- the biggest, richest-looking skew is often the least safe one to actually sell into.
+    results = sorted(results_by_symbol.values(), key=lambda r: r["safety_score"], reverse=True)[:60]
+    save_skew_scanner_results(results)
+    state["last_scan_at"] = now_ist().isoformat()
+    state["last_batch_errors"] = errors[:10]
+    save_skew_scanner_state(state)
+    return jsonify({"ok": True, "scanned": batch, "errors": errors, "results": results,
+                     "universe_size": universe_size, "cursor": state.get("_scan_cursor", 0),
+                     "pass_complete": pass_complete,
+                     "caveat": ("Ranked by a safety score (opportunity size blended with trend "
+                                "suitability and strike liquidity), not raw skew% alone -- the single "
+                                "biggest, richest-looking skew is often the least safe one to sell "
+                                "into if that stock is actually trending. This still does not predict "
+                                "tomorrow's move; investigate the top candidates yourself before acting.")})
+
+
+@app.route("/api/skew-scanner/results")
+def skew_scanner_results_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    return jsonify({"results": load_skew_scanner_results()})
+
+
+@app.route("/api/skew-scanner/results/clear", methods=["POST"])
+def skew_scanner_clear_results():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    save_skew_scanner_results([])
+    state = load_skew_scanner_state()
+    state["_scan_cursor"] = 0
+    save_skew_scanner_state(state)
+    return jsonify({"ok": True})
+
+
 threading.Thread(target=_autotrade_loop, daemon=True).start()
 threading.Thread(target=_delta_engine_loop, daemon=True).start()
 threading.Thread(target=_delta_spot_poll_loop, daemon=True).start()
