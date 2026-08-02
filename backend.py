@@ -5570,6 +5570,7 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
     if not spot:
         return None, "No spot price"
     expiry = chain_data.get("expiry")
+    T = chain_data.get("T")
     days_to_expiry = max((expiry - now_ist().date()).days, 0) if expiry else None
     target_delta = (delta_low + delta_high) / 2.0
 
@@ -5594,6 +5595,34 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
     avg_premium = (call_premium + put_premium) / 2.0
     skew_pct = abs(put_premium - call_premium) / avg_premium * 100.0
     iv_skew = round((put_leg.get("iv") or 0) - (call_leg.get("iv") or 0), 2)
+
+    # Fair-value check -- reuses the app's existing bs_price() Black-Scholes pricer. Each leg's own
+    # market IV is backed OUT of its own market price, so comparing a leg to itself would be circular
+    # (it would always match). Instead this prices both legs off ONE flat benchmark vol -- the ATM
+    # IV, i.e. "what would this strike cost if the whole chain were priced like the at-the-money
+    # option, with no smile/skew at all". The gap between that flat-vol fair value and the actual
+    # quoted premium is a second, independent read on richness -- distinct from the call-vs-put
+    # comparison above, and it's what actually explains WHY one side is richer (its slice of the
+    # smile is priced above the ATM benchmark, not just above the other side).
+    atm_iv_used_pct, call_theo, call_vs_fair, call_vs_fair_pct = None, None, None, None
+    put_theo, put_vs_fair, put_vs_fair_pct = None, None, None
+    if T and T > 0:
+        atm_strike = min({o["strike"] for o in chain}, key=lambda k: abs(k - spot))
+        atm_ivs = [o["iv"] for o in chain if o["strike"] == atm_strike and o.get("iv")]
+        atm_iv_used_pct = round(sum(atm_ivs) / len(atm_ivs), 2) if atm_ivs else None
+        if atm_iv_used_pct is None:
+            fallback_iv = ((call_leg.get("iv") or 0) + (put_leg.get("iv") or 0)) / 2
+            atm_iv_used_pct = round(fallback_iv, 2) if fallback_iv else None
+        if atm_iv_used_pct:
+            sigma = atm_iv_used_pct / 100.0
+            call_theo = round(bs_price(spot, call_leg["strike"], T, RISK_FREE_RATE, sigma, "CE"), 2)
+            put_theo = round(bs_price(spot, put_leg["strike"], T, RISK_FREE_RATE, sigma, "PE"), 2)
+            if call_theo > 0:
+                call_vs_fair = round(call_premium - call_theo, 2)
+                call_vs_fair_pct = round(call_vs_fair / call_theo * 100, 1)
+            if put_theo > 0:
+                put_vs_fair = round(put_premium - put_theo, 2)
+                put_vs_fair_pct = round(put_vs_fair / put_theo * 100, 1)
 
     call_hedge_target = call_leg["strike"] * (1 + hedge_distance_pct / 100.0)
     put_hedge_target = put_leg["strike"] * (1 - hedge_distance_pct / 100.0)
@@ -5643,6 +5672,13 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
         f"spot) vs put {put_premium} @ {put_leg['strike']} ({put_dist_pct:+.1f}% from spot); IV skew "
         f"(put minus call) {iv_skew:+.1f} pts. {safety_notes}"
     )
+    if atm_iv_used_pct and call_vs_fair is not None and put_vs_fair is not None:
+        reasoning += (
+            f" Vs a flat ATM-vol ({atm_iv_used_pct}%) fair value: call is {call_vs_fair:+.2f} "
+            f"({call_vs_fair_pct:+.1f}%) and put is {put_vs_fair:+.2f} ({put_vs_fair_pct:+.1f}%) "
+            f"relative to theoretical -- the side further above its fair value is the one actually "
+            f"carrying the smile premium, not just the richer of the two."
+        )
     if fo_banned_today:
         reasoning += " CANNOT OPEN A NEW POSITION -- this stock is in the F&O ban period today."
     if event_before_expiry:
@@ -5652,12 +5688,15 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
     return {
         "symbol": symbol, "spot": spot, "scanned_at": now_ist().isoformat(),
         "expiry": str(expiry) if expiry else None, "days_to_expiry": days_to_expiry,
+        "atm_iv_used_pct": atm_iv_used_pct,
         "call": {"strike": call_leg["strike"], "premium": call_premium, "delta": round(call_leg["delta"], 3),
                   "iv": call_leg.get("iv"), "oi": call_leg.get("oi"), "tradingsymbol": call_leg["tradingsymbol"],
-                  "distance_pct": call_dist_pct},
+                  "distance_pct": call_dist_pct, "theo_premium": call_theo,
+                  "vs_fair": call_vs_fair, "vs_fair_pct": call_vs_fair_pct},
         "put": {"strike": put_leg["strike"], "premium": put_premium, "delta": round(put_leg["delta"], 3),
                  "iv": put_leg.get("iv"), "oi": put_leg.get("oi"), "tradingsymbol": put_leg["tradingsymbol"],
-                 "distance_pct": put_dist_pct},
+                 "distance_pct": put_dist_pct, "theo_premium": put_theo,
+                 "vs_fair": put_vs_fair, "vs_fair_pct": put_vs_fair_pct},
         "call_hedge": ({"strike": call_hedge["strike"], "premium": call_hedge.get("ltp"),
                          "tradingsymbol": call_hedge["tradingsymbol"]} if call_hedge else None),
         "put_hedge": ({"strike": put_hedge["strike"], "premium": put_hedge.get("ltp"),
