@@ -5569,6 +5569,8 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
     spot = chain_data.get("spot")
     if not spot:
         return None, "No spot price"
+    expiry = chain_data.get("expiry")
+    days_to_expiry = max((expiry - now_ist().date()).days, 0) if expiry else None
     target_delta = (delta_low + delta_high) / 2.0
 
     calls = [o for o in chain if o.get("instrument_type") == "CE" and o.get("delta") is not None]
@@ -5604,6 +5606,14 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
     call_dist_pct = round((call_leg["strike"] - spot) / spot * 100.0, 2)
     put_dist_pct = round((spot - put_leg["strike"]) / spot * 100.0, 2)
 
+    # Max loss/profit per share -- pure arithmetic on strikes/premiums already in hand, no extra API
+    # calls. Skipped only when a hedge is missing (net_credit is None in that case too).
+    max_loss_per_share = None
+    if call_hedge and put_hedge and net_credit is not None:
+        call_wing = call_hedge["strike"] - call_leg["strike"]
+        put_wing = put_leg["strike"] - put_hedge["strike"]
+        max_loss_per_share = round(max(call_wing, put_wing) - net_credit, 2)
+
     # Trend check -- the single biggest way a condor loses money is selling premium into a real,
     # sustained move rather than a range. A rich skew in a stock that's actually trending hard is a
     # warning sign, not a green light, so this is checked and factored into the safety score below.
@@ -5614,17 +5624,34 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
     # regardless of how attractive the skew looks on screen.
     min_oi = min(call_leg.get("oi") or 0, put_leg.get("oi") or 0)
 
-    safety_score, safety_notes = _skew_safety_score(skew_pct, trend_info, min_oi, net_credit)
+    # F&O ban check -- reads the Screener's cache (free, no extra API call). If the Screener hasn't
+    # been run recently this comes back None/"unknown" rather than a false negative, since a stock
+    # that's actually banned but never checked is worse than one flagged as unverified.
+    rank_info = get_stock_rank(symbol)
+    fo_banned_today = rank_info.get("fo_banned_today") if rank_info else None
 
+    # Any flagged macro/results event between now and this expiry -- a real risk for a position that
+    # will still be open then, distinct from the "avoid opening right now" entry-window check.
+    event_before_expiry = get_event_before_expiry(str(expiry)) if expiry else None
+
+    safety_score, safety_notes = _skew_safety_score(skew_pct, trend_info, min_oi, net_credit, fo_banned_today)
+
+    dte_txt = f"{days_to_expiry}d to expiry ({expiry})" if days_to_expiry is not None else "expiry unknown"
     reasoning = (
-        f"At ~{target_delta:.2f} delta, the {richer_side} side is priced {skew_pct:.1f}% richer than "
-        f"the other: call {call_premium} @ {call_leg['strike']} ({call_dist_pct:+.1f}% from spot) vs "
-        f"put {put_premium} @ {put_leg['strike']} ({put_dist_pct:+.1f}% from spot); IV skew (put minus "
-        f"call) {iv_skew:+.1f} pts. {safety_notes}"
+        f"At ~{target_delta:.2f} delta, {dte_txt}, the {richer_side} side is priced {skew_pct:.1f}% "
+        f"richer than the other: call {call_premium} @ {call_leg['strike']} ({call_dist_pct:+.1f}% from "
+        f"spot) vs put {put_premium} @ {put_leg['strike']} ({put_dist_pct:+.1f}% from spot); IV skew "
+        f"(put minus call) {iv_skew:+.1f} pts. {safety_notes}"
     )
+    if fo_banned_today:
+        reasoning += " CANNOT OPEN A NEW POSITION -- this stock is in the F&O ban period today."
+    if event_before_expiry:
+        reasoning += (f" Heads up: {event_before_expiry['label']} ({event_before_expiry['date']}) falls "
+                       f"before this expiry.")
 
     return {
         "symbol": symbol, "spot": spot, "scanned_at": now_ist().isoformat(),
+        "expiry": str(expiry) if expiry else None, "days_to_expiry": days_to_expiry,
         "call": {"strike": call_leg["strike"], "premium": call_premium, "delta": round(call_leg["delta"], 3),
                   "iv": call_leg.get("iv"), "oi": call_leg.get("oi"), "tradingsymbol": call_leg["tradingsymbol"],
                   "distance_pct": call_dist_pct},
@@ -5636,7 +5663,8 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
         "put_hedge": ({"strike": put_hedge["strike"], "premium": put_hedge.get("ltp"),
                         "tradingsymbol": put_hedge["tradingsymbol"]} if put_hedge else None),
         "richer_side": richer_side, "skew_pct": round(skew_pct, 2), "iv_skew": iv_skew,
-        "net_credit_per_share": net_credit, "min_oi": min_oi,
+        "net_credit_per_share": net_credit, "max_loss_per_share": max_loss_per_share, "min_oi": min_oi,
+        "fo_banned_today": fo_banned_today, "event_before_expiry": event_before_expiry,
         "trend": ({"regime": trend_info.get("regime"), "adx14": trend_info.get("adx14"),
                     "avoid_premium_selling": trend_info.get("avoid_premium_selling")}
                    if not trend_info.get("error") else {"regime": "Unknown", "error": trend_info["error"]}),
@@ -5644,12 +5672,19 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
     }, None
 
 
-def _skew_safety_score(skew_pct, trend_info, min_oi, net_credit):
+def _skew_safety_score(skew_pct, trend_info, min_oi, net_credit, fo_banned_today=None):
     """Composite 0-100 'how reasonable is it to sell into this skew' score. Transparent and
     rule-based -- NOT a prediction of tomorrow's move, just a blend of the raw opportunity size
-    with the two things most likely to hurt you if ignored: trading against a real trend, and
-    trading illiquid strikes. Always investigate the actual candidate yourself before acting."""
+    with the things most likely to hurt you if ignored: trading against a real trend, trading
+    illiquid strikes, and (new) a stock that's actually in an F&O ban and can't be freshly opened
+    at all. Always investigate the actual candidate yourself before acting."""
     notes = []
+
+    # F&O ban -- if you literally cannot open a new position today, no other factor matters. Capped
+    # hard rather than excluded outright so the UI can still show *why* it's here (e.g. it topped the
+    # scan on skew alone) instead of silently disappearing.
+    if fo_banned_today:
+        notes.append("F&O BAN today -- new positions cannot be opened in this stock right now.")
 
     # Opportunity size -- up to 40 points, capped so an extreme outlier doesn't dominate the score
     # (an extremely large skew is often extreme for a REASON, e.g. an event, not just noise).
@@ -5686,6 +5721,8 @@ def _skew_safety_score(skew_pct, trend_info, min_oi, net_credit):
         notes.append("Net credit after hedges is at or below zero at these strikes -- check pricing before acting.")
 
     total = round(skew_component + trend_component + liquidity_component + credit_component, 1)
+    if fo_banned_today:
+        total = min(total, 15.0)
     return total, " ".join(notes)
 
 
@@ -5749,10 +5786,13 @@ def skew_scanner_scan_batch():
                      "universe_size": universe_size, "cursor": state.get("_scan_cursor", 0),
                      "pass_complete": pass_complete,
                      "caveat": ("Ranked by a safety score (opportunity size blended with trend "
-                                "suitability and strike liquidity), not raw skew% alone -- the single "
-                                "biggest, richest-looking skew is often the least safe one to sell "
-                                "into if that stock is actually trending. This still does not predict "
-                                "tomorrow's move; investigate the top candidates yourself before acting.")})
+                                "suitability, strike liquidity, and F&O ban status), not raw skew% "
+                                "alone -- the single biggest, richest-looking skew is often the least "
+                                "safe one to sell into if that stock is actually trending or banned "
+                                "today. F&O ban checks need the Screener (tab 1) run at least once "
+                                "this session, otherwise ban status shows as unverified. This still "
+                                "does not predict tomorrow's move or upcoming events; investigate the "
+                                "top candidates yourself before acting.")})
 
 
 @app.route("/api/skew-scanner/results")
