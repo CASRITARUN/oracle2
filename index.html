@@ -913,8 +913,12 @@
       close but rarely identical. This scans stocks/indices, finds the call and put nearest your
       chosen delta for each, and ranks candidates by a <b>safety score</b> that blends how lopsided
       today's premium is with two risk checks: whether that stock is actually trending (bad for a
-      condor regardless of skew) and how liquid the strikes are. Click Scan once — it automatically
-      keeps working through the whole F&amp;O list in batches until done, or until you click Stop.
+      condor regardless of skew) and how liquid the strikes are. Each leg also shows a
+      <b>Black-Scholes fair value</b> — what that strike "should" cost if the whole chain were priced
+      with the at-the-money option's volatility (no smile). The gap between that and the actual quoted
+      premium shows which side is carrying the smile premium, not just which is pricier of the two.
+      Click Scan once — it automatically keeps working through the whole F&amp;O list in batches until
+      done, or until you click Stop.
     </div>
     <div class="row" style="margin-top:14px; align-items:flex-end;">
       <label class="inline">Delta range: low <input type="number" id="skewDeltaLow" value="0.15" step="0.01" style="width:70px;" /></label>
@@ -3537,6 +3541,13 @@ async function clearSkewResults() {
   document.getElementById("skewScanStatus").textContent = "Results cleared.";
 }
 
+function fairValueLine(leg) {
+  if (leg.theo_premium == null) return "";
+  const cls = (leg.vs_fair ?? 0) >= 0 ? "pnl-pos" : "pnl-neg";
+  const sign = (leg.vs_fair ?? 0) >= 0 ? "+" : "";
+  return `<div class="legend" style="margin-top:3px; font-size:11px;">Fair (BS) ₹${leg.theo_premium} · <span class="${cls}">${sign}₹${leg.vs_fair} (${sign}${leg.vs_fair_pct}%)</span></div>`;
+}
+
 function renderSkewResults(results) {
   const box = document.getElementById("skewResultsBox");
   if (!results.length) {
@@ -3562,13 +3573,14 @@ function renderSkewResults(results) {
       <div class="legend" style="margin-top:6px;">${r.reasoning}</div>
       ${r.event_before_expiry ? `<div class="warn-box">Event before expiry: ${r.event_before_expiry.label} (${r.event_before_expiry.date})</div>` : ""}
       <div class="leg-grid" style="margin-top:8px;">
-        <div class="leg-card"><div class="k">Sell Call</div><div class="v" style="font-size:13px;">${r.call.strike} @ ₹${r.call.premium} (Δ${r.call.delta}, OI ${r.call.oi ?? "-"})</div></div>
-        <div class="leg-card"><div class="k">Sell Put</div><div class="v" style="font-size:13px;">${r.put.strike} @ ₹${r.put.premium} (Δ${r.put.delta}, OI ${r.put.oi ?? "-"})</div></div>
+        <div class="leg-card"><div class="k">Sell Call</div><div class="v" style="font-size:13px;">${r.call.strike} @ ₹${r.call.premium} (Δ${r.call.delta}, OI ${r.call.oi ?? "-"})</div>${fairValueLine(r.call)}</div>
+        <div class="leg-card"><div class="k">Sell Put</div><div class="v" style="font-size:13px;">${r.put.strike} @ ₹${r.put.premium} (Δ${r.put.delta}, OI ${r.put.oi ?? "-"})</div>${fairValueLine(r.put)}</div>
         ${r.call_hedge ? `<div class="leg-card"><div class="k">Hedge Call</div><div class="v" style="font-size:13px;">${r.call_hedge.strike} @ ₹${r.call_hedge.premium}</div></div>` : ""}
         ${r.put_hedge ? `<div class="leg-card"><div class="k">Hedge Put</div><div class="v" style="font-size:13px;">${r.put_hedge.strike} @ ₹${r.put_hedge.premium}</div></div>` : ""}
         <div class="leg-card"><div class="k">Net credit/share</div><div class="v" style="font-size:13px;">${r.net_credit_per_share != null ? "₹" + r.net_credit_per_share : "-"}</div></div>
         <div class="leg-card"><div class="k">Max loss/share</div><div class="v" style="font-size:13px;">${r.max_loss_per_share != null ? "₹" + r.max_loss_per_share : "-"}</div></div>
         <div class="leg-card"><div class="k">IV skew (put-call)</div><div class="v" style="font-size:13px;">${r.iv_skew} pts</div></div>
+        <div class="leg-card"><div class="k">ATM IV used for fair value</div><div class="v" style="font-size:13px;">${r.atm_iv_used_pct != null ? r.atm_iv_used_pct + "%" : "-"}</div></div>
       </div>
       <div class="row" style="margin-top:10px;">
         <button class="small-btn" onclick="addSkewCandidateToTrade('${r.symbol}', ${i}, ${banned})">Add to Trade</button>
