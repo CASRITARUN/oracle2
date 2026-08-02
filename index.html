@@ -118,6 +118,7 @@
   <button class="top-tab-btn" id="tabBtnCalendar" onclick="switchTopTab('calendar')">Double Calendar Spread</button>
   <button class="top-tab-btn" id="tabBtnAuto" onclick="switchTopTab('auto')">⚡ Auto Trade Mode</button>
   <button class="top-tab-btn" id="tabBtnDelta" onclick="switchTopTab('delta')">Δ Delta Neutral Engine</button>
+  <button class="top-tab-btn" id="tabBtnSkew" onclick="switchTopTab('skew')">Premium Skew Scanner</button>
 </div>
 
 <div class="tab-page active" id="tabPageCondor">
@@ -340,16 +341,19 @@
     <h2>Scenario Simulator — "what if the price moves?"</h2>
     <div class="legend" style="max-width:820px;">
       Estimates P&amp;L on your CURRENT live position for one underlying, across a range of price
-      moves and days forward — including time decay. Uses each leg's own current implied volatility,
-      held constant (see the note under the chart for what that does and doesn't capture).
+      moves and days forward — including time decay. Each leg's implied volatility is pulled
+      automatically from its live Zerodha price — you don't need to enter anything for that.
     </div>
     <div class="row" style="margin-top:10px; align-items:flex-end;">
       <label class="inline">Underlying <select id="simSymbolSelect" style="width:140px;"></select></label>
       <label class="inline">Price moves (%, comma-separated) <input type="text" id="simPriceMoves" value="-10,-7,-5,-3,-1,0,1,3,5,7,10" style="width:220px;" /></label>
       <label class="inline">Days forward (comma-separated) <input type="text" id="simDayOffsets" value="0,1,3,7" style="width:110px;" /></label>
-      <label class="inline">IV shift (%) <input type="number" id="simIvShift" value="0" style="width:70px;" /></label>
       <button onclick="runPositionSimulator()">Simulate</button>
       <span id="simStatus" class="loading"></span>
+    </div>
+    <div class="row" style="margin-top:8px; align-items:flex-end;">
+      <label class="inline">Optional: also stress IV by (%) <input type="number" id="simIvShift" value="0" style="width:70px;" /></label>
+      <span class="legend">Leave at 0 to just use today's live IV as-is. Only change this if you want to additionally test a volatility jump/crush on top of the price move — e.g. -20 to simulate IV collapsing during a rally, or +30 to simulate IV spiking during a selloff.</span>
     </div>
     <div id="simChartWrap" style="margin-top:14px; display:none;">
       <canvas id="simChart" height="90"></canvas>
@@ -898,6 +902,46 @@
 
 </div>
 </div><!-- /tabPageDelta -->
+
+<div class="tab-page" id="tabPageSkew">
+<div class="wrap">
+
+  <div class="panel">
+    <h2>Premium Skew Scanner</h2>
+    <div class="legend" style="max-width:820px;">
+      For a symmetric Iron Condor (equal delta on both sides), the call and put premiums are usually
+      close but rarely identical. This scans stocks/indices, finds the call and put nearest your
+      chosen delta for each, and ranks candidates by a <b>safety score</b> that blends how lopsided
+      today's premium is with two risk checks: whether that stock is actually trending (bad for a
+      condor regardless of skew) and how liquid the strikes are. Click Scan once — it automatically
+      keeps working through the whole F&amp;O list in batches until done, or until you click Stop.
+    </div>
+    <div class="row" style="margin-top:14px; align-items:flex-end;">
+      <label class="inline">Delta range: low <input type="number" id="skewDeltaLow" value="0.15" step="0.01" style="width:70px;" /></label>
+      <label class="inline">high <input type="number" id="skewDeltaHigh" value="0.20" step="0.01" style="width:70px;" /></label>
+      <label class="inline">Hedge distance (%) <input type="number" id="skewHedgeDist" value="2.5" step="0.1" style="width:70px;" /></label>
+      <label class="inline">Min skew to show (%) <input type="number" id="skewMinPct" value="15" style="width:70px;" /></label>
+      <label class="inline" style="display:flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="skewScanAllFo" checked /> Scan entire F&amp;O universe
+      </label>
+      <button class="secondary small-btn" onclick="saveSkewConfig()">Save settings</button>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <button id="skewScanBtn" onclick="startSkewAutoScan()">Scan</button>
+      <button id="skewStopBtn" class="secondary" onclick="stopSkewAutoScan()" style="display:none;">Stop scanning</button>
+      <button class="secondary" onclick="clearSkewResults()">Clear results</button>
+      <span id="skewScanStatus" class="loading"></span>
+    </div>
+    <div id="skewCaveat" class="legend" style="margin-top:8px;"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Ranked candidates <span class="legend">(richest premium imbalance first)</span></h2>
+    <div id="skewResultsBox" style="margin-top:10px;"></div>
+  </div>
+
+</div>
+</div><!-- /tabPageSkew -->
 
 <!-- Execute confirmation modal -->
 <div class="modal-overlay" id="execModal">
@@ -2141,14 +2185,17 @@ function switchTopTab(which) {
   const isCalendar = which === "calendar";
   const isAuto = which === "auto";
   const isDelta = which === "delta";
+  const isSkew = which === "skew";
   document.getElementById("tabPageCondor").classList.toggle("active", isCondor);
   document.getElementById("tabPageCalendar").classList.toggle("active", isCalendar);
   document.getElementById("tabPageAuto").classList.toggle("active", isAuto);
   document.getElementById("tabPageDelta").classList.toggle("active", isDelta);
+  document.getElementById("tabPageSkew").classList.toggle("active", isSkew);
   document.getElementById("tabBtnCondor").classList.toggle("active", isCondor);
   document.getElementById("tabBtnCalendar").classList.toggle("active", isCalendar);
   document.getElementById("tabBtnAuto").classList.toggle("active", isAuto);
   document.getElementById("tabBtnDelta").classList.toggle("active", isDelta);
+  document.getElementById("tabBtnSkew").classList.toggle("active", isSkew);
   if (isCalendar && !window.__calWatchlistLoadedOnce) {
     window.__calWatchlistLoadedOnce = true;
     loadCalWatchlist();
@@ -2160,6 +2207,10 @@ function switchTopTab(which) {
   if (isDelta && !window.__deltaEngineInitedOnce) {
     window.__deltaEngineInitedOnce = true;
     initDeltaEngineTab();
+  }
+  if (isSkew && !window.__skewScannerInitedOnce) {
+    window.__skewScannerInitedOnce = true;
+    initSkewScannerTab();
   }
 }
 
@@ -3389,6 +3440,135 @@ async function loadDeltaLogs() {
       tbody.appendChild(tr);
     });
   } catch (e) { /* silent */ }
+}
+</script>
+
+<script>
+// ============================================================================
+// Premium Skew Scanner tab
+// ============================================================================
+function initSkewScannerTab() {
+  loadSkewState();
+  loadSkewResults();
+}
+
+async function loadSkewState() {
+  try {
+    const r = await apiFetch("/api/skew-scanner/state");
+    const s = await r.json();
+    if (s.error) return;
+    document.getElementById("skewDeltaLow").value = s.delta_low ?? 0.15;
+    document.getElementById("skewDeltaHigh").value = s.delta_high ?? 0.20;
+    document.getElementById("skewHedgeDist").value = s.hedge_distance_pct ?? 2.5;
+    document.getElementById("skewMinPct").value = s.min_skew_pct ?? 15;
+    document.getElementById("skewScanAllFo").checked = s.scan_all_fo !== false;
+  } catch (e) { /* silent */ }
+}
+
+async function saveSkewConfig() {
+  const body = {
+    delta_low: Number(document.getElementById("skewDeltaLow").value),
+    delta_high: Number(document.getElementById("skewDeltaHigh").value),
+    hedge_distance_pct: Number(document.getElementById("skewHedgeDist").value),
+    min_skew_pct: Number(document.getElementById("skewMinPct").value),
+    scan_all_fo: document.getElementById("skewScanAllFo").checked,
+  };
+  try {
+    await apiFetch("/api/skew-scanner/config", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
+    });
+  } catch (e) { alert("Request failed: " + e); }
+}
+
+let skewAutoScanActive = false;
+
+async function startSkewAutoScan() {
+  const loggedIn = await checkSession();
+  if (!loggedIn) { alert("Connect your Kite account first."); return; }
+  skewAutoScanActive = true;
+  document.getElementById("skewScanBtn").disabled = true;
+  document.getElementById("skewStopBtn").style.display = "";
+  await skewScanLoop();
+}
+
+function stopSkewAutoScan() {
+  skewAutoScanActive = false;
+}
+
+function stopSkewAutoScanUI() {
+  skewAutoScanActive = false;
+  document.getElementById("skewScanBtn").disabled = false;
+  document.getElementById("skewStopBtn").style.display = "none";
+}
+
+async function skewScanLoop() {
+  const status = document.getElementById("skewScanStatus");
+  while (skewAutoScanActive) {
+    try {
+      const r = await apiFetch("/api/skew-scanner/scan-batch", {method: "POST"});
+      const d = await r.json();
+      if (d.error) { status.textContent = "Error: " + d.error; break; }
+      const pct = d.universe_size ? Math.min(100, Math.round((d.cursor / d.universe_size) * 100)) : 100;
+      document.getElementById("skewCaveat").textContent = d.caveat || "";
+      renderSkewResults(d.results || []);
+      if (d.pass_complete) {
+        status.textContent = `Full scan complete — ${d.results.length} candidate(s) found. Click Scan again to refresh.`;
+        break;
+      }
+      status.textContent = `Scanning... ${pct}% through the F&O list (${d.scanned.length} symbols this batch).`;
+    } catch (e) { status.textContent = "Request failed: " + e; break; }
+    if (!skewAutoScanActive) break;
+    await new Promise(res => setTimeout(res, 300));
+  }
+  stopSkewAutoScanUI();
+}
+
+async function loadSkewResults() {
+  try {
+    const r = await apiFetch("/api/skew-scanner/results");
+    const d = await r.json();
+    renderSkewResults(d.results || []);
+  } catch (e) { /* silent */ }
+}
+
+async function clearSkewResults() {
+  await apiFetch("/api/skew-scanner/results/clear", {method: "POST"});
+  renderSkewResults([]);
+  document.getElementById("skewScanStatus").textContent = "Results cleared.";
+}
+
+function renderSkewResults(results) {
+  const box = document.getElementById("skewResultsBox");
+  if (!results.length) {
+    box.innerHTML = `<div class="legend">No candidates yet — click "Scan" (it will work through the whole F&amp;O list automatically).</div>`;
+    return;
+  }
+  box.innerHTML = results.map((r, i) => {
+    const trendBad = r.trend && r.trend.avoid_premium_selling;
+    const trendPillClass = trendBad ? "bad" : (r.trend && r.trend.regime === "Range Bound" ? "ok" : "warn");
+    return `
+    <div style="border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px;">
+      <div style="display:flex; justify-content:space-between; align-items:baseline;">
+        <div>#${i + 1} <b>${r.symbol}</b> — spot ₹${r.spot}</div>
+        <div style="display:flex; gap:6px;">
+          <span class="pill ok" style="font-size:11px;">Safety score ${r.safety_score}/100</span>
+          <span class="pill ${r.richer_side === "put" ? "bad" : "warn"}" style="font-size:11px;">${r.richer_side.toUpperCase()} richer by ${r.skew_pct}%</span>
+          <span class="pill ${trendPillClass}" style="font-size:11px;">${r.trend ? r.trend.regime : "Trend unknown"}</span>
+        </div>
+      </div>
+      <div class="legend" style="margin-top:6px;">${r.reasoning}</div>
+      <div class="leg-grid" style="margin-top:8px;">
+        <div class="leg-card"><div class="k">Sell Call</div><div class="v" style="font-size:13px;">${r.call.strike} @ ₹${r.call.premium} (Δ${r.call.delta}, OI ${r.call.oi ?? "-"})</div></div>
+        <div class="leg-card"><div class="k">Sell Put</div><div class="v" style="font-size:13px;">${r.put.strike} @ ₹${r.put.premium} (Δ${r.put.delta}, OI ${r.put.oi ?? "-"})</div></div>
+        ${r.call_hedge ? `<div class="leg-card"><div class="k">Hedge Call</div><div class="v" style="font-size:13px;">${r.call_hedge.strike} @ ₹${r.call_hedge.premium}</div></div>` : ""}
+        ${r.put_hedge ? `<div class="leg-card"><div class="k">Hedge Put</div><div class="v" style="font-size:13px;">${r.put_hedge.strike} @ ₹${r.put_hedge.premium}</div></div>` : ""}
+        <div class="leg-card"><div class="k">Net credit/share</div><div class="v" style="font-size:13px;">${r.net_credit_per_share != null ? "₹" + r.net_credit_per_share : "-"}</div></div>
+        <div class="leg-card"><div class="k">IV skew (put-call)</div><div class="v" style="font-size:13px;">${r.iv_skew} pts</div></div>
+      </div>
+      <div class="legend" style="margin-top:6px; font-size:11px;">Scanned ${new Date(r.scanned_at).toLocaleTimeString()}</div>
+    </div>
+  `;
+  }).join("");
 }
 </script>
 
