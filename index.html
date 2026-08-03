@@ -3559,6 +3559,8 @@ function renderSkewResults(results) {
     const trendPillClass = trendBad ? "bad" : (r.trend && r.trend.regime === "Range Bound" ? "ok" : "warn");
     const dteTxt = r.days_to_expiry != null ? `${r.days_to_expiry}d to expiry (${r.expiry})` : "expiry unknown";
     const banned = !!r.fo_banned_today;
+    const hasEdge = r.combined_vs_fair_pct != null;
+    const edgeGood = hasEdge && r.combined_vs_fair_pct > 0;
     return `
     <div style="border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px; ${banned ? "opacity:.75;" : ""}">
       <div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:6px;">
@@ -3566,7 +3568,8 @@ function renderSkewResults(results) {
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
           ${banned ? `<span class="pill bad" style="font-size:11px;">F&amp;O BAN — can't open new</span>` : ""}
           <span class="pill ${banned ? "warn" : "ok"}" style="font-size:11px;">Safety score ${r.safety_score}/100</span>
-          <span class="pill ${r.richer_side === "put" ? "bad" : "warn"}" style="font-size:11px;">${r.richer_side.toUpperCase()} richer by ${r.skew_pct}%</span>
+          ${hasEdge ? `<span class="pill ${edgeGood ? "ok" : "bad"}" style="font-size:11px;">Combined edge ${r.combined_vs_fair_pct > 0 ? "+" : ""}${r.combined_vs_fair_pct}% vs fair</span>` : ""}
+          <span class="pill ${r.richer_side === "put" ? "bad" : "warn"}" style="font-size:11px;">${r.richer_side.toUpperCase()} richer by ${r.skew_pct}% <span style="opacity:.7;">(split only)</span></span>
           <span class="pill ${trendPillClass}" style="font-size:11px;">${r.trend ? r.trend.regime : "Trend unknown"}</span>
         </div>
       </div>
@@ -3579,7 +3582,7 @@ function renderSkewResults(results) {
         ${r.put_hedge ? `<div class="leg-card"><div class="k">Hedge Put</div><div class="v" style="font-size:13px;">${r.put_hedge.strike} @ ₹${r.put_hedge.premium}</div></div>` : ""}
         <div class="leg-card"><div class="k">Net credit/share</div><div class="v" style="font-size:13px;">${r.net_credit_per_share != null ? "₹" + r.net_credit_per_share : "-"}</div></div>
         <div class="leg-card"><div class="k">Max loss/share</div><div class="v" style="font-size:13px;">${r.max_loss_per_share != null ? "₹" + r.max_loss_per_share : "-"}</div></div>
-        <div class="leg-card"><div class="k">IV skew (put-call)</div><div class="v" style="font-size:13px;">${r.iv_skew} pts</div></div>
+        <div class="leg-card"><div class="k">Combined edge vs fair (BS)</div><div class="v ${hasEdge ? (edgeGood ? "pnl-pos" : "pnl-neg") : ""}" style="font-size:13px;">${hasEdge ? (r.combined_vs_fair > 0 ? "+" : "") + "₹" + r.combined_vs_fair + " (" + (r.combined_vs_fair_pct > 0 ? "+" : "") + r.combined_vs_fair_pct + "%)" : "-"}</div></div>
         <div class="leg-card"><div class="k">ATM IV used for fair value</div><div class="v" style="font-size:13px;">${r.atm_iv_used_pct != null ? r.atm_iv_used_pct + "%" : "-"}</div></div>
       </div>
       <div class="row" style="margin-top:10px;">
