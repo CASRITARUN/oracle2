@@ -5624,6 +5624,15 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
                 put_vs_fair = round(put_premium - put_theo, 2)
                 put_vs_fair_pct = round(put_vs_fair / put_theo * 100, 1)
 
+    # Combined edge -- the number that actually matters for a seller. skew_pct only says how the
+    # premium is SPLIT between call and put; it says nothing about whether the whole structure is
+    # rich or cheap versus fair value. A big skew with near-zero combined edge just means the
+    # premium moved from one leg to the other, not that you're being paid extra overall.
+    combined_vs_fair, combined_vs_fair_pct = None, None
+    if call_vs_fair is not None and put_vs_fair is not None and call_theo and put_theo:
+        combined_vs_fair = round(call_vs_fair + put_vs_fair, 2)
+        combined_vs_fair_pct = round(combined_vs_fair / (call_theo + put_theo) * 100, 1)
+
     call_hedge_target = call_leg["strike"] * (1 + hedge_distance_pct / 100.0)
     put_hedge_target = put_leg["strike"] * (1 - hedge_distance_pct / 100.0)
     call_hedge = min(calls, key=lambda o: abs(o["strike"] - call_hedge_target)) if calls else None
@@ -5663,7 +5672,8 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
     # will still be open then, distinct from the "avoid opening right now" entry-window check.
     event_before_expiry = get_event_before_expiry(str(expiry)) if expiry else None
 
-    safety_score, safety_notes = _skew_safety_score(skew_pct, trend_info, min_oi, net_credit, fo_banned_today)
+    safety_score, safety_notes = _skew_safety_score(skew_pct, combined_vs_fair_pct, trend_info, min_oi,
+                                                      net_credit, fo_banned_today)
 
     dte_txt = f"{days_to_expiry}d to expiry ({expiry})" if days_to_expiry is not None else "expiry unknown"
     reasoning = (
@@ -5676,8 +5686,11 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
         reasoning += (
             f" Vs a flat ATM-vol ({atm_iv_used_pct}%) fair value: call is {call_vs_fair:+.2f} "
             f"({call_vs_fair_pct:+.1f}%) and put is {put_vs_fair:+.2f} ({put_vs_fair_pct:+.1f}%) "
-            f"relative to theoretical -- the side further above its fair value is the one actually "
-            f"carrying the smile premium, not just the richer of the two."
+            f"relative to theoretical. Combined, the whole structure is {combined_vs_fair:+.2f} "
+            f"({combined_vs_fair_pct:+.1f}%) vs fair value overall -- THIS combined number, not the "
+            f"{skew_pct:.1f}% call-vs-put split above, is what drives the safety score's opportunity "
+            f"component, since a big skew can just mean the premium moved from one leg to the other "
+            f"with little or no real edge."
         )
     if fo_banned_today:
         reasoning += " CANNOT OPEN A NEW POSITION -- this stock is in the F&O ban period today."
@@ -5689,6 +5702,7 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
         "symbol": symbol, "spot": spot, "scanned_at": now_ist().isoformat(),
         "expiry": str(expiry) if expiry else None, "days_to_expiry": days_to_expiry,
         "atm_iv_used_pct": atm_iv_used_pct,
+        "combined_vs_fair": combined_vs_fair, "combined_vs_fair_pct": combined_vs_fair_pct,
         "call": {"strike": call_leg["strike"], "premium": call_premium, "delta": round(call_leg["delta"], 3),
                   "iv": call_leg.get("iv"), "oi": call_leg.get("oi"), "tradingsymbol": call_leg["tradingsymbol"],
                   "distance_pct": call_dist_pct, "theo_premium": call_theo,
@@ -5711,12 +5725,12 @@ def _scan_symbol_for_skew(symbol, delta_low, delta_high, hedge_distance_pct):
     }, None
 
 
-def _skew_safety_score(skew_pct, trend_info, min_oi, net_credit, fo_banned_today=None):
+def _skew_safety_score(skew_pct, combined_vs_fair_pct, trend_info, min_oi, net_credit, fo_banned_today=None):
     """Composite 0-100 'how reasonable is it to sell into this skew' score. Transparent and
-    rule-based -- NOT a prediction of tomorrow's move, just a blend of the raw opportunity size
+    rule-based -- NOT a prediction of tomorrow's move, just a blend of the real opportunity size
     with the things most likely to hurt you if ignored: trading against a real trend, trading
-    illiquid strikes, and (new) a stock that's actually in an F&O ban and can't be freshly opened
-    at all. Always investigate the actual candidate yourself before acting."""
+    illiquid strikes, and a stock that's actually in an F&O ban and can't be freshly opened at all.
+    Always investigate the actual candidate yourself before acting."""
     notes = []
 
     # F&O ban -- if you literally cannot open a new position today, no other factor matters. Capped
@@ -5725,9 +5739,29 @@ def _skew_safety_score(skew_pct, trend_info, min_oi, net_credit, fo_banned_today
     if fo_banned_today:
         notes.append("F&O BAN today -- new positions cannot be opened in this stock right now.")
 
-    # Opportunity size -- up to 40 points, capped so an extreme outlier doesn't dominate the score
-    # (an extremely large skew is often extreme for a REASON, e.g. an event, not just noise).
-    skew_component = min(skew_pct, 60) / 60 * 40
+    # Opportunity size -- up to 40 points. Driven by the COMBINED fair-value edge (actual premium
+    # collected vs Black-Scholes theoretical, summed across both legs), not raw call-vs-put skew%.
+    # skew_pct only describes how the premium is split between the two legs -- a 46% skew can still
+    # mean almost no real edge if one leg is correspondingly cheap versus fair value while the other
+    # is rich. combined_vs_fair_pct is what's actually left on the table for you as a seller.
+    if combined_vs_fair_pct is not None:
+        opportunity_component = min(max(combined_vs_fair_pct, 0), 40)
+        if combined_vs_fair_pct <= 0:
+            notes.append(f"Combined structure is AT OR BELOW fair value ({combined_vs_fair_pct:+.1f}%) despite "
+                          f"the {skew_pct:.1f}% call/put skew -- that skew is mostly about which leg carries "
+                          f"the premium, not extra edge overall.")
+        elif skew_pct > 25 and combined_vs_fair_pct < 5:
+            notes.append(f"Large call/put skew ({skew_pct:.1f}%) but only {combined_vs_fair_pct:+.1f}% combined "
+                          f"edge over fair value -- most of the skew is redistribution between legs, not real "
+                          f"extra premium.")
+        else:
+            notes.append(f"{combined_vs_fair_pct:+.1f}% combined edge over Black-Scholes fair value.")
+    else:
+        # Fair-value calc unavailable (e.g. bad T or missing ATM IV) -- fall back to the old
+        # skew-only estimate so scoring still works, but say so since it's the weaker signal.
+        opportunity_component = min(skew_pct, 60) / 60 * 40
+        notes.append("Fair-value comparison unavailable for this candidate -- opportunity score falls back to "
+                      "raw call/put skew, a weaker signal than the combined edge.")
 
     # Trend suitability -- up to 30 points. This is the biggest single risk factor for a condor.
     if trend_info.get("error"):
@@ -5759,7 +5793,7 @@ def _skew_safety_score(skew_pct, trend_info, min_oi, net_credit, fo_banned_today
     if credit_component == 0:
         notes.append("Net credit after hedges is at or below zero at these strikes -- check pricing before acting.")
 
-    total = round(skew_component + trend_component + liquidity_component + credit_component, 1)
+    total = round(opportunity_component + trend_component + liquidity_component + credit_component, 1)
     if fo_banned_today:
         total = min(total, 15.0)
     return total, " ".join(notes)
