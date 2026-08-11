@@ -1,263 +1,66 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kotak Neo | Options Terminal</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kotak Neo | Auto Option Screener</title>
 <style>
-:root{
-  --bg:#0b0d12;--panel:#121620;--panel2:#171c27;--line:#273043;
-  --text:#edf2f7;--muted:#8d99aa;--accent:#8b7cf6;--accent2:#a99cff;
-  --green:#38d39f;--red:#ff6b7a;--amber:#f5bd58;--blue:#56a8ff;
-  --shadow:0 18px 55px rgba(0,0,0,.25)
-}
-*{box-sizing:border-box}
-body{margin:0;background:radial-gradient(circle at 20% -10%,#20243b 0,#0b0d12 42%);color:var(--text);font:14px Inter,Segoe UI,Arial,sans-serif}
-button,input,select,textarea{font:inherit}
-button{cursor:pointer}
-.app{display:none;min-height:100vh}
-.sidebar{position:fixed;left:0;top:0;bottom:0;width:235px;background:rgba(12,15,22,.92);border-right:1px solid var(--line);padding:20px 14px;z-index:5}
-.brand{display:flex;gap:11px;align-items:center;padding:8px 10px 24px}.brandmark{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#4e6fff);display:grid;place-items:center;font-weight:800}.brand b{font-size:16px}.brand span{display:block;color:var(--muted);font-size:11px;margin-top:2px}
-.nav{display:grid;gap:5px}.nav button{border:0;background:transparent;color:#aeb7c7;text-align:left;padding:12px;border-radius:9px}.nav button:hover,.nav button.active{background:#1d2230;color:#fff}.nav button.active{box-shadow:inset 3px 0 var(--accent)}
-.side-bottom{position:absolute;bottom:18px;left:14px;right:14px}.mode{border:1px solid var(--line);background:#141924;border-radius:10px;padding:11px}.mode small{color:var(--muted)}
-.main{margin-left:235px;padding:20px 26px 50px;max-width:1600px}
-.topbar{display:flex;justify-content:space-between;gap:15px;align-items:center;margin-bottom:20px}.topbar h1{margin:0;font-size:24px}.topbar p{margin:5px 0 0;color:var(--muted)}
-.top-actions{display:flex;gap:8px;align-items:center}.status{display:flex;gap:8px;align-items:center;border:1px solid var(--line);padding:9px 12px;border-radius:10px;background:#111620}.dot{width:8px;height:8px;border-radius:50%;background:var(--red)}.dot.ok{background:var(--green)}
-.page{display:none}.page.active{display:block}
-.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric{background:linear-gradient(180deg,#171c27,#11151e);border:1px solid var(--line);border-radius:13px;padding:16px;box-shadow:var(--shadow)}.metric label{color:var(--muted);font-size:12px}.metric strong{display:block;font-size:23px;margin-top:8px}.metric small{color:var(--muted)}
-.grid2{display:grid;grid-template-columns:1.35fr .9fr;gap:15px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:15px}
-.panel{background:rgba(18,22,32,.94);border:1px solid var(--line);border-radius:14px;padding:17px;margin-top:15px}.panel h2{font-size:15px;margin:0 0 5px}.panel p.help{color:var(--muted);font-size:12px;margin:0 0 14px}
-.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:end}.field{display:grid;gap:5px}.field label{font-size:11px;color:var(--muted)}input,select,textarea{background:#0e1219;color:var(--text);border:1px solid #30394c;border-radius:8px;padding:9px 10px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--accent)}button.primary{background:var(--accent);color:#fff;border:0;padding:10px 14px;border-radius:8px;font-weight:600}button.secondary{background:#202633;color:#e8edf5;border:1px solid #343d50;padding:9px 13px;border-radius:8px}button.danger{background:#8f3340;color:#fff;border:0;padding:9px 13px;border-radius:8px}
-table{width:100%;border-collapse:collapse}th{color:#8793a7;font-size:11px;text-transform:uppercase;text-align:left;padding:10px;border-bottom:1px solid var(--line)}td{padding:11px 10px;border-bottom:1px solid #202635;font-size:13px}tr:hover td{background:#151a24}
-.badge{display:inline-flex;padding:4px 8px;border-radius:99px;background:#202736;color:#b9c3d3;font-size:11px}.good{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
-.empty{padding:30px;text-align:center;color:var(--muted);border:1px dashed #30394c;border-radius:10px}
-.toolbar{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:12px}.toolbar .right{display:flex;gap:7px}
-pre.output{background:#0b0f15;border:1px solid var(--line);border-radius:9px;padding:12px;overflow:auto;max-height:360px;color:#cbd5e1}
-.legs{display:grid;gap:8px}.leg{display:grid;grid-template-columns:1.4fr .7fr .6fr .7fr .6fr 30px;gap:6px;align-items:center}.leg input,.leg select{width:100%}
-.payoff{height:170px;border:1px solid var(--line);border-radius:10px;background:linear-gradient(180deg,#111722,#0d1118);display:grid;place-items:center;color:var(--muted)}
-.login{min-height:100vh;display:grid;place-items:center;padding:20px}.login-card{width:min(420px,100%);background:#121620;border:1px solid var(--line);border-radius:16px;padding:28px;box-shadow:var(--shadow)}.login-card h1{margin:0 0 7px}.login-card p{color:var(--muted)}.login-card input{width:100%;margin:12px 0}.login-card button{width:100%}
-.toast{position:fixed;right:20px;bottom:20px;background:#1a2130;border:1px solid #344058;padding:12px 15px;border-radius:10px;display:none;z-index:20;box-shadow:var(--shadow)}
-@media(max-width:1050px){.sidebar{width:70px}.brand div:last-child,.nav button span,.side-bottom{display:none}.main{margin-left:70px}.cards{grid-template-columns:repeat(2,1fr)}.grid2,.grid3{grid-template-columns:1fr}}
-@media(max-width:650px){.sidebar{position:static;width:100%;height:auto;border-right:0;border-bottom:1px solid var(--line)}.brand div:last-child{display:block}.nav{display:flex;overflow:auto}.nav button{white-space:nowrap}.main{margin-left:0;padding:15px}.cards{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.leg{grid-template-columns:1fr 1fr}.top-actions{width:100%;flex-wrap:wrap}}
+:root{--bg:#090c12;--panel:#111722;--panel2:#171e2b;--line:#293348;--text:#eef3f8;--muted:#91a0b5;--accent:#8b7cf6;--green:#36d39f;--red:#ff6b78;--amber:#f5bd58;--blue:#55a7ff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% -10%,#222544 0,#090c12 45%);color:var(--text);font:14px Inter,Segoe UI,Arial,sans-serif}button,input,select{font:inherit}button{cursor:pointer}.app{display:none;min-height:100vh}.sidebar{position:fixed;left:0;top:0;bottom:0;width:235px;background:#0c1018f2;border-right:1px solid var(--line);padding:18px 14px}.brand{display:flex;gap:10px;align-items:center;padding:8px 9px 22px}.mark{width:35px;height:35px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#4f72ff);display:grid;place-items:center;font-weight:800}.brand b{font-size:16px}.brand span{display:block;color:var(--muted);font-size:11px;margin-top:2px}.nav{display:grid;gap:5px}.nav button{border:0;background:transparent;color:#adb7c7;text-align:left;padding:12px;border-radius:9px}.nav button:hover,.nav button.active{background:#1b2230;color:#fff}.nav button.active{box-shadow:inset 3px 0 var(--accent)}.mode{position:absolute;bottom:18px;left:14px;right:14px;border:1px solid var(--line);border-radius:10px;padding:10px;background:#131925;color:var(--muted)}.main{margin-left:235px;padding:20px 26px 50px;max-width:1700px}.top{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:18px}.top h1{margin:0;font-size:24px}.top p{margin:4px 0 0;color:var(--muted)}.actions{display:flex;gap:8px;align-items:center}.status{border:1px solid var(--line);padding:9px 12px;border-radius:9px;background:#101620}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red);margin-right:7px}.dot.ok{background:var(--green)}.page{display:none}.page.active{display:block}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric,.panel{background:#111722ed;border:1px solid var(--line);border-radius:14px}.metric{padding:15px}.metric label{display:block;color:var(--muted);font-size:11px;text-transform:uppercase}.metric strong{display:block;font-size:22px;margin-top:7px}.metric small{display:block;color:var(--muted);margin-top:4px}.panel{padding:17px;margin-top:14px}.panel h2{margin:0 0 5px;font-size:16px}.help{color:var(--muted);font-size:12px;margin:0 0 13px}.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:end}.field{display:grid;gap:5px}.field label{font-size:11px;color:var(--muted)}input,select{background:#0d121a;color:var(--text);border:1px solid #303b50;border-radius:8px;padding:9px 10px;outline:none}input:focus,select:focus{border-color:var(--accent)}button.primary{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:10px 14px;font-weight:700}button.secondary{background:#202838;color:#eef2f8;border:1px solid #344056;border-radius:8px;padding:9px 13px}button.danger{background:#913643;color:#fff;border:0;border-radius:8px;padding:9px 13px}.toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px}.right{display:flex;gap:7px;flex-wrap:wrap}.notice{background:#141b27;border:1px solid #2b374c;border-radius:9px;padding:10px;color:#b7c3d3;font-size:12px}.scroll{overflow:auto}table{width:100%;border-collapse:collapse}th{color:#8e9bad;font-size:10px;text-transform:uppercase;text-align:left;padding:10px;border-bottom:1px solid var(--line);white-space:nowrap}td{padding:10px;border-bottom:1px solid #202838;white-space:nowrap}tr:hover td{background:#151b26}.good{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}.badge{display:inline-flex;border:1px solid #344056;background:#1b2331;border-radius:999px;padding:4px 8px;font-size:11px}.empty{padding:28px;text-align:center;color:var(--muted);border:1px dashed #334057;border-radius:10px}.grid2{display:grid;grid-template-columns:1.4fr .9fr;gap:14px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.legs{display:grid;gap:8px}.leg{display:grid;grid-template-columns:1.6fr .7fr .5fr .65fr .65fr .65fr 34px;gap:6px}.output{background:#090e15;border:1px solid var(--line);border-radius:9px;padding:12px;overflow:auto;max-height:350px;color:#cbd5e1}.login{min-height:100vh;display:grid;place-items:center;padding:20px}.login-card{width:min(420px,100%);background:#111722;border:1px solid var(--line);border-radius:16px;padding:28px}.login-card input{width:100%;margin:12px 0}.login-card button{width:100%}.badmsg{color:var(--red);margin-top:10px}.toast{position:fixed;right:20px;bottom:20px;background:#182131;border:1px solid #34425b;padding:12px 15px;border-radius:10px;display:none;z-index:30}.small{font-size:11px;color:var(--muted)}@media(max-width:1050px){.sidebar{width:70px}.brand div:last-child,.nav span,.mode{display:none}.main{margin-left:70px}.cards{grid-template-columns:repeat(2,1fr)}.grid2{grid-template-columns:1fr}}@media(max-width:650px){.sidebar{position:static;width:100%;height:auto;border-right:0;border-bottom:1px solid var(--line)}.brand div:last-child{display:block}.nav{display:flex;overflow:auto}.nav button{white-space:nowrap}.main{margin-left:0;padding:14px}.cards,.grid3{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.leg{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
-
-<div id="login" class="login">
-  <div class="login-card">
-    <div class="brand"><div class="brandmark">K</div><div><b>Kotak Neo</b><span>Options Trading Terminal</span></div></div>
-    <h1>Sign in</h1>
-    <p>Your Kotak credentials remain on the Oracle VM. This password only protects the dashboard.</p>
-    <input id="password" type="password" placeholder="Dashboard password" autocomplete="current-password">
-    <button class="primary" onclick="login()">Open terminal</button>
-    <div id="loginError" class="bad" style="margin-top:12px"></div>
-  </div>
-</div>
-
+<div id="login" class="login"><div class="login-card"><div class="brand"><div class="mark">K</div><div><b>Kotak Neo</b><span>Automatic option-selection terminal</span></div></div><h1>Sign in</h1><p class="help">The dashboard password protects this web interface. Kotak credentials remain on the Oracle VM.</p><input id="password" type="password" placeholder="Dashboard password" autocomplete="current-password"><button class="primary" onclick="login()">Open terminal</button><div id="loginError" class="badmsg"></div></div></div>
 <div id="app" class="app">
-  <aside class="sidebar">
-    <div class="brand"><div class="brandmark">K</div><div><b>Kotak Neo</b><span>Options Terminal</span></div></div>
-    <nav class="nav">
-      <button class="active" data-page="overview">◈ <span>Overview</span></button>
-      <button data-page="screener">⌕ <span>Stock Screener</span></button>
-      <button data-page="strategy">◇ <span>Strategy Builder</span></button>
-      <button data-page="positions">▣ <span>Positions</span></button>
-      <button data-page="orders">↕ <span>Orders</span></button>
-      <button data-page="trade">⚡ <span>Trade</span></button>
-      <button data-page="settings">⚙ <span>Settings</span></button>
-    </nav>
-    <div class="side-bottom"><div class="mode"><small>Execution mode</small><br><b id="modeLabel">PAPER</b></div></div>
-  </aside>
+<aside class="sidebar"><div class="brand"><div class="mark">K</div><div><b>Kotak Neo</b><span>Options Terminal</span></div></div><nav class="nav"><button class="active" data-page="overview">◈ <span>Overview</span></button><button data-page="screener">⌕ <span>Stock Screener</span></button><button data-page="strategy">◇ <span>Strategy Builder</span></button><button data-page="chain">≋ <span>Option Chain</span></button><button data-page="positions">▣ <span>Positions</span></button><button data-page="orders">↕ <span>Orders</span></button><button data-page="trade">⚡ <span>Trade</span></button><button data-page="settings">⚙ <span>Settings</span></button></nav><div class="mode">Execution<br><b id="modeLabel">PAPER</b></div></aside>
+<main class="main"><div class="top"><div><h1 id="pageTitle">Overview</h1><p id="pageSub">Kotak Neo options workspace</p></div><div class="actions"><div class="status"><i id="dot" class="dot"></i><span id="statusText">Disconnected</span></div><button class="secondary" onclick="reconnect()">Reconnect</button><button class="secondary" onclick="logout()">Logout</button></div></div>
+<section id="overview" class="page active"><div class="cards"><div class="metric"><label>Broker</label><strong>Kotak Neo</strong><small id="brokerState">Checking...</small></div><div class="metric"><label>Execution</label><strong id="liveState">PAPER</strong><small>Server controlled</small></div><div class="metric"><label>Open Positions</label><strong id="posCount">—</strong><small>From Kotak</small></div><div class="metric"><label>Orders</label><strong id="orderCount">—</strong><small>From Kotak</small></div></div><div class="panel"><h2>Workflow</h2><p class="help">Kotak supplies live market data → the software discovers contracts → calculates delta/IV → selects short strikes and hedges → ranks candidates.</p><div class="notice">Live execution remains disabled unless LIVE_TRADING=true is explicitly set on the Oracle server.</div></div></section>
 
-  <main class="main">
-    <div class="topbar">
-      <div><h1 id="pageTitle">Overview</h1><p id="pageSub">Kotak Neo options workspace</p></div>
-      <div class="top-actions">
-        <div class="status"><i id="dot" class="dot"></i><span id="statusText">Disconnected</span></div>
-        <button class="secondary" onclick="reconnect()">Reconnect</button>
-        <button class="secondary" onclick="logout()">Logout</button>
-      </div>
-    </div>
+<section id="screener" class="page"><div class="panel"><div class="toolbar"><div><h2>F&O Stock Screener</h2><p class="help">Strategy-specific ranking for your delta-based Iron Condor. No manual Kotak tokens required.</p></div><div class="right"><button class="secondary" onclick="loadUniverse()">Refresh universe</button><button class="primary" onclick="runScreener()">Scan & Rank</button></div></div><div class="controls" style="margin-top:12px"><div class="field"><label>TARGET SHORT DELTA</label><input id="screenDelta" type="number" min=".03" max=".49" step=".01" value=".10"></div><div class="field"><label>HEDGE %</label><input id="screenHedge" type="number" min=".5" max="30" step=".5" value="2"></div><div class="field"><label>MIN OI</label><input id="minOI" type="number" min="0" value="0"></div><div class="field"><label>SCAN LIMIT</label><input id="scanLimit" type="number" min="1" max="100" value="20"></div><div class="field"><label>EXPIRY</label><select id="screenExpiry"><option value="">Nearest eligible</option></select></div></div><div class="notice" style="margin-top:12px">Ranking uses live Kotak option discovery and quotes. Delta and IV are calculated from live LTP with Black-Scholes. It is a decision-support score, not a guaranteed-return signal.</div><div id="screenStatus" class="small" style="margin:12px 0"></div><div id="screenTable"><div class="empty">Click Scan & Rank.</div></div></div></section>
 
-    <section id="overview" class="page active">
-      <div class="cards">
-        <div class="metric"><label>Broker</label><strong>Kotak Neo</strong><small id="brokerState">Checking...</small></div>
-        <div class="metric"><label>Execution</label><strong id="liveState">PAPER</strong><small>Server controlled</small></div>
-        <div class="metric"><label>Open Positions</label><strong id="posCount">—</strong><small>From Kotak</small></div>
-        <div class="metric"><label>Today's Orders</label><strong id="orderCount">—</strong><small>From Kotak</small></div>
-      </div>
-      <div class="grid2">
-        <div class="panel"><h2>Workflow</h2><p class="help">Select candidates → build strategy → review risk → send Kotak orders.</p>
-          <div class="cards" style="grid-template-columns:repeat(3,1fr)">
-            <div class="metric"><label>01</label><strong>Screen</strong><small>Find candidates</small></div>
-            <div class="metric"><label>02</label><strong>Build</strong><small>Condor / Strangle</small></div>
-            <div class="metric"><label>03</label><strong>Trade</strong><small>Review & execute</small></div>
-          </div>
-        </div>
-        <div class="panel"><h2>Safety</h2><p class="help">Live orders are disabled until LIVE_TRADING=true is explicitly set on the server.</p><span class="badge">Server-side credentials</span> <span class="badge">No Kite dependency</span></div>
-      </div>
-    </section>
+<section id="strategy" class="page"><div class="grid2"><div class="panel"><h2>Automatic Strategy Builder</h2><p class="help">Select a stock and the backend automatically finds the nearest eligible expiry, short CE/PE near the target delta and hedge strikes.</p><div class="controls"><div class="field"><label>UNDERLYING</label><input id="strategySymbol" placeholder="INDIGO / RVNL / NIFTY"></div><div class="field"><label>EXPIRY</label><select id="strategyExpiry"><option value="">Nearest eligible</option></select></div><div class="field"><label>LOTS</label><input id="strategyLots" type="number" min="1" value="1"></div><div class="field"><label>TARGET DELTA</label><input id="strategyDelta" type="number" min=".03" max=".49" step=".01" value=".10"></div><div class="field"><label>HEDGE %</label><input id="strategyHedge" type="number" min=".5" max="30" step=".5" value="2"></div><button class="secondary" onclick="loadStrategyExpiries()">Load Expiries</button><button class="primary" onclick="buildStrategy()">Build Automatically</button></div><div id="strategyStatus" class="small" style="margin-top:12px"></div></div><div class="panel"><h2>Risk Summary</h2><div id="riskSummary" class="empty">Build a strategy to see the four legs, credit, max loss and breakevens.</div></div></div><div id="strategyResult" class="panel" style="display:none"><div class="toolbar"><div><h2 id="strategyTitle">Strategy</h2><p id="strategyMethod" class="help"></p></div><button class="primary" onclick="sendStrategyToTrade()">Use in Trade Ticket</button></div><div id="legsTable" style="margin-top:12px"></div></div></section>
 
-    <section id="screener" class="page">
-      <div class="panel">
-        <div class="toolbar"><div><h2>F&O Stock Screener</h2><p class="help">Uses Kotak quote data. Historical HV/IV ranking is not fabricated.</p></div><div class="right"><button class="secondary" onclick="loadSampleTokens()">Load tokens</button><button class="primary" onclick="runScreener()">Run scan</button></div></div>
-        <textarea id="tokens" rows="3" style="width:100%" placeholder='Paste Kotak instrument tokens as JSON, e.g. ["token1","token2"]'></textarea>
-        <div id="screenTable" style="margin-top:15px"><div class="empty">No scan yet.</div></div>
-      </div>
-    </section>
+<section id="chain" class="page"><div class="panel"><h2>Live Option Chain</h2><p class="help">Kotak search_scrip() discovers the contracts; Kotak quotes() supplies live prices/OI/volume.</p><div class="controls"><div class="field"><label>UNDERLYING</label><input id="chainSymbol" placeholder="INDIGO"></div><div class="field"><label>EXPIRY</label><select id="chainExpiry"><option value="">Nearest eligible</option></select></div><button class="secondary" onclick="loadChainExpiries()">Load Expiries</button><button class="primary" onclick="loadChain()">Load Chain</button></div><div id="chainStatus" class="small" style="margin:12px 0"></div><div id="chainTable"><div class="empty">Load an option chain.</div></div></div></section>
 
-    <section id="strategy" class="page">
-      <div class="grid2">
-        <div class="panel">
-          <h2>Strategy Builder</h2><p class="help">Build from verified Kotak option contracts. Nothing is sent to the broker from this screen.</p>
-          <div class="controls">
-            <div class="field"><label>UNDERLYING</label><input id="underlying" placeholder="NIFTY / RELIANCE"></div>
-            <div class="field"><label>STRATEGY</label><select id="strategy"><option value="iron_condor">Iron Condor</option><option value="strangle">Naked Strangle</option></select></div>
-            <div class="field"><label>EXPIRY</label><input id="expiry" placeholder="YYYY-MM-DD"></div>
-            <button class="secondary" onclick="addLeg()">+ Add leg</button>
-          </div>
-          <div id="legs" class="legs" style="margin-top:15px"></div>
-          <div class="toolbar" style="margin-top:12px"><span class="muted">Enter the exact Kotak trading symbol and reviewed premium.</span><button class="primary" onclick="reviewStrategy()">Review strategy</button></div>
-        </div>
-        <div class="panel">
-          <h2>Risk Summary</h2><div id="strategySummary" class="empty">Build a strategy to see the reviewed payoff summary.</div>
-          <div class="payoff" style="margin-top:12px">Payoff visualization placeholder — connect verified option prices before live use.</div>
-        </div>
-      </div>
-    </section>
-
-    <section id="positions" class="page">
-      <div class="panel"><div class="toolbar"><div><h2>Positions</h2><p class="help">Live account data from Kotak Neo.</p></div><button class="primary" onclick="loadPositions()">Refresh</button></div><div id="positionsTable"><div class="empty">Click Refresh.</div></div></div>
-    </section>
-
-    <section id="orders" class="page">
-      <div class="panel"><div class="toolbar"><div><h2>Orders & Trades</h2><p class="help">Monitor order status and executions.</p></div><div class="right"><button class="secondary" onclick="loadOrders()">Orders</button><button class="secondary" onclick="loadTrades()">Trades</button></div></div><div id="ordersTable"><div class="empty">Select a view.</div></div></div>
-    </section>
-
-    <section id="trade" class="page">
-      <div class="grid2">
-        <div class="panel"><h2>Order Ticket</h2><p class="help">Review carefully. Server rejects live orders while LIVE_TRADING=false.</p>
-          <div class="grid3">
-            <div class="field"><label>TRADING SYMBOL</label><input id="oSymbol" placeholder="NIFTY..."></div>
-            <div class="field"><label>SEGMENT</label><select id="oSegment"><option value="nse_fo">NSE F&O</option><option value="nse_cm">NSE Cash</option></select></div>
-            <div class="field"><label>PRODUCT</label><select id="oProduct"><option>NRML</option><option>MIS</option></select></div>
-            <div class="field"><label>SIDE</label><select id="oSide"><option value="B">BUY</option><option value="S">SELL</option></select></div>
-            <div class="field"><label>TYPE</label><select id="oType"><option>MKT</option><option>L</option><option>SL</option><option>SL-M</option></select></div>
-            <div class="field"><label>QUANTITY</label><input id="oQty" type="number" min="1"></div>
-            <div class="field"><label>PRICE</label><input id="oPrice" value="0"></div>
-          </div>
-          <button class="primary" style="margin-top:14px" onclick="previewOrder()">Review order</button>
-        </div>
-        <div class="panel"><h2>Order Preview</h2><pre id="orderPreview" class="output">No order prepared.</pre><button class="primary" onclick="sendOrder()">Send to Kotak</button></div>
-      </div>
-      <div class="panel"><h2>Cancel / Modify</h2><div class="controls"><div class="field"><label>ORDER ID</label><input id="orderId"></div><button class="danger" onclick="cancelOrder()">Cancel order</button></div></div>
-    </section>
-
-    <section id="settings" class="page">
-      <div class="grid2">
-        <div class="panel"><h2>Connection</h2><p class="help">Kotak credentials are intentionally not displayed or editable here.</p><button class="primary" onclick="reconnect()">Force Kotak re-authentication</button></div>
-        <div class="panel"><h2>Execution</h2><p class="help">Change LIVE_TRADING only on the Oracle server environment. The browser cannot enable live trading.</p><span id="settingsMode" class="badge">PAPER</span></div>
-      </div>
-    </section>
-  </main>
-</div>
-
-<div id="toast" class="toast"></div>
-
+<section id="positions" class="page"><div class="panel"><div class="toolbar"><div><h2>Positions</h2><p class="help">Live account data from Kotak Neo.</p></div><button class="primary" onclick="loadPositions()">Refresh</button></div><div id="positionsTable"><div class="empty">Click Refresh.</div></div></div></section>
+<section id="orders" class="page"><div class="panel"><div class="toolbar"><div><h2>Orders & Trades</h2><p class="help">Monitor orders and executions.</p></div><div class="right"><button class="secondary" onclick="loadOrders()">Orders</button><button class="secondary" onclick="loadTrades()">Trades</button></div></div><div id="ordersTable"><div class="empty">Select a view.</div></div></div></section>
+<section id="trade" class="page"><div class="grid2"><div class="panel"><h2>Order Ticket</h2><p class="help">Review carefully. Live orders are blocked while LIVE_TRADING=false.</p><div class="grid3"><div class="field"><label>TRADING SYMBOL</label><input id="oSymbol"></div><div class="field"><label>SEGMENT</label><select id="oSegment"><option value="nse_fo">NSE F&O</option><option value="nse_cm">NSE Cash</option></select></div><div class="field"><label>PRODUCT</label><select id="oProduct"><option>NRML</option><option>MIS</option></select></div><div class="field"><label>SIDE</label><select id="oSide"><option value="B">BUY</option><option value="S">SELL</option></select></div><div class="field"><label>TYPE</label><select id="oType"><option>MKT</option><option>L</option><option>SL</option><option>SL-M</option></select></div><div class="field"><label>QUANTITY</label><input id="oQty" type="number" min="1"></div><div class="field"><label>PRICE</label><input id="oPrice" value="0"></div></div><button class="primary" style="margin-top:14px" onclick="previewOrder()">Review order</button></div><div class="panel"><h2>Order Preview</h2><pre id="orderPreview" class="output">No order prepared.</pre><button class="primary" onclick="sendOrder()">Send to Kotak</button></div></div><div class="panel"><h2>Cancel Order</h2><div class="controls"><div class="field"><label>ORDER ID</label><input id="orderId"></div><button class="danger" onclick="cancelOrder()">Cancel order</button></div></div></section>
+<section id="settings" class="page"><div class="grid2"><div class="panel"><h2>Connection</h2><p class="help">Kotak credentials stay on the Oracle VM.</p><button class="primary" onclick="reconnect()">Force Kotak re-authentication</button></div><div class="panel"><h2>Execution</h2><p class="help">Change LIVE_TRADING only on the Oracle server.</p><span id="settingsMode" class="badge">PAPER</span></div></div></section>
+</main></div><div id="toast" class="toast"></div>
 <script>
-let currentPage="overview", lastPreview=null;
-
-const titles={
- overview:["Overview","Kotak Neo options workspace"],
- screener:["Stock Screener","Find F&O candidates for premium-selling strategies"],
- strategy:["Strategy Builder","Construct and review Iron Condors and Strangles"],
- positions:["Positions","Live Kotak Neo positions"],
- orders:["Orders & Trades","Monitor orders and executions"],
- trade:["Trade","Review and send orders to Kotak Neo"],
- settings:["Settings","Connection and execution controls"]
-};
-
-function toast(msg){const t=document.getElementById("toast");t.textContent=msg;t.style.display="block";setTimeout(()=>t.style.display="none",2800)}
+let lastStrategy=null,lastPreview=null,currentPage="overview";
+const titles={overview:["Overview","Kotak Neo options workspace"],screener:["Stock Screener","Rank F&O candidates for your option-selling strategy"],strategy:["Strategy Builder","Automatic delta and hedge selection"],chain:["Option Chain","Live Kotak contracts and calculated Greeks"],positions:["Positions","Live Kotak Neo positions"],orders:["Orders & Trades","Monitor executions"],trade:["Trade","Review and send Kotak orders"],settings:["Settings","Connection and execution controls"]};
+function toast(m){const t=document.getElementById("toast");t.textContent=m;t.style.display="block";setTimeout(()=>t.style.display="none",3000)}
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]))}
-async function api(url,opt={}){
- const r=await fetch(url,{credentials:"same-origin",headers:{"Content-Type":"application/json",...(opt.headers||{})},...opt});
- const j=await r.json().catch(()=>({ok:false,error:"Invalid server response"}));
- if(!r.ok) throw new Error(j.error||("HTTP "+r.status));
- return j;
-}
-async function login(){
- try{await api("/api/login",{method:"POST",body:JSON.stringify({password:document.getElementById("password").value})});showApp()}
- catch(e){document.getElementById("loginError").textContent=e.message}
-}
+async function api(url,opt={}){const r=await fetch(url,{credentials:"same-origin",headers:{"Content-Type":"application/json",...(opt.headers||{})},...opt});const j=await r.json().catch(()=>({ok:false,error:"Invalid server response"}));if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j}
+async function login(){try{await api("/api/login",{method:"POST",body:JSON.stringify({password:document.getElementById("password").value})});showApp()}catch(e){document.getElementById("loginError").textContent=e.message}}
 async function logout(){await api("/api/logout",{method:"POST"});location.reload()}
-async function boot(){
- try{const m=await api("/api/me");if(m.authenticated)showApp()}catch(e){}
-}
 function showApp(){document.getElementById("login").style.display="none";document.getElementById("app").style.display="block";checkStatus();refreshOverview()}
-function navigate(page){
- currentPage=page;document.querySelectorAll(".page").forEach(x=>x.classList.remove("active"));document.getElementById(page).classList.add("active");
- document.querySelectorAll(".nav button").forEach(x=>x.classList.toggle("active",x.dataset.page===page));
- document.getElementById("pageTitle").textContent=titles[page][0];document.getElementById("pageSub").textContent=titles[page][1];
-}
-document.querySelectorAll(".nav button").forEach(b=>b.onclick=()=>navigate(b.dataset.page));
-document.getElementById("password").addEventListener("keydown",e=>{if(e.key==="Enter")login()});
-
-async function checkStatus(){
- try{
-  const j=await api("/api/status");document.getElementById("dot").classList.add("ok");document.getElementById("statusText").textContent="Kotak Connected";
-  document.getElementById("brokerState").textContent="Session active";setMode(j.live_trading);
- }catch(e){document.getElementById("dot").classList.remove("ok");document.getElementById("statusText").textContent="Disconnected";document.getElementById("brokerState").textContent=e.message}
-}
+async function boot(){try{const m=await api("/api/me");if(m.authenticated)showApp()}catch(e){}}
+function navigate(p){currentPage=p;document.querySelectorAll(".page").forEach(x=>x.classList.remove("active"));document.getElementById(p).classList.add("active");document.querySelectorAll(".nav button").forEach(x=>x.classList.toggle("active",x.dataset.page===p));document.getElementById("pageTitle").textContent=titles[p][0];document.getElementById("pageSub").textContent=titles[p][1]}
+document.querySelectorAll(".nav button").forEach(b=>b.onclick=()=>navigate(b.dataset.page));document.getElementById("password").addEventListener("keydown",e=>{if(e.key==="Enter")login()});
+async function checkStatus(){try{const j=await api("/api/status");document.getElementById("dot").classList.add("ok");document.getElementById("statusText").textContent="Kotak Connected";document.getElementById("brokerState").textContent="Session active";setMode(j.live_trading)}catch(e){document.getElementById("dot").classList.remove("ok");document.getElementById("statusText").textContent="Disconnected";document.getElementById("brokerState").textContent=e.message}}
 async function reconnect(){try{await api("/api/reconnect",{method:"POST"});toast("Kotak re-authenticated");checkStatus()}catch(e){toast(e.message)}}
-function setMode(live){document.getElementById("liveState").textContent=live?"LIVE":"PAPER";document.getElementById("modeLabel").textContent=live?"LIVE TRADING":"PAPER";document.getElementById("settingsMode").textContent=live?"LIVE":"PAPER"}
-async function refreshOverview(){try{const p=await api("/api/positions");document.getElementById("posCount").textContent=Array.isArray(p.data)?p.data.length:"—";const o=await api("/api/orders");document.getElementById("orderCount").textContent=Array.isArray(o.data)?o.data.length:"—"}catch(e){}}
-
-function loadSampleTokens(){document.getElementById("tokens").value='["REPLACE_WITH_KOTAK_TOKEN_1","REPLACE_WITH_KOTAK_TOKEN_2"]';toast("Replace with actual Kotak tokens")}
-async function runScreener(){
- try{
-  const instruments=JSON.parse(document.getElementById("tokens").value||"[]");
-  const j=await api("/api/screener",{method:"POST",body:JSON.stringify({instruments})});
-  document.getElementById("screenTable").innerHTML=`<table><thead><tr><th>Symbol</th><th>LTP</th><th>Change</th><th>Range</th><th>Volume</th><th>OI</th><th>Score</th><th></th></tr></thead><tbody>${(j.results||[]).map(x=>`<tr><td><b>${esc(x.symbol)}</b></td><td>${x.ltp??"—"}</td><td class="${(x.change_pct??0)>=0?"good":"bad"}">${x.change_pct??"—"}%</td><td>${x.range_pct??"—"}%</td><td>${x.volume??"—"}</td><td>${x.oi??"—"}</td><td><span class="badge">${x.score}</span></td><td><button class="secondary" onclick="useCandidate('${esc(x.symbol)}')">Build</button></td></tr>`).join("")}</tbody></table>`;
- }catch(e){toast(e.message)}
-}
-function useCandidate(symbol){document.getElementById("underlying").value=symbol;navigate("strategy");toast(symbol+" selected")}
-function addLeg(values={}){
- const wrap=document.getElementById("legs");const div=document.createElement("div");div.className="leg";
- div.innerHTML=`<input placeholder="Kotak trading symbol" value="${esc(values.trading_symbol||"")}"><select><option value="SELL">SELL</option><option value="BUY">BUY</option></select><select><option value="CE">CE</option><option value="PE">PE</option></select><input placeholder="Strike" type="number" value="${values.strike||""}"><input placeholder="Price" type="number" step="0.01" value="${values.price||""}"><button class="secondary" onclick="this.parentElement.remove()">×</button>`;
- wrap.appendChild(div);
-}
-function collectLegs(){
- return [...document.querySelectorAll("#legs .leg")].map(x=>({trading_symbol:x.children[0].value.trim(),side:x.children[1].value,option_type:x.children[2].value,strike:Number(x.children[3].value),price:Number(x.children[4].value),quantity:Number(document.getElementById("oQty").value||1),exchange_segment:"nse_fo",product:"NRML"}));
-}
-async function reviewStrategy(){
- try{
-  const j=await api("/api/strategy/review",{method:"POST",body:JSON.stringify({strategy:document.getElementById("strategy").value,legs:collectLegs()})});
-  lastPreview=j;document.getElementById("strategySummary").innerHTML=`<div class="metric"><label>NET CREDIT</label><strong>₹${j.net_credit??"—"}</strong><small>Based on entered premiums</small></div><br><span class="badge">${esc(j.strategy)}</span><pre class="output">${esc(JSON.stringify(j.legs,null,2))}</pre>`;
-  toast("Strategy reviewed")
- }catch(e){toast(e.message)}
-}
-async function loadPositions(){try{const j=await api("/api/positions");renderJsonTable("positionsTable",j.data,"Positions")}catch(e){toast(e.message)}}
-async function loadOrders(){try{const j=await api("/api/orders");renderJsonTable("ordersTable",j.data,"Orders")}catch(e){toast(e.message)}}
-async function loadTrades(){try{const j=await api("/api/trades");renderJsonTable("ordersTable",j.data,"Trades")}catch(e){toast(e.message)}}
-function renderJsonTable(id,data,title){
- const rows=Array.isArray(data)?data:[];if(!rows.length){document.getElementById(id).innerHTML='<div class="empty">No records returned.</div>';return}
- const keys=[...new Set(rows.flatMap(x=>Object.keys(x||{})))].slice(0,8);
- document.getElementById(id).innerHTML=`<table><thead><tr>${keys.map(k=>`<th>${esc(k)}</th>`).join("")}</tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r?.[k])}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
-}
+function setMode(l){document.getElementById("liveState").textContent=l?"LIVE":"PAPER";document.getElementById("modeLabel").textContent=l?"LIVE TRADING":"PAPER";document.getElementById("settingsMode").textContent=l?"LIVE":"PAPER"}
+async function refreshOverview(){try{const p=await api("/api/positions"),o=await api("/api/orders");document.getElementById("posCount").textContent=Array.isArray(p.data)?p.data.length:"—";document.getElementById("orderCount").textContent=Array.isArray(o.data)?o.data.length:"—"}catch(e){}}
+async function loadUniverse(){try{const j=await api("/api/fno-universe");document.getElementById("screenStatus").textContent=`Universe: ${j.symbols.length} symbols (${j.source})`;toast("Universe loaded") }catch(e){toast(e.message)}}
+async function fillExpiry(selectId,symbol){const el=document.getElementById(selectId);el.innerHTML='<option value="">Nearest eligible</option>';if(!symbol)return;const j=await api(`/api/expiries/${encodeURIComponent(symbol)}`);(j.expiries||[]).forEach(x=>{const o=document.createElement("option");o.value=x;o.textContent=x;el.appendChild(o)})}
+async function runScreener(){const st=document.getElementById("screenStatus");try{st.textContent="Getting F&O universe and scanning live Kotak data. This can take time because each candidate requires contract discovery and quotes...";const u=await api("/api/fno-universe");const limit=Math.max(1,Math.min(100,Number(document.getElementById("scanLimit").value||20)));const j=await api("/api/screener",{method:"POST",body:JSON.stringify({symbols:u.symbols,limit,target_delta:Number(document.getElementById("screenDelta").value||.10),hedge_pct:Number(document.getElementById("screenHedge").value||2)/100,min_oi:Number(document.getElementById("minOI").value||0),expiry:document.getElementById("screenExpiry").value||null})});st.textContent=`Scanned ${j.scanned}; ${j.results.length} candidates returned. ${j.errors?.length||0} skipped.`;renderScreen(j.results,j.errors||[])}catch(e){st.textContent=e.message;toast(e.message)}}
+function renderScreen(rows,errors){const box=document.getElementById("screenTable");if(!rows.length){box.innerHTML='<div class="empty">No candidates returned. Check Kotak search/quote responses and universe configuration.</div>';return}box.innerHTML=`<div class="scroll"><table><thead><tr><th>Rank</th><th>Stock</th><th>Score</th><th>Spot</th><th>CE Δ</th><th>PE Δ</th><th>Short CE</th><th>Short PE</th><th>Credit</th><th>Max Loss</th><th>Min OI</th><th>DTE</th><th></th></tr></thead><tbody>${rows.map(x=>`<tr><td><b>#${x.rank}</b></td><td><b>${esc(x.symbol)}</b></td><td><span class="badge">${x.score}</span></td><td>${x.spot??"—"}</td><td>${x.call_delta??"—"}</td><td>${x.put_delta??"—"}</td><td>${x.call_strike??"—"}</td><td>${x.put_strike??"—"}</td><td class="good">${x.credit??"—"}</td><td>${x.max_loss??"—"}</td><td>${x.min_oi??"—"}</td><td>${x.dte??"—"}</td><td><button class="secondary" onclick="useCandidate('${esc(x.symbol)}')">Build</button></td></tr>`).join("")}</tbody></table></div>${errors.length?`<details style="margin-top:10px"><summary class="small">Skipped symbols (${errors.length})</summary><pre class="output">${esc(JSON.stringify(errors,null,2))}</pre></details>`:""}`}
+function useCandidate(s){document.getElementById("strategySymbol").value=s;document.getElementById("strategyDelta").value=document.getElementById("screenDelta").value;document.getElementById("strategyHedge").value=document.getElementById("screenHedge").value;navigate("strategy");loadStrategyExpiries()}
+async function loadStrategyExpiries(){try{await fillExpiry("strategyExpiry",document.getElementById("strategySymbol").value.trim().toUpperCase())}catch(e){toast(e.message)}}
+async function buildStrategy(){const sym=document.getElementById("strategySymbol").value.trim().toUpperCase();if(!sym){toast("Enter a stock symbol");return}const st=document.getElementById("strategyStatus");try{st.textContent="Searching Kotak contracts and calculating live deltas...";const p=new URLSearchParams({target_delta:document.getElementById("strategyDelta").value,hedge_pct:Number(document.getElementById("strategyHedge").value)/100,lots:document.getElementById("strategyLots").value});if(document.getElementById("strategyExpiry").value)p.set("expiry",document.getElementById("strategyExpiry").value);const j=await api(`/api/strategy/${encodeURIComponent(sym)}?${p}`);lastStrategy=j;renderStrategy(j);st.textContent="Strategy built successfully."}catch(e){st.textContent=e.message;toast(e.message)}}
+function renderStrategy(j){document.getElementById("strategyResult").style.display="block";document.getElementById("strategyTitle").textContent=`${j.symbol} Iron Condor — ${j.expiry}`;document.getElementById("strategyMethod").textContent=`Spot ${j.spot} | DTE ${j.days_to_expiry} | Target delta ${j.target_delta} | Hedge ${j.hedge_pct*100}% | Qty ${j.quantity}`;document.getElementById("riskSummary").innerHTML=`<div class="cards" style="grid-template-columns:repeat(3,1fr)"><div class="metric"><label>NET CREDIT/SHARE</label><strong>${j.net_credit_per_share}</strong></div><div class="metric"><label>MAX PROFIT</label><strong>₹${j.max_profit}</strong></div><div class="metric"><label>MAX LOSS</label><strong>₹${j.max_loss}</strong></div><div class="metric"><label>LOWER BE</label><strong>${j.breakeven_lower}</strong></div><div class="metric"><label>UPPER BE</label><strong>${j.breakeven_upper}</strong></div><div class="metric"><label>LOT / QTY</label><strong>${j.lot_size} / ${j.quantity}</strong></div></div>`;const legs=Object.entries(j.legs);document.getElementById("legsTable").innerHTML=`<table><thead><tr><th>Role</th><th>Symbol</th><th>Side</th><th>Strike</th><th>LTP</th><th>Delta</th><th>IV</th><th>OI</th><th>Token</th></tr></thead><tbody>${legs.map(([role,x])=>`<tr><td><b>${role.replaceAll("_"," ").toUpperCase()}</b></td><td>${esc(x.trading_symbol)}</td><td>${role.startsWith("sell")?"SELL":"BUY"}</td><td>${x.strike}</td><td>${x.ltp??"—"}</td><td>${x.delta??"—"}</td><td>${x.iv??"—"}%</td><td>${x.oi??"—"}</td><td>${esc(x.token)}</td></tr>`).join("")}</tbody></table>`}
+function sendStrategyToTrade(){if(!lastStrategy)return;const sell=lastStrategy.legs.sell_call;document.getElementById("oSymbol").value=sell.trading_symbol;document.getElementById("oQty").value=lastStrategy.quantity;document.getElementById("oPrice").value=sell.ltp||0;document.getElementById("oSide").value="S";navigate("trade");toast("Sell-call leg copied to trade ticket. Review before sending.")}
+async function loadChainExpiries(){try{await fillExpiry("chainExpiry",document.getElementById("chainSymbol").value.trim().toUpperCase())}catch(e){toast(e.message)}}
+async function loadChain(){const sym=document.getElementById("chainSymbol").value.trim().toUpperCase();if(!sym){toast("Enter underlying");return}try{document.getElementById("chainStatus").textContent="Loading live Kotak chain...";const q=document.getElementById("chainExpiry").value?`?expiry=${encodeURIComponent(document.getElementById("chainExpiry").value)}`:"";const j=await api(`/api/chain/${encodeURIComponent(sym)}${q}`);document.getElementById("chainStatus").textContent=`Spot ${j.spot} | Expiry ${j.expiry}`;const rows=j.contracts||[];document.getElementById("chainTable").innerHTML=`<div class="scroll"><table><thead><tr><th>Type</th><th>Strike</th><th>LTP</th><th>Delta</th><th>IV</th><th>OI</th><th>Volume</th><th>Symbol</th><th>Token</th></tr></thead><tbody>${rows.sort((a,b)=>a.strike-b.strike||a.option_type.localeCompare(b.option_type)).map(x=>`<tr><td>${x.option_type}</td><td>${x.strike}</td><td>${x.ltp??"—"}</td><td>${x.delta??"—"}</td><td>${x.iv??"—"}%</td><td>${x.oi??"—"}</td><td>${x.volume??"—"}</td><td>${esc(x.trading_symbol)}</td><td>${esc(x.token)}</td></tr>`).join("")}</tbody></table></div>`}catch(e){document.getElementById("chainStatus").textContent=e.message;toast(e.message)}}
+async function loadPositions(){try{const j=await api("/api/positions");renderJson("positionsTable",j.data)}catch(e){toast(e.message)}}
+async function loadOrders(){try{const j=await api("/api/orders");renderJson("ordersTable",j.data)}catch(e){toast(e.message)}}
+async function loadTrades(){try{const j=await api("/api/trades");renderJson("ordersTable",j.data)}catch(e){toast(e.message)}}
+function renderJson(id,data){const rows=Array.isArray(data)?data:[];if(!rows.length){document.getElementById(id).innerHTML='<div class="empty">No records returned.</div>';return}const keys=[...new Set(rows.flatMap(x=>Object.keys(x||{})))].slice(0,10);document.getElementById(id).innerHTML=`<div class="scroll"><table><thead><tr>${keys.map(k=>`<th>${esc(k)}</th>`).join("")}</tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r?.[k])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`}
 function orderBody(){return{exchange_segment:document.getElementById("oSegment").value,product:document.getElementById("oProduct").value,transaction_type:document.getElementById("oSide").value,order_type:document.getElementById("oType").value,quantity:document.getElementById("oQty").value,price:document.getElementById("oPrice").value,trading_symbol:document.getElementById("oSymbol").value,validity:"DAY"}}
 async function previewOrder(){try{const j=await api("/api/orders/preview",{method:"POST",body:JSON.stringify(orderBody())});lastPreview=j.order;document.getElementById("orderPreview").textContent=JSON.stringify(j,null,2);toast("Order ready for review")}catch(e){toast(e.message)}}
-async function sendOrder(){
- if(!lastPreview){toast("Review the order first");return}
- if(!confirm("Send this order to Kotak Neo?"))return;
- try{const j=await api("/api/orders/place",{method:"POST",body:JSON.stringify(lastPreview)});document.getElementById("orderPreview").textContent=JSON.stringify(j,null,2);toast("Order request completed")}catch(e){toast(e.message)}
-}
-async function cancelOrder(){
- const id=document.getElementById("orderId").value.trim();if(!id){toast("Enter order ID");return}
- if(!confirm("Cancel order "+id+"?"))return;
- try{const j=await api("/api/orders/cancel",{method:"POST",body:JSON.stringify({order_id:id})});toast("Cancel request completed");document.getElementById("orderPreview").textContent=JSON.stringify(j,null,2)}catch(e){toast(e.message)}
-}
-
-addLeg();addLeg();addLeg();addLeg();boot();
+async function sendOrder(){if(!lastPreview){toast("Review the order first");return}if(!confirm("Send this order to Kotak Neo?"))return;try{const j=await api("/api/orders/place",{method:"POST",body:JSON.stringify(lastPreview)});document.getElementById("orderPreview").textContent=JSON.stringify(j,null,2);toast("Order request completed")}catch(e){toast(e.message)}}
+async function cancelOrder(){const id=document.getElementById("orderId").value.trim();if(!id){toast("Enter order ID");return}if(!confirm("Cancel order "+id+"?"))return;try{const j=await api("/api/orders/cancel",{method:"POST",body:JSON.stringify({order_id:id})});toast("Cancel request completed");document.getElementById("orderPreview").textContent=JSON.stringify(j,null,2)}catch(e){toast(e.message)}}
+boot();
 </script>
-</body>
-</html>
+</body></html>
