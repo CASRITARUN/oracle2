@@ -1223,18 +1223,32 @@ def _cleanup_screener_jobs():
             _screener_jobs.pop(jid, None)
 
 
-def _run_screener_job(job_id, symbols, limit, target_delta, hedge_pct, min_oi, expiry):
+def _run_screener_job(job_id, symbols, scan_limit, limit, target_delta, hedge_pct, min_oi, expiry):
     try:
+        # IMPORTANT: all slow Kotak master work happens here, never in the HTTP
+        # /api/screener request.  This is what prevents Nginx/Gunicorn 504s.
         _update_screener_job(
             job_id,
             status="running",
-            message="Loading Kotak F&O master and starting live option scan.",
-            total=len(symbols),
+            message="Downloading and preparing Kotak F&O master in background...",
+            total=0,
+            scanned=0,
         )
 
-        # The master is cached for MASTER_CACHE_SECONDS, so this does not redownload
-        # the 25 MB+ F&O file for every stock.
-        load_scrip_master()
+        if not symbols:
+            universe = stock_universe_from_master()
+            symbols = universe[:scan_limit] if scan_limit else universe[:MAX_SCAN_SYMBOLS]
+        else:
+            symbols = symbols[:scan_limit] if scan_limit else symbols
+
+        if not symbols:
+            raise RuntimeError("Kotak F&O master returned no F&O stock symbols.")
+
+        _update_screener_job(
+            job_id,
+            total=len(symbols),
+            message=f"Kotak F&O universe ready: {len(symbols)} stocks selected.",
+        )
 
         results = []
         errors = []
@@ -1338,35 +1352,26 @@ def screener():
     if not 0.001 <= hedge_pct <= 0.30:
         return json_error("Hedge percentage must be between 0.1% and 30%.")
 
-    if not symbols:
-        try:
-            symbols = stock_universe_from_master()
-        except Exception as exc:
-            return json_error(str(exc), 502)
-
     requested_scan = safe_int(body.get("scan_limit"), 0)
-    if requested_scan <= 0:
-        scan_limit = min(MAX_SCAN_SYMBOLS, len(symbols))
-    else:
-        scan_limit = min(MAX_SCAN_SYMBOLS, requested_scan, len(symbols))
+    scan_limit = max(1, min(MAX_SCAN_SYMBOLS, requested_scan or 10))
 
-    # De-duplicate while preserving the Kotak-master order.
+    # If the browser supplies symbols, clean them here. If it does not, leave
+    # the list empty and let the background worker obtain the Kotak F&O master.
+    # This is critical: NEVER call stock_universe_from_master() in this HTTP route.
     cleaned = []
     seen = set()
-    for value in symbols[:scan_limit]:
+    for value in symbols:
         symbol = str(value).upper().strip()
         if symbol and symbol not in seen:
             seen.add(symbol)
             cleaned.append(symbol)
-
-    if not cleaned:
-        return json_error("No F&O stocks available to scan.")
+    cleaned = cleaned[:scan_limit]
 
     job_id = _new_screener_job()
 
     worker = threading.Thread(
         target=_run_screener_job,
-        args=(job_id, cleaned, limit, target_delta, hedge_pct, min_oi, expiry),
+        args=(job_id, cleaned, scan_limit, limit, target_delta, hedge_pct, min_oi, expiry),
         name=f"kotak-screener-{job_id[:8]}",
         daemon=True,
     )
@@ -1382,7 +1387,11 @@ def screener():
         job_id=job_id,
         status="queued",
         total=len(cleaned),
-        message="Screener started in background.",
+        message=(
+            f"Background scan started for {len(cleaned)} supplied stocks."
+            if cleaned
+            else f"Background scan started; loading Kotak F&O universe for up to {scan_limit} stocks."
+        ),
     )
 
 
