@@ -292,6 +292,50 @@ def limits():
         return json_error(str(exc), 502)
 
 
+@app.post("/api/margin")
+@dashboard_required
+def margin():
+    """Calculate margin for a proposed Kotak Neo order.
+
+    This endpoint only calls NeoAPI.margin_required(); it does not place an order.
+    """
+    body = request.get_json(silent=True) or {}
+
+    required = [
+        "exchange_segment", "price", "order_type", "product",
+        "quantity", "instrument_token", "transaction_type",
+    ]
+    missing = [key for key in required if body.get(key) in (None, "")]
+    if missing:
+        return json_error("Missing required fields: " + ", ".join(missing))
+
+    try:
+        kwargs = {
+            "exchange_segment": str(body["exchange_segment"]),
+            "price": float(body["price"]),
+            "order_type": str(body["order_type"]).upper(),
+            "product": str(body["product"]).upper(),
+            "quantity": int(body["quantity"]),
+            "instrument_token": int(body["instrument_token"]),
+            "transaction_type": str(body["transaction_type"]).upper(),
+        }
+
+        optional_fields = [
+            "trigger_price", "broker_name", "branch_id",
+            "stop_loss_type", "stop_loss_value",
+            "square_off_type", "square_off_value",
+            "trailing_stop_loss", "trailing_sl_value",
+        ]
+        for key in optional_fields:
+            if key in body and body[key] not in (None, ""):
+                kwargs[key] = body[key]
+
+        result = kotak.call("margin_required", **kwargs)
+        return json_ok(data=result)
+    except Exception as exc:
+        return json_error(str(exc), 502)
+
+
 @app.get("/api/orders")
 @dashboard_required
 def orders():
