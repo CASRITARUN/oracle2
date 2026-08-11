@@ -331,6 +331,13 @@ def margin():
                 kwargs[key] = body[key]
 
         result = kotak.call("margin_required", **kwargs)
+
+        # NeoAPI.margin_required() catches SDK exceptions and returns them
+        # under the capitalized "Error" key. Exception objects are not JSON
+        # serializable, so convert the SDK error to text before returning it.
+        if isinstance(result, dict) and result.get("Error") is not None:
+            return json_error(str(result["Error"]), 502)
+
         return json_ok(data=result)
     except Exception as exc:
         return json_error(str(exc), 502)
