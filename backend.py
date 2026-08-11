@@ -47,7 +47,7 @@ RISK_FREE_RATE = float(os.getenv("RISK_FREE_RATE", "0.06"))
 MIN_DAYS_TO_EXPIRY = int(os.getenv("MIN_DAYS_TO_EXPIRY", "1"))
 DEFAULT_TARGET_DELTA = float(os.getenv("TARGET_SHORT_DELTA", "0.10"))
 DEFAULT_HEDGE_PCT = float(os.getenv("HEDGE_PCT", "0.02"))
-MAX_SCAN_SYMBOLS = int(os.getenv("MAX_SCAN_SYMBOLS", "100"))
+MAX_SCAN_SYMBOLS = int(os.getenv("MAX_SCAN_SYMBOLS", "300"))
 
 app = Flask(__name__, static_folder=APP_DIR, static_url_path="")
 app.secret_key = os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32)
@@ -212,6 +212,8 @@ def response_rows(value):
     """Flatten common Neo response shapes to a list of dictionaries."""
     if isinstance(value, list):
         return [x for x in value if isinstance(x, dict)]
+    if isinstance(value, str):
+        return []
     if not isinstance(value, dict):
         return []
 
@@ -350,32 +352,86 @@ def normalize_scrip_row(row, default_segment="nse_fo"):
 
 
 def download_csv_rows(url):
+    """Download a Kotak scrip-master CSV and return dictionaries.
+
+    Kotak currently returns HTTPS CSV URLs from scrip_master().  The files are
+    large and may contain BOM/CRLF or a delimiter other than a comma depending
+    on the master version, so detect the delimiter instead of assuming it.
+    """
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "KotakNeoOptionsTerminal/1.0"},
+        headers={"User-Agent": "KotakNeoOptionsTerminal/1.0", "Accept": "text/csv,*/*"},
     )
-    with urllib.request.urlopen(req, timeout=30) as response:
+    with urllib.request.urlopen(req, timeout=60) as response:
         content = response.read()
+
     text = content.decode("utf-8-sig", errors="replace")
-    reader = csv.DictReader(io.StringIO(text))
-    return list(reader)
+    if not text.strip():
+        return []
+
+    sample = text[:10000]
+    delimiter = ","
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",|;\t")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        pass
+
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    rows = []
+    for row in reader:
+        if not row:
+            continue
+        # Strip BOM/whitespace from headers and values.
+        clean = {}
+        for k, v in row.items():
+            key = str(k).strip().lstrip("\ufeff") if k is not None else k
+            clean[key] = v.strip() if isinstance(v, str) else v
+        rows.append(clean)
+    return rows
 
 
 def extract_master_paths(response):
+    """Return CSV URLs from every known Kotak scrip_master() response shape.
+
+    IMPORTANT: neo-api-client 2.0.0 returns a *string* when
+    scrip_master(exchange_segment="nse_fo") is called, while the no-argument
+    form returns a dict containing filesPaths.  The old code only handled the
+    dict form, which caused the screener to report zero usable rows.
+    """
+    if isinstance(response, str):
+        value = response.strip()
+        if value.startswith(("http://", "https://")):
+            return [value]
+        return []
+
+    if isinstance(response, list):
+        return [
+            str(x).strip()
+            for x in response
+            if x and str(x).strip().startswith(("http://", "https://"))
+        ]
+
     if isinstance(response, dict):
         for key in ("filesPaths", "filePaths", "files_paths", "file_paths"):
             paths = response.get(key)
             if isinstance(paths, list):
-                return [str(x) for x in paths if x]
+                return [
+                    str(x).strip() for x in paths
+                    if x and str(x).strip().startswith(("http://", "https://"))
+                ]
             if isinstance(paths, str):
-                return [paths]
-        # Sometimes the paths are nested under data.
+                value = paths.strip()
+                if value.startswith(("http://", "https://")):
+                    return [value]
+
+        # Sometimes the paths are nested under data/result/response.
         for key in ("data", "result", "response"):
             child = response.get(key)
-            if isinstance(child, dict):
-                paths = extract_master_paths(child)
-                if paths:
-                    return paths
+            paths = extract_master_paths(child)
+            if paths:
+                return paths
+
     return []
 
 
@@ -1131,9 +1187,15 @@ def screener():
         except Exception as exc:
             return json_error(str(exc), 502)
 
-    # Keep broker load bounded. The UI scan-limit is also used as the number of
-    # symbols to evaluate in this pass, so a 20-symbol scan really scans 20.
-    scan_limit = max(1, min(MAX_SCAN_SYMBOLS, limit, len(symbols)))
+    # Scan count is deliberately separate from the number of results returned.
+    # scan_limit=0 means scan the full discovered universe, subject to
+    # MAX_SCAN_SYMBOLS. This lets the ranking compare candidates instead of
+    # simply ranking the first 20 alphabetically.
+    requested_scan = safe_int(body.get("scan_limit"), 0)
+    if requested_scan <= 0:
+        scan_limit = min(MAX_SCAN_SYMBOLS, len(symbols))
+    else:
+        scan_limit = min(MAX_SCAN_SYMBOLS, requested_scan, len(symbols))
     symbols = [str(s).upper().strip() for s in symbols[:scan_limit] if str(s).strip()]
 
     results = []
@@ -1156,6 +1218,7 @@ def screener():
     return jsonify({
         "ok": True,
         "scanned": len(symbols),
+        "universe_size": len(stock_universe_from_master()),
         "successful": len(results),
         "results": results,
         "errors": errors,
