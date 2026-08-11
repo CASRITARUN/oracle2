@@ -67,6 +67,14 @@ _broker_lock = threading.RLock()
 _master_lock = threading.RLock()
 _master_cache = {"fetched_at": 0.0, "rows": []}
 
+# Background screener jobs.
+# Gunicorn is intentionally configured with one worker on this VM, so this in-memory
+# job store remains in the same process that owns the Kotak session. The HTTP request
+# returns immediately; the worker thread performs the slow Kotak scan.
+_screener_jobs = {}
+_screener_jobs_lock = threading.RLock()
+SCREENER_JOB_TTL = int(os.getenv("SCREENER_JOB_TTL", "3600"))
+
 
 # ---------------------------------------------------------------------------
 # Generic response/auth helpers
@@ -1168,18 +1176,167 @@ def chain(symbol):
 
 
 # ---------------------------------------------------------------------------
+# Background screener jobs
+# ---------------------------------------------------------------------------
+def _new_screener_job():
+    job_id = secrets.token_urlsafe(18)
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "message": "Screener job queued.",
+        "total": 0,
+        "scanned": 0,
+        "successful": 0,
+        "results": [],
+        "errors": [],
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with _screener_jobs_lock:
+        _screener_jobs[job_id] = job
+    return job_id
+
+
+def _get_screener_job(job_id):
+    with _screener_jobs_lock:
+        job = _screener_jobs.get(job_id)
+        return dict(job) if job else None
+
+
+def _update_screener_job(job_id, **changes):
+    with _screener_jobs_lock:
+        job = _screener_jobs.get(job_id)
+        if not job:
+            return
+        job.update(changes)
+        job["updated_at"] = time.time()
+
+
+def _cleanup_screener_jobs():
+    cutoff = time.time() - SCREENER_JOB_TTL
+    with _screener_jobs_lock:
+        stale = [
+            jid for jid, job in _screener_jobs.items()
+            if job.get("updated_at", 0) < cutoff
+        ]
+        for jid in stale:
+            _screener_jobs.pop(jid, None)
+
+
+def _run_screener_job(job_id, symbols, limit, target_delta, hedge_pct, min_oi, expiry):
+    try:
+        _update_screener_job(
+            job_id,
+            status="running",
+            message="Loading Kotak F&O master and starting live option scan.",
+            total=len(symbols),
+        )
+
+        # The master is cached for MASTER_CACHE_SECONDS, so this does not redownload
+        # the 25 MB+ F&O file for every stock.
+        load_scrip_master()
+
+        results = []
+        errors = []
+
+        for idx, symbol in enumerate(symbols, start=1):
+            _update_screener_job(
+                job_id,
+                status="running",
+                message=f"Scanning {symbol} ({idx}/{len(symbols)})...",
+                scanned=idx - 1,
+                successful=len(results),
+                results=list(results),
+                errors=list(errors),
+            )
+            try:
+                result = screen_one(
+                    symbol, target_delta, hedge_pct, min_oi, expiry
+                )
+                results.append(result)
+
+                # Re-score the completed set so far. Final ranking is recalculated
+                # again after the full scan below.
+                for r in results:
+                    r["score"] = rank_score(r, results)
+                results.sort(key=lambda x: x["score"], reverse=True)
+            except Exception as exc:
+                log.warning("Screener skipped %s: %s", symbol, exc)
+                errors.append({"symbol": symbol, "error": str(exc)})
+
+            _update_screener_job(
+                job_id,
+                scanned=idx,
+                successful=len(results),
+                results=list(results[:limit]),
+                errors=list(errors),
+                message=f"Scanned {idx}/{len(symbols)} stocks.",
+            )
+
+        # Final ranking must use the complete result set, not the partial set.
+        if results:
+            for r in results:
+                r["score"] = rank_score(r, results)
+            results.sort(key=lambda x: x["score"], reverse=True)
+            for rank, r in enumerate(results, 1):
+                r["rank"] = rank
+            results = results[:limit]
+
+        _update_screener_job(
+            job_id,
+            status="complete",
+            message=f"Scan complete: {len(symbols)} stocks scanned.",
+            scanned=len(symbols),
+            successful=len(results),
+            results=results,
+            errors=errors,
+        )
+        log.info(
+            "Screener job %s completed: scanned=%d successful=%d errors=%d",
+            job_id, len(symbols), len(results), len(errors),
+        )
+    except Exception as exc:
+        log.exception("Screener job %s failed", job_id)
+        _update_screener_job(
+            job_id,
+            status="failed",
+            message="Screener failed.",
+            error=str(exc),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Automatic screener
 # ---------------------------------------------------------------------------
 @app.post("/api/screener")
 @dashboard_required
 def screener():
+    """
+    Start the Kotak F&O screener in a background thread.
+
+    IMPORTANT:
+      Do not perform the slow Kotak option-chain scan inside this HTTP request.
+      The previous implementation did that and caused Gunicorn/Nginx 504 responses.
+    """
+    _cleanup_screener_jobs()
+
     body = request.get_json(silent=True) or {}
     symbols = body.get("symbols") or []
+
     limit = max(1, min(100, safe_int(body.get("limit"), 20)))
-    target_delta = safe_float(body.get("target_delta"), DEFAULT_TARGET_DELTA)
-    hedge_pct = safe_float(body.get("hedge_pct"), DEFAULT_HEDGE_PCT)
+    target_delta = safe_float(
+        body.get("target_delta"), DEFAULT_TARGET_DELTA
+    )
+    hedge_pct = safe_float(
+        body.get("hedge_pct"), DEFAULT_HEDGE_PCT
+    )
     min_oi = safe_int(body.get("min_oi"), 0)
     expiry = body.get("expiry") or None
+
+    if not 0.01 <= target_delta <= 0.49:
+        return json_error("Target delta must be between 0.01 and 0.49.")
+    if not 0.001 <= hedge_pct <= 0.30:
+        return json_error("Hedge percentage must be between 0.1% and 30%.")
 
     if not symbols:
         try:
@@ -1187,43 +1344,73 @@ def screener():
         except Exception as exc:
             return json_error(str(exc), 502)
 
-    # Scan count is deliberately separate from the number of results returned.
-    # scan_limit=0 means scan the full discovered universe, subject to
-    # MAX_SCAN_SYMBOLS. This lets the ranking compare candidates instead of
-    # simply ranking the first 20 alphabetically.
     requested_scan = safe_int(body.get("scan_limit"), 0)
     if requested_scan <= 0:
         scan_limit = min(MAX_SCAN_SYMBOLS, len(symbols))
     else:
         scan_limit = min(MAX_SCAN_SYMBOLS, requested_scan, len(symbols))
-    symbols = [str(s).upper().strip() for s in symbols[:scan_limit] if str(s).strip()]
 
-    results = []
-    errors = []
-    for idx, symbol in enumerate(symbols, start=1):
-        try:
-            result = screen_one(symbol, target_delta, hedge_pct, min_oi, expiry)
-            results.append(result)
-        except Exception as exc:
-            errors.append({"symbol": symbol, "error": str(exc)})
+    # De-duplicate while preserving the Kotak-master order.
+    cleaned = []
+    seen = set()
+    for value in symbols[:scan_limit]:
+        symbol = str(value).upper().strip()
+        if symbol and symbol not in seen:
+            seen.add(symbol)
+            cleaned.append(symbol)
 
-    if results:
-        for r in results:
-            r["score"] = rank_score(r, results)
-        results.sort(key=lambda x: x["score"], reverse=True)
-        for rank, r in enumerate(results, 1):
-            r["rank"] = rank
-        results = results[:limit]
+    if not cleaned:
+        return json_error("No F&O stocks available to scan.")
 
-    return jsonify({
-        "ok": True,
-        "scanned": len(symbols),
-        "universe_size": len(stock_universe_from_master()),
-        "successful": len(results),
-        "results": results,
-        "errors": errors,
-        "methodology": "Kotak scrip master + live Kotak quotes; Black-Scholes IV/delta; short CE/PE nearest target delta; percentage-based discrete strike hedges; ranking blends calmness, liquidity, credit/wing and delta fit.",
-    })
+    job_id = _new_screener_job()
+
+    worker = threading.Thread(
+        target=_run_screener_job,
+        args=(job_id, cleaned, limit, target_delta, hedge_pct, min_oi, expiry),
+        name=f"kotak-screener-{job_id[:8]}",
+        daemon=True,
+    )
+    worker.start()
+
+    _update_screener_job(
+        job_id,
+        total=len(cleaned),
+        message=f"Background scan started for {len(cleaned)} stocks.",
+    )
+
+    return json_ok(
+        job_id=job_id,
+        status="queued",
+        total=len(cleaned),
+        message="Screener started in background.",
+    )
+
+
+@app.get("/api/screener/status/<job_id>")
+@dashboard_required
+def screener_status(job_id):
+    _cleanup_screener_jobs()
+    job = _get_screener_job(job_id)
+    if not job:
+        return json_error(
+            "Screener job not found or has expired. Start a new scan.",
+            404,
+        )
+
+    payload = {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "message": job.get("message"),
+        "total": job.get("total", 0),
+        "scanned": job.get("scanned", 0),
+        "successful": job.get("successful", 0),
+        "results": job.get("results", []),
+        "errors": job.get("errors", []),
+    }
+    if job.get("error"):
+        payload["error"] = job["error"]
+
+    return json_ok(**payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1362,5 +1549,5 @@ def index():
 
 
 if __name__ == "__main__":
-    log.info("Starting Kotak Neo application on port %s; LIVE_TRADING=%s", PORT, LIVE_TRADING)
+    log.info("Starting Kotak Neo application on port %s; LIVE_TRADING=%s; background screener enabled", PORT, LIVE_TRADING)
     app.run(host="0.0.0.0", port=PORT, debug=False)
