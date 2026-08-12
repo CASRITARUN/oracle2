@@ -124,27 +124,29 @@
 <div class="wrap">
 
   <div class="panel">
-    <h2>1. Stock Screener — ranks the F&amp;O universe for option-selling: rich IV, calm underlying, liquid enough to trade</h2>
+    <h2>1. Iron Condor Screener — ranks actual Zerodha-tradable IC structures</h2>
     <div class="row" style="margin-bottom:12px;">
-      <button id="runScreenerBtn">Run Screener</button>
+      <label class="inline">Short delta <input type="number" id="screenerDelta" value="0.18" min="0.10" max="0.30" step="0.01" style="width:70px;"></label>
+      <label class="inline">Min DTE <input type="number" id="screenerMinDte" value="14" min="7" max="90" style="width:65px;"></label>
+      <label class="inline">Max DTE <input type="number" id="screenerMaxDte" value="50" min="14" max="120" style="width:65px;"></label>
+      <button id="runScreenerBtn">Run IC Screener</button>
       <span id="screenerStatus" class="loading"></span>
     </div>
     <table id="screenerTable" style="display:none;">
       <thead><tr>
-        <th>Rank</th><th>Symbol</th><th>LTP</th><th>ATM IV</th><th>IV Rank / %ile</th>
-        <th>HV (ann.)</th><th>IV/HV</th><th>ATR%</th><th>Liquidity</th><th>Score</th><th>Recent headlines</th><th></th>
+        <th>Rank</th><th>Symbol</th><th>IC Score</th><th>Expiry / DTE</th><th>IV Rank</th><th>IV/HV</th>
+        <th>Regime / ADX</th><th>CE Cushion</th><th>PE Cushion</th><th>Credit/Max Loss</th><th>POP</th>
+        <th>4-Leg Liquidity</th><th>Event</th><th></th>
       </tr></thead>
       <tbody></tbody>
     </table>
     <div id="screenerExcludedNote" class="legend" style="display:none;"></div>
     <div class="legend">
-      Composite score blends IV richness (40%), calmness — inverse HV+ATR (35%), and ATM liquidity — OI &amp;
-      spread (25%). Stocks with thin ATM open interest, wide spreads, or that are on today's F&amp;O ban list are
-      excluded from the ranking and shown separately. IV Rank shows a real 1-year percentile once enough daily
-      snapshots have accumulated (kept in <code>iv_history.json</code>); until then it shows today's cross-sectional
-      IV percentile instead, marked accordingly. Headlines are a best-effort keyword scan, not verified news or
-      sentiment analysis — always read the actual article and check earnings/corporate-action dates yourself.
-      Ranking is cached so section 2 can show a stock's rank without re-scanning.
+      The IC score is built from <b>IV richness 25%</b>, <b>range/trend quality 20%</b>, <b>expected-move cushion 20%</b>,
+      <b>actual four-leg liquidity 15%</b>, <b>credit/max-loss economics 15%</b> and <b>event risk 5%</b>.
+      The screener constructs a real CE/PE short pair plus two hedge legs for a preferred 21–35 DTE expiry, then ranks the
+      resulting trade. It is a transparent heuristic — not a backtest, forecast or guarantee. Kite Connect supplies live quotes,
+      depth, OI, volume, margins and orders; earnings dates are not provided by Kite and therefore are not claimed as verified.
     </div>
   </div>
 
@@ -165,7 +167,10 @@
       <label class="inline">Lots
         <input type="number" id="lotsInput" value="1" step="1" min="1" max="50" /></label>
       <label class="inline">Target delta
-        <input type="number" id="targetDeltaInput" value="0.18" step="0.01" min="0.01" max="0.49" /></label>
+        <input type="number" id="targetDeltaInput" value="0.18" step="0.01" min="0.10" max="0.30" /></label>
+      <label class="inline">Put Δ <input type="number" id="putDeltaInput" value="0.18" step="0.01" min="0.10" max="0.30" style="width:65px;" /></label>
+      <label class="inline">Call Δ <input type="number" id="callDeltaInput" value="0.18" step="0.01" min="0.10" max="0.30" style="width:65px;" /></label>
+      <label class="inline">Wing mode <select id="wingModeInput"><option value="auto" selected>Auto optimize</option><option value="fixed">Fixed %</option></select></label>
       <label class="inline" id="wingWidthLabel">Hedge width %
         <input type="number" id="wingWidthInput" value="5" step="0.5" min="1" max="30" /></label>
       <button id="buildBtn">Calculate</button>
@@ -204,7 +209,10 @@
         <div class="insight-card"><div class="k">Probability of Profit</div><div class="v" id="ins_pop">—</div></div>
         <div class="insight-card"><div class="k">Trend Regime</div><div class="v" id="ins_trend">—</div></div>
         <div class="insight-card"><div class="k">Volatility Regime</div><div class="v" id="ins_volregime">—</div></div>
-        <div class="insight-card"><div class="k">Trade Quality Score</div><div class="v" id="ins_score">—</div></div>
+        <div class="insight-card"><div class="k">Trade Quality / IC Score</div><div class="v" id="ins_score">—</div></div>
+        <div class="insight-card"><div class="k">CE / PE Cushion</div><div class="v" id="ins_cushion">—</div></div>
+        <div class="insight-card"><div class="k">Credit / Max Loss</div><div class="v" id="ins_credit_ratio">—</div></div>
+        <div class="insight-card"><div class="k">4-Leg Liquidity</div><div class="v" id="ins_liquidity">—</div></div>
         <div class="insight-card" style="grid-column: 1 / -1;"><div class="k">Suggested Strategy</div><div class="v" id="ins_suggested">—</div></div>
       </div>
       <div class="insight-note" id="ins_note"></div>
@@ -363,7 +371,24 @@
   </div>
 
   <div class="panel">
-    <h2>9. Event Calendar — avoid new entries around these dates</h2>
+    <h2>9. Zerodha Account &amp; Order Capabilities</h2>
+    <div class="row">
+      <button id="brokerSnapshotBtn">Refresh Account Snapshot</button>
+      <button class="secondary" id="brokerTradesBtn">Today's Trades</button>
+      <button class="secondary" id="brokerGttBtn">GTT Triggers</button>
+      <span id="brokerStatus" class="loading"></span>
+    </div>
+    <div class="insight-grid" id="brokerSnapshotBox" style="display:none; margin-top:12px;">
+      <div class="insight-card"><div class="k">Available Cash</div><div class="v" id="br_cash">—</div></div>
+      <div class="insight-card"><div class="k">Net F&amp;O P&amp;L</div><div class="v" id="br_pnl">—</div></div>
+      <div class="insight-card"><div class="k">Holdings</div><div class="v" id="br_holdings">—</div></div>
+      <div class="insight-card"><div class="k">Open F&amp;O Legs</div><div class="v" id="br_positions">—</div></div>
+    </div>
+    <div class="legend" id="brokerExtra"></div>
+  </div>
+
+  <div class="panel">
+    <h2>10. Event Calendar — avoid new entries around these dates</h2>
     <div class="row" style="margin-bottom:12px;">
       <button id="refreshEventsBtn">Refresh Calendar</button>
       <span id="eventsStatus" class="loading"></span>
@@ -1082,54 +1107,41 @@ function quickSymbol(sym) {
   document.getElementById("symbolInput").value = sym;
 }
 
-// ---------- Screener ----------
+// ---------- Iron Condor Screener ----------
 document.getElementById("runScreenerBtn").onclick = async () => {
-  const status = document.getElementById("screenerStatus");
-  const loggedIn = await checkSession();
-  if (!loggedIn) { status.textContent = "Connect your Kite account first (top right)."; return; }
-  status.textContent = "Scanning F&O universe — this can take 30-60s (IV, liquidity, ban-list, news)...";
-  try {
-    const r = await apiFetch("/api/screener?limit=25");
-    const d = await r.json();
-    if (d.error) { status.textContent = "Error: " + d.error; return; }
-    const tbody = document.querySelector("#screenerTable tbody");
-    tbody.innerHTML = "";
-    d.stocks.forEach(s => {
-      const tr = document.createElement("tr");
-      const ivRankLabel = s.iv_rank_pct != null
-        ? `${s.iv_rank_pct}% <span style="opacity:.6">(${s.iv_rank_history_days}d hist.)</span>`
-        : `~${s.iv_richness_score}% <span style="opacity:.6">(today only, building history)</span>`;
-      const liquidity = s.liquidity_ok
-        ? `OK <span style="opacity:.6">(OI ${s.atm_oi_total}, spread ${s.atm_spread_pct}%)</span>`
-        : `<span style="color:#e07a7a">thin</span>`;
-      const headlines = (s.headlines && s.headlines.length)
-        ? s.headlines.map(h => `<a href="${h.link}" target="_blank" rel="noopener">${h.title}</a>`).join("<br>")
-        : (s.headlines_error ? `<span style="opacity:.6">n/a</span>` : "");
-      const ivHv = s.iv_hv
-        ? `${s.iv_hv.ratio} <span class="badge ${s.iv_hv.label.toLowerCase()}">${s.iv_hv.label}</span>`
-        : "—";
-      const ivTrendTxt = s.iv_trend ? ` <span style="opacity:.6">(${s.iv_trend.trend})</span>` : "";
-      tr.innerHTML = `<td>${s.rank}/${s.total}</td><td>${s.symbol}${s.fo_banned_today ? " 🚫" : ""}</td>
-                      <td>${s.ltp}</td><td>${s.atm_iv_pct != null ? s.atm_iv_pct + "%" : "—"}${ivTrendTxt}</td>
-                      <td>${ivRankLabel}</td>
-                      <td>${s.hv_annualized_pct}%</td><td>${ivHv}</td><td>${s.atr_pct_of_price}%</td>
-                      <td>${liquidity}</td><td><b>${s.composite_score}</b></td>
-                      <td style="max-width:260px;font-size:12px;">${headlines}</td>
-                      <td><button class="secondary small-btn" onclick="useSymbol('${s.symbol}')">Use</button></td>`;
+  const status=document.getElementById("screenerStatus");
+  const loggedIn=await checkSession();
+  if(!loggedIn){status.textContent="Connect your Kite account first (top right).";return;}
+  const delta=document.getElementById("screenerDelta").value||0.18;
+  const minDte=document.getElementById("screenerMinDte").value||14;
+  const maxDte=document.getElementById("screenerMaxDte").value||50;
+  status.textContent="Building actual Iron Condors across the F&O universe — quotes, OI, spreads, IV, trend and margin-aware scoring...";
+  try{
+    const r=await apiFetch(`/api/screener?limit=25&target_delta=${delta}&min_dte=${minDte}&max_dte=${maxDte}&news=true`);
+    const d=await r.json();
+    if(d.error){status.textContent="Error: "+d.error;return;}
+    const tbody=document.querySelector("#screenerTable tbody"); tbody.innerHTML="";
+    d.stocks.forEach(s=>{
+      const ev=(s.event_flags&&s.event_flags.length)?`⚠ ${s.event_flags.length}`:`✓`;
+      const evTitle=(s.event_flags||[]).map(x=>x.label).join(" | ");
+      const liq=s.ic_liquidity_score!=null?`${s.ic_liquidity_score} (OI ≥${s.ic_min_leg_oi}, spread ≤${s.ic_max_leg_spread_pct??"—"}%)`:"—";
+      const ivhv=s.iv_hv?`${s.iv_hv.ratio}`:"—";
+      const regime=s.trend_regime?`${s.trend_regime}${s.trend_adx!=null?` / ${s.trend_adx}`:""}`:"—";
+      const tr=document.createElement("tr");
+      tr.innerHTML=`<td><b>${s.rank}/${s.total}</b></td><td>${s.symbol}</td><td><b>${s.ic_score}</b> <span class="badge ${(s.ic_label||'').toLowerCase()}">${s.ic_label||''}</span></td>
+        <td>${s.ic_expiry}<br><span style="opacity:.65">${s.ic_dte} DTE</span></td>
+        <td>${s.iv_rank_pct!=null?s.iv_rank_pct+"%":"~"+Math.round(s.iv_richness_score||0)+"%"}</td><td>${ivhv}</td>
+        <td>${regime}</td><td>${s.ic_ce_cushion_em}×</td><td>${s.ic_pe_cushion_em}×</td>
+        <td>${s.ic_credit_max_loss_pct}%</td><td>${s.ic_pop_pct!=null?s.ic_pop_pct+"%":"—"}</td>
+        <td>${liq}</td><td title="${evTitle}">${ev}</td>
+        <td><button class="secondary small-btn" onclick="useSymbol('${s.symbol}')">Build</button></td>`;
       tbody.appendChild(tr);
     });
-    document.getElementById("screenerTable").style.display = "table";
-    status.textContent = `${d.count} stocks scanned, ${d.eligible_count} eligible, showing top ${d.stocks.length} by composite score.`;
-
-    const excludedNote = document.getElementById("screenerExcludedNote");
-    if (d.excluded_sample && d.excluded_sample.length) {
-      const names = d.excluded_sample.map(s => s.symbol + (s.fo_banned_today ? " (banned)" : !s.liquidity_ok ? " (illiquid)" : "")).join(", ");
-      excludedNote.textContent = `Excluded from ranking (sample): ${names}. ${d.ban_list_note || ""}`;
-      excludedNote.style.display = "block";
-    } else {
-      excludedNote.style.display = "none";
-    }
-  } catch (e) { status.textContent = "Request failed: " + e; }
+    document.getElementById("screenerTable").style.display="table";
+    status.textContent=`Scanned ${d.count} candidates → ${d.eligible_count} IC candidates. Showing top ${d.stocks.length}.`;
+    const ex=document.getElementById("screenerExcludedNote");
+    if(d.excluded_sample&&d.excluded_sample.length){ex.textContent="Excluded sample: "+d.excluded_sample.map(x=>`${x.symbol} (${(x.hard_reasons||[]).join(', ')||'filtered'})`).join(', ')+". "+(d.ban_list_note||"");ex.style.display="block";} else ex.style.display="none";
+  }catch(e){status.textContent="Request failed: "+e;}
 };
 
 function useSymbol(sym) {
@@ -1201,13 +1213,16 @@ document.getElementById("buildBtn").onclick = async () => {
   status.textContent = "Fetching option chain and computing strikes...";
 
   const targetDelta = document.getElementById("targetDeltaInput").value || 0.18;
+  const putDelta = document.getElementById("putDeltaInput").value || targetDelta;
+  const callDelta = document.getElementById("callDeltaInput").value || targetDelta;
   const wingWidthPct = (document.getElementById("wingWidthInput").value || 5) / 100;
+  const wingMode = document.getElementById("wingModeInput").value || "auto";
   const lots = document.getElementById("lotsInput").value || 1;
   const expiry = document.getElementById("expirySelect").value;
 
   try {
     const params = new URLSearchParams({
-      target_delta: targetDelta, wing_width_pct: wingWidthPct, strategy_type: currentStrategyType, lots
+      target_delta: targetDelta, put_delta: putDelta, call_delta: callDelta, wing_width_pct: wingWidthPct, wing_mode: wingMode, strategy_type: currentStrategyType, lots
     });
     if (expiry) params.append("expiry", expiry);
     const r = await apiFetch(`/api/strategy/${sym}?${params}`);
@@ -1225,9 +1240,7 @@ document.getElementById("buildBtn").onclick = async () => {
     const rankEl = document.getElementById("s_rank");
     if (d.rank_info && d.rank_info.rank != null) {
       const ri = d.rank_info;
-      rankEl.textContent = `Screener rank: #${ri.rank} of ${ri.total} eligible (composite score ${ri.composite_score}, `
-        + `ATM IV ${ri.atm_iv_pct != null ? ri.atm_iv_pct + "%" : "n/a"}, IV rank ${ri.iv_rank_pct != null ? ri.iv_rank_pct + "%" : "building history"}) `
-        + `— data ${ri.screener_age_minutes}m old`;
+      rankEl.textContent = `IC rank: #${ri.rank} of ${ri.total} · IC score ${ri.ic_score ?? "—"} · ${ri.ic_expiry ?? "—"} (${ri.ic_dte ?? "—"} DTE) · IV rank ${ri.iv_rank_pct != null ? ri.iv_rank_pct+"%" : "building"} · data ${ri.screener_age_minutes}m old`;
     } else if (d.rank_info) {
       const reason = d.rank_info.fo_banned_today ? "on today's F&O ban list"
         : (d.rank_info.liquidity_ok === false ? "ATM liquidity too thin" : "IV/liquidity data unavailable");
@@ -1290,6 +1303,10 @@ document.getElementById("buildBtn").onclick = async () => {
     document.getElementById("ins_score").innerHTML = d.trade_quality_score != null
       ? `${d.trade_quality_score}/100 <span class="badge ${(d.trade_quality_label||"").toLowerCase()}">${d.trade_quality_label || ""}</span>`
       : "—";
+
+    document.getElementById("ins_cushion").textContent = d.ce_cushion_em != null ? `${d.ce_cushion_em}× / ${d.pe_cushion_em}×` : "—";
+    document.getElementById("ins_credit_ratio").textContent = d.ic_credit_max_loss_pct != null ? `${d.ic_credit_max_loss_pct}%` : "—";
+    document.getElementById("ins_liquidity").innerHTML = d.ic_liquidity_ok != null ? `${d.ic_liquidity_ok ? "PASS" : "FAIL"}${d.rank_info && d.rank_info.ic_liquidity_score != null ? ` · ${d.rank_info.ic_liquidity_score}/100` : ""}` : "—";
 
     document.getElementById("ins_suggested").textContent = d.suggested_strategy && d.suggested_strategy.suggested
       ? `${d.suggested_strategy.suggested} — ${d.suggested_strategy.reason}`
@@ -1986,6 +2003,22 @@ async function loadEvents() {
     status.textContent = "";
   } catch (e) { status.textContent = "Request failed: " + e; }
 }
+
+// ---------- Zerodha broker capabilities ----------
+document.getElementById("brokerSnapshotBtn").onclick=async()=>{
+  const st=document.getElementById("brokerStatus"); if(!(await checkSession()))return; st.textContent="Loading Zerodha account snapshot...";
+  try{const r=await apiFetch("/api/broker/account"),d=await r.json();if(d.error){st.textContent=d.error;return;}
+    const eq=d.margins&&d.margins.equity; const cash=eq&&eq.available&&eq.available.live_balance!=null?eq.available.live_balance:(eq&&eq.available&&eq.available.cash);
+    const pnl=(d.positions&&d.positions.net||[]).reduce((a,x)=>a+Number(x.pnl||0),0);
+    document.getElementById("br_cash").textContent=cash!=null?"₹"+Number(cash).toFixed(2):"—";
+    document.getElementById("br_pnl").textContent="₹"+pnl.toFixed(2);
+    document.getElementById("br_holdings").textContent=Array.isArray(d.holdings)?d.holdings.length:"—";
+    document.getElementById("br_positions").textContent=d.positions&&Array.isArray(d.positions.net)?d.positions.net.filter(x=>Number(x.quantity||0)!==0).length:"—";
+    document.getElementById("brokerSnapshotBox").style.display="grid";st.textContent="";document.getElementById("brokerExtra").textContent="Live profile, margins, holdings and positions fetched through Kite Connect.";
+  }catch(e){st.textContent="Request failed: "+e;}
+};
+document.getElementById("brokerTradesBtn").onclick=async()=>{const st=document.getElementById("brokerStatus");if(!(await checkSession()))return;try{const r=await apiFetch("/api/trades"),d=await r.json();if(d.error){st.textContent=d.error;return;}st.textContent=`${(d.trades||[]).length} trades returned today.`;document.getElementById("brokerExtra").textContent=(d.trades||[]).slice(-10).map(t=>`${t.tradingsymbol} ${t.transaction_type} ×${t.quantity} @ ${t.average_price}`).join(" | ")||"No trades today.";}catch(e){st.textContent="Request failed: "+e;}};
+document.getElementById("brokerGttBtn").onclick=async()=>{const st=document.getElementById("brokerStatus");if(!(await checkSession()))return;try{const r=await apiFetch("/api/gtt"),d=await r.json();if(d.error){st.textContent=d.error;return;}st.textContent=`${(d.triggers||[]).length} GTT trigger(s) in Zerodha.`;}catch(e){st.textContent="Request failed: "+e;}};
 
 document.getElementById("addEventBtn").onclick = async () => {
   const date = document.getElementById("newEventDate").value.trim();
