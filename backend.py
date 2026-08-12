@@ -293,6 +293,34 @@ def parse_expiry(value):
     return parse_date(value)
 
 
+def parse_kotak_symbol_expiry(trading_symbol):
+    """Infer the real current/next expiry from Kotak NSE stock-option symbols.
+
+    Kotak's current nse_fo master can return legacy-looking numeric values in
+    pExpiryDate/lExpiryDate. The stock trading symbol itself contains the
+    monthly expiry marker, e.g. INDIGO26AUG5800CE.
+    """
+    text = str(trading_symbol or '').strip().upper()
+    m = re.search(r'(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)', text)
+    if not m:
+        return None
+    day = int(m.group(1))
+    month_name = m.group(2)
+    try:
+        month = datetime.strptime(month_name, '%b').month
+    except ValueError:
+        return None
+    today = now_ist().date()
+    for year in (today.year, today.year + 1, today.year - 1):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            continue
+        if candidate >= today:
+            return candidate
+    return None
+
+
 def derive_underlying(row):
     explicit = first_value(
         row,
@@ -339,8 +367,27 @@ def normalize_scrip_row(row, default_segment="nse_fo"):
     elif not option_type and ts.endswith("PE"):
         option_type = "PE"
 
-    expiry = parse_expiry(first_value(row, "pExpiryDate", "expiry", "expiry_date", "expiryDate"))
-    strike = safe_float(first_value(row, "pStrikePrice", "strike_price", "strike", "dStrikePrice"))
+    # Kotak's current transformed nse_fo CSV uses `dStrikePrice;` (note the
+    # trailing semicolon), and its pExpiryDate/lExpiryDate can contain stale
+    # legacy timestamps. Normalize the strike and use the trading-symbol expiry
+    # when the master date is clearly not a current/future date.
+    raw_strike = first_value(
+        row, "pStrikePrice", "strike_price", "strike", "dStrikePrice;", "dStrikePrice"
+    )
+    strike = safe_float(raw_strike)
+    if strike is not None and abs(strike) >= 100000:
+        strike /= 100.0
+
+    expiry_raw = first_value(
+        row, "pExpiryDate", "lExpiryDate", "expiry", "expiry_date", "expiryDate",
+        "lExpiryDate "
+    )
+    expiry = parse_expiry(expiry_raw)
+    symbol_expiry = parse_kotak_symbol_expiry(trading_symbol)
+    today = now_ist().date()
+    if symbol_expiry and (expiry is None or expiry < today - timedelta(days=365) or expiry > today + timedelta(days=730)):
+        expiry = symbol_expiry
+
     lot_size = safe_int(first_value(row, "lLotSize", "llotSize", "lot_size", "lotSize"), 1)
     freeze_qty = safe_int(first_value(row, "lFreezeQty", "freeze_qty", "freezeQty"), 0)
 
