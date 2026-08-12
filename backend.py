@@ -1,7 +1,7 @@
 """
 Kotak Neo Option-Selling Dashboard — backend
 ------------------------------------------------
-Run:  gunicorn -w 1 -k gthread --threads 4 -b 127.0.0.1:8000 backend:app   (see DEPLOYMENT.md)
+Run:  gunicorn -w 1 -k gthread --threads 4 -b 127.0.0.1:5001 backend:app   (see DEPLOYMENT.md)
 Then open: https://algo2.wecon.in
 
 What this does
@@ -37,7 +37,6 @@ IMPORTANT
 """
 
 import os
-import re
 import math
 import time
 import json
@@ -236,41 +235,26 @@ def _response_error_message(resp):
     return None
 
 
-def normalize_kotak_mobile(value):
-    """Normalize an Indian registered mobile for Kotak Neo v2 TOTP login.
-
-    Kotak Neo v2 documentation specifies the registered mobile number with
-    country code. Accept common .env forms (10 digits, 91XXXXXXXXXX,
-    +91XXXXXXXXXX, or 0XXXXXXXXXX) and always send 91XXXXXXXXXX.
-    """
-    digits = re.sub(r"\D", "", str(value or ""))
-    if digits.startswith("00"):
-        digits = digits[2:]
-    if digits.startswith("+91"):
-        digits = digits[1:]
-    if digits.startswith("0") and len(digits) == 11:
-        digits = digits[1:]
-    if len(digits) == 10 and digits[0] in "6789":
-        return "91" + digits
-    if len(digits) == 12 and digits.startswith("91") and digits[2] in "6789":
-        return digits
-    raise ValueError("KOTAK_MOBILE must be a valid Indian 10-digit mobile number; "
-                     "it may be entered as 10 digits, 91XXXXXXXXXX, or +91XXXXXXXXXX.")
-
-
 class KotakNeoBroker(BrokerInterface):
     name = "KOTAK"
 
     def __init__(self):
         self.consumer_key = os.environ.get("KOTAK_CONSUMER_KEY")
         self.consumer_secret = os.environ.get("KOTAK_CONSUMER_SECRET")  # optional in v2.0.x
-        mobile_raw = os.environ.get("KOTAK_MOBILE")
-        self._mobile_error = None
-        try:
-            self.mobile = normalize_kotak_mobile(mobile_raw) if mobile_raw else None
-        except ValueError as e:
-            self.mobile = None
-            self._mobile_error = str(e)
+
+        # Neo v2 TOTP login requires the registered mobile number WITH country code.
+        # Accept 10-digit, 0XXXXXXXXXX, 91XXXXXXXXXX and +91XXXXXXXXXX in .env.
+        raw_mobile = os.environ.get("KOTAK_MOBILE", "")
+        mobile_digits = "".join(ch for ch in raw_mobile if ch.isdigit())
+        if len(mobile_digits) == 10 and mobile_digits[0] in "6789":
+            self.mobile = "91" + mobile_digits
+        elif len(mobile_digits) == 11 and mobile_digits.startswith("0"):
+            self.mobile = "91" + mobile_digits[1:]
+        elif len(mobile_digits) == 12 and mobile_digits.startswith("91"):
+            self.mobile = mobile_digits
+        else:
+            self.mobile = raw_mobile
+
         self.ucc = os.environ.get("KOTAK_UCC")
         self.mpin = os.environ.get("KOTAK_MPIN")
         self.totp_secret = os.environ.get("KOTAK_TOTP_SECRET")
@@ -288,7 +272,7 @@ class KotakNeoBroker(BrokerInterface):
         ] if not v]
         self._config_error = (
             f"Missing required Kotak env vars: {', '.join(missing)} (check ~/kotak_algo/.env)"
-            if missing else self._mobile_error
+            if missing else None
         )
         if not self.live_trading:
             logger.info("[KOTAK] Live trading disabled (LIVE_TRADING is not 'true') — "
@@ -2566,9 +2550,15 @@ def compute_margin(legs_for_margin, quantity, product="NRML"):
                 return None, "Unexpected response shape from basket margin API"
             return round(total, 2), None
         else:
+            # Kotak Neo's current compatibility layer does not expose a verified
+            # basket/leg margin calculator. Returning 0 would be dangerously misleading
+            # because the UI would display it as a real ₹0 margin requirement.
             resp = kite.order_margins(order_params)
-            total = sum(r.get("total", 0) for r in resp)
-            return round(total, 2), None
+            totals = [float(r.get("total", 0) or 0) for r in (resp or []) if isinstance(r, dict)]
+            if not totals or all(v == 0 for v in totals):
+                return None, ("Kotak Neo margin API is not available through this integration; "
+                              "verify the actual SPAN + exposure margin in Kotak Neo before trading.")
+            return round(sum(totals), 2), None
     except Exception as e:
         return None, str(e)
 
@@ -2578,7 +2568,7 @@ def estimate_charges(orders):
     Returns an approximate total charges figure (brokerage + STT + exchange fee + SEBI fee +
     GST + stamp duty) for placing this exact basket as ONE side of a trade (i.e. call this once
     for entry orders, and again separately for exit orders, to get a full round-trip estimate).
-    This is a planning estimate only — always verify against your actual Kite contract note."""
+    This is a planning estimate only — always verify against your actual Kotak Neo contract note."""
     total_brokerage = total_stt = total_exchange = total_sebi = total_stamp = 0.0
     for o in orders:
         turnover = float(o["price"]) * int(o["quantity"])
@@ -3208,6 +3198,13 @@ def build_strategy(symbol, target_delta=DEFAULT_TARGET_DELTA, wing_width_pct=DEF
         long_put = min(puts_below, key=lambda o: abs(o["strike"] - wing_put_strike_target))
 
         net_credit = (short_call["ltp"] + short_put["ltp"]) - (long_call["ltp"] + long_put["ltp"])
+        if net_credit <= 0:
+            return {"error": (
+                f"No valid credit Iron Condor at target delta {target_delta:.2f} and "
+                f"{wing_width_pct:g}% hedge width: calculated net credit is ₹{net_credit:.2f} "
+                "per share (a debit or zero-credit structure). Try a wider hedge, a different "
+                "expiry, or a different target delta."
+            )}
         call_wing = long_call["strike"] - short_call["strike"]
         put_wing = short_put["strike"] - long_put["strike"]
         max_loss_per_share = max(call_wing, put_wing) - net_credit
@@ -3260,7 +3257,7 @@ def build_strategy(symbol, target_delta=DEFAULT_TARGET_DELTA, wing_width_pct=DEF
     result["charges_note"] = ("Entry-side charges only (opening the position). If you square off "
                                "before expiry, exit-side charges apply too — see the Trade Section for "
                                "the running round-trip estimate once tracked. Approximate; verify against "
-                               "your Kite contract note.")
+                               "your Kotak Neo contract note.")
 
     # --- Enhanced trading logic: IV/HV, Expected Move, POT/POP, Trend, Vol Regime, Score ---
     rank_info = result["rank_info"]
@@ -3339,11 +3336,22 @@ def build_strategy(symbol, target_delta=DEFAULT_TARGET_DELTA, wing_width_pct=DEF
 def strategy(symbol):
     if not require_session():
         return jsonify({"error": "not_logged_in"}), 401
-    target_delta = float(request.args.get("target_delta", DEFAULT_TARGET_DELTA))
-    wing_width_pct = float(request.args.get("wing_width_pct", DEFAULT_WING_WIDTH_PCT))
-    strategy_type = request.args.get("strategy_type", "iron_condor")
-    expiry_str = request.args.get("expiry")
-    lots = int(request.args.get("lots", 1))
+    try:
+        target_delta = float(request.args.get("target_delta", DEFAULT_TARGET_DELTA))
+        wing_width_pct = float(request.args.get("wing_width_pct", DEFAULT_WING_WIDTH_PCT))
+        strategy_type = request.args.get("strategy_type", "iron_condor").lower()
+        expiry_str = request.args.get("expiry")
+        lots = int(request.args.get("lots", 1))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid strategy parameters."}), 400
+    if not (0.01 <= target_delta <= 0.49):
+        return jsonify({"error": "target_delta must be between 0.01 and 0.49."}), 400
+    if strategy_type not in ("iron_condor", "naked_strangle"):
+        return jsonify({"error": "strategy_type must be iron_condor or naked_strangle."}), 400
+    if strategy_type == "iron_condor" and not (0.5 <= wing_width_pct <= 50):
+        return jsonify({"error": "wing_width_pct must be between 0.5% and 50%."}), 400
+    if lots < 1 or lots > 50:
+        return jsonify({"error": "lots must be between 1 and 50."}), 400
     result = build_strategy(symbol, target_delta, wing_width_pct, strategy_type, expiry_str, lots)
     if "error" in result:
         return jsonify(result), 404
@@ -7234,5 +7242,5 @@ if __name__ == "__main__":
     # MUST be run with a single worker (-w 1) since the Kotak session, instrument cache, and the
     # autotrade/delta-engine background threads below are all in-process state, not shared across
     # workers.
-    print("Starting local dev server at http://localhost:5000 (use Gunicorn in production — see DEPLOYMENT.md)")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    print("Starting local dev server at http://localhost:5001 (use Gunicorn in production — see DEPLOYMENT.md)")
+    app.run(host="0.0.0.0", port=5001, debug=False)
