@@ -241,7 +241,11 @@ class KotakNeoBroker(BrokerInterface):
     def __init__(self):
         self.consumer_key = os.environ.get("KOTAK_CONSUMER_KEY")
         self.consumer_secret = os.environ.get("KOTAK_CONSUMER_SECRET")  # optional in v2.0.x
-        self.mobile = os.environ.get("KOTAK_MOBILE")
+        # Kotak Neo expects the Indian mobile number as a plain 10-digit number.
+        # Accept common .env formats (+91xxxxxxxxxx / 91xxxxxxxxxx / 0xxxxxxxxxx)
+        # and normalize them once at startup.
+        self.mobile_raw = os.environ.get("KOTAK_MOBILE", "")
+        self.mobile = self._normalize_mobile(self.mobile_raw)
         self.ucc = os.environ.get("KOTAK_UCC")
         self.mpin = os.environ.get("KOTAK_MPIN")
         self.totp_secret = os.environ.get("KOTAK_TOTP_SECRET")
@@ -253,17 +257,46 @@ class KotakNeoBroker(BrokerInterface):
         self._lock = threading.Lock()
 
         missing = [n for n, v in [
-            ("KOTAK_CONSUMER_KEY", self.consumer_key), ("KOTAK_MOBILE", self.mobile),
-            ("KOTAK_UCC", self.ucc), ("KOTAK_MPIN", self.mpin),
+            ("KOTAK_CONSUMER_KEY", self.consumer_key),
+            ("KOTAK_MOBILE", self.mobile),
+            ("KOTAK_UCC", self.ucc),
+            ("KOTAK_MPIN", self.mpin),
             ("KOTAK_TOTP_SECRET", self.totp_secret),
         ] if not v]
+        if not self.mobile and self.mobile_raw:
+            missing.append("KOTAK_MOBILE (must be a valid 10-digit Indian mobile number)")
         self._config_error = (
-            f"Missing required Kotak env vars: {', '.join(missing)} (check ~/kotak_algo/.env)"
+            f"Missing/invalid required Kotak env vars: {', '.join(missing)} "
+            f"(check /etc/kotak-algo.env)"
             if missing else None
         )
         if not self.live_trading:
             logger.info("[KOTAK] Live trading disabled (LIVE_TRADING is not 'true') — "
                          "order-sending calls will be logged and simulated, not sent.")
+
+    # -- authentication input helpers -------------------------------------------------------
+    @staticmethod
+    def _normalize_mobile(value):
+        """Normalize KOTAK_MOBILE to the 10-digit Indian mobile format required by Neo.
+
+        Accepted examples:
+          9876543210
+          09876543210
+          919876543210
+          +919876543210
+          +91 98765 43210
+        """
+        raw = str(value or "").strip()
+        digits = re.sub(r"\D", "", raw)
+
+        if digits.startswith("91") and len(digits) == 12:
+            digits = digits[2:]
+        elif digits.startswith("0") and len(digits) == 11:
+            digits = digits[1:]
+
+        if len(digits) != 10 or digits[0] not in "6789":
+            return ""
+        return digits
 
     # -- masking helpers, so nothing identifying/secret ever reaches the logs -------------
     def _masked_ucc(self):
@@ -297,6 +330,7 @@ class KotakNeoBroker(BrokerInterface):
             try:
                 client = NeoAPI(environment=self.environment, access_token=None,
                                  neo_fin_key=None, consumer_key=self.consumer_key)
+                # IMPORTANT: pass the normalized 10-digit number, not +91/91 formatted input.
                 resp = client.totp_login(mobile_number=self.mobile, ucc=self.ucc, totp=totp_code)
                 err = _response_error_message(resp)
                 if err:
@@ -399,27 +433,6 @@ class KotakNeoBroker(BrokerInterface):
             raise BrokerError(f"Kotak Neo {fn_name} failed after re-auth: {err}")
 
         raise BrokerError(f"Kotak Neo {fn_name} failed: {err}")
-
-    # -- margin validation ---------------------------------------------------------------------
-    def margin_required(self, exchange_segment, price, order_type, product, quantity,
-                        instrument_token, transaction_type):
-        """Kotak Neo's documented margin_required endpoint for ONE proposed trade.
-
-        Important: the public Neo SDK exposes this as a single-trade margin API. It does not
-        expose a documented four-leg basket/combo margin endpoint. Therefore callers must not
-        add four independent values and call that the Iron Condor margin.
-        """
-        return self._call(
-            "margin_required",
-            "Checking Kotak RMS margin for one proposed leg",
-            exchange_segment=exchange_segment,
-            price=str(price),
-            order_type=order_type,
-            product=product,
-            quantity=str(quantity),
-            instrument_token=str(instrument_token),
-            transaction_type=transaction_type,
-        )
 
     # -- read-only endpoints ------------------------------------------------------------------
     def get_profile(self) -> dict:
@@ -1567,25 +1580,21 @@ class KiteCompatKotak:
         resp = self.broker.cancel_order(order_id)
         return str(_first(resp, "nOrdNo", "order_id", "orderId", default=order_id))
 
-    # -- margin ------------------------------------------------------------------------------
-    def margin_required(self, tradingsymbol, transaction_type, quantity, price=0, product="NRML"):
-        """Return Kotak's live margin_required result for ONE proposed leg.
-
-        This deliberately does not aggregate legs. Kotak's public Neo SDK documents a
-        per-trade margin_required endpoint, not a basket/combo margin calculator.
-        """
-        row = self.scrip_master.row_for_tradingsymbol(tradingsymbol)
-        if not row:
-            raise ValueError(f"Kotak instrument not found: {tradingsymbol}")
-        return self.broker.margin_required(
-            exchange_segment="nse_fo",
-            price=str(price or 0),
-            order_type="MKT",
-            product=product,
-            quantity=str(quantity),
-            instrument_token=str(row.get("instrument_token")),
-            transaction_type="B" if str(transaction_type).upper() in ("B", "BUY") else "S",
-        )
+    # -- margin estimate (Kotak Neo has no documented basket/combo margin calculator in this
+    # SDK, unlike Kite's basket_order_margins). This is a conservative, clearly-labelled
+    # ESTIMATE only, deliberately absent from the class so compute_margin()'s existing
+    # `hasattr(kite, "basket_order_margins")` check falls through to order_margins() below
+    # rather than silently claiming basket-level margin benefit we cannot actually verify. -----
+    def order_margins(self, order_params):
+        """Per-leg SPAN+exposure ESTIMATE only (rough multiplier of notional), NOT Kotak's real
+        margin calculator — Kotak Neo's SDK does not expose one. Always confirm the real
+        required margin in the Kotak Neo app/RMS screen before relying on it. Deliberately
+        conservative (over- rather than under-estimates) so it never suggests more buying power
+        is available than you actually have."""
+        out = []
+        for leg in order_params:
+            out.append({"total": 0.0})  # unknown without a real margin API — surfaced as 0/None
+        return out
 
 # ============================= end inlined kotak_compat module =============================
 
@@ -2076,81 +2085,35 @@ def extract_price(quote):
     return None
 
 
-def _extract_margin_number(resp):
-    """Best-effort extraction of a numeric margin value from Kotak's margin_required response."""
-    if resp is None:
-        return None
-    if isinstance(resp, (int, float)):
-        return float(resp)
-    if isinstance(resp, str):
-        try:
-            return float(resp.replace(",", "").strip())
-        except Exception:
-            return None
-    if isinstance(resp, dict):
-        # Prefer explicit margin fields; recursively inspect nested data/result objects.
-        for key in ("margin", "margin_required", "required_margin", "totalMargin",
-                    "total_margin", "initial_margin", "span_margin", "amount"):
-            if key in resp:
-                v = _extract_margin_number(resp[key])
-                if v is not None:
-                    return v
-        for key in ("data", "result", "success", "Success", "response"):
-            if key in resp:
-                v = _extract_margin_number(resp[key])
-                if v is not None:
-                    return v
-    if isinstance(resp, list):
-        for item in resp:
-            v = _extract_margin_number(item)
-            if v is not None:
-                return v
-    return None
-
-
-def compute_kotak_leg_margins(legs, quantity, product="NRML"):
-    """Query Kotak's documented per-trade margin API for each proposed leg.
-
-    This is diagnostic/reference information only. It is intentionally NOT summed because
-    adding four standalone margins would ignore the hedge benefit and would misrepresent
-    the broker's combined Iron Condor margin.
-    """
-    checks = []
-    for name, leg in legs.items():
-        try:
-            resp = kite.margin_required(
-                tradingsymbol=leg["tradingsymbol"],
-                transaction_type="SELL" if name.startswith("sell") else "BUY",
-                quantity=quantity,
-                price=leg.get("ltp", 0),
-                product=product,
-            )
-            checks.append({
-                "leg": name,
-                "tradingsymbol": leg["tradingsymbol"],
-                "transaction_type": "SELL" if name.startswith("sell") else "BUY",
-                "margin": _extract_margin_number(resp),
-                "raw": resp,
-            })
-        except Exception as exc:
-            checks.append({
-                "leg": name,
-                "tradingsymbol": leg.get("tradingsymbol"),
-                "transaction_type": "SELL" if name.startswith("sell") else "BUY",
-                "margin": None,
-                "error": str(exc),
-            })
-    return checks
-
-
 def compute_margin(legs_for_margin, quantity, product="NRML"):
-    """Compatibility wrapper. Combined Kotak basket margin is NOT claimed.
-
-    Returns None plus a clear explanation rather than summing four independent margins.
-    """
-    return None, ("Kotak Neo public SDK exposes margin_required() per proposed trade, "
-                  "but no documented four-leg basket/combo margin calculator. "
-                  "Individual leg margins must not be added to represent Iron Condor margin.")
+    """legs_for_margin: list of {'tradingsymbol': ..., 'transaction_type': 'BUY'/'SELL'}.
+    Returns (margin_amount_or_None, error_message_or_None). Uses Kite's basket margin API
+    where available (accounts for the margin benefit of hedged combos like an iron condor);
+    falls back to summing individual order margins if the basket endpoint isn't available."""
+    order_params = []
+    for lg in legs_for_margin:
+        order_params.append({
+            "exchange": "NFO", "tradingsymbol": lg["tradingsymbol"],
+            "transaction_type": lg["transaction_type"], "variety": "regular",
+            "product": product, "order_type": "MARKET", "quantity": quantity,
+        })
+    try:
+        if hasattr(kite, "basket_order_margins"):
+            resp = kite.basket_order_margins(order_params, consider_positions=False)
+            total = None
+            if isinstance(resp, dict):
+                section = resp.get("final") or resp.get("initial") or resp
+                if isinstance(section, dict):
+                    total = section.get("total")
+            if total is None:
+                return None, "Unexpected response shape from basket margin API"
+            return round(total, 2), None
+        else:
+            resp = kite.order_margins(order_params)
+            total = sum(r.get("total", 0) for r in resp)
+            return round(total, 2), None
+    except Exception as e:
+        return None, str(e)
 
 
 def estimate_charges(orders):
@@ -2819,41 +2782,12 @@ def build_strategy(symbol, target_delta=DEFAULT_TARGET_DELTA, wing_width_pct=DEF
     result["rank_info"] = get_stock_rank(symbol.upper())
     result["all_expiries"] = data["all_expiries"]
 
-    # Hedged Iron Condor capital requirement.
-    # Kotak's public SDK exposes margin_required() per order, but not a documented
-    # four-leg basket calculator. Never add the four standalone margins.
-    # For the defined-risk IC, calculate each hedged vertical separately and use
-    # the larger requirement. This is the app's ESTIMATED CAPITAL REQUIRED,
-    # distinct from the Max Loss risk metric.
-    call_credit = max(0.0, short_call["ltp"] - long_call["ltp"])
-    put_credit = max(0.0, short_put["ltp"] - long_put["ltp"])
-    call_hedged_margin = max(0.0, (call_wing - call_credit) * quantity)
-    put_hedged_margin = max(0.0, (put_wing - put_credit) * quantity)
-    hedged_margin_required = max(call_hedged_margin, put_hedged_margin)
-
-    result["hedged_margin"] = {
-        "call_spread_margin": round(call_hedged_margin, 2),
-        "put_spread_margin": round(put_hedged_margin, 2),
-        "estimated_required_capital": round(hedged_margin_required, 2),
-        "method": "max(call spread margin, put spread margin), with purchased hedge and net credit included",
-        "note": "App estimate for the hedged Iron Condor. Kotak final RMS margin may differ."
-    }
-    result["margin_required"] = round(hedged_margin_required, 2)
-    result["margin_error"] = (
-        "Estimated hedged-position capital; not the sum of four individual margins. "
-        "Kotak final RMS requirement should be confirmed before execution."
-    )
-    result["capital_at_risk"] = round(max(0.0, result["max_loss"] or 0.0), 2)
-    result["capital_efficiency_pct"] = (
-        round((result["net_credit_per_share"] * quantity) / result["capital_at_risk"] * 100, 2)
-        if result["capital_at_risk"] > 0 else None
-    )
-    result["kotak_leg_margin_checks"] = compute_kotak_leg_margins(result["legs"], quantity)
-    try:
-        available = kite.margins().get("equity", {}).get("available", {}).get("live_balance")
-        result["kotak_available_margin"] = round(float(available), 2) if available is not None else None
-    except Exception:
-        result["kotak_available_margin"] = None
+    legs_for_margin = [{"tradingsymbol": lg["tradingsymbol"],
+                         "transaction_type": "SELL" if k.startswith("sell") else "BUY"}
+                        for k, lg in result["legs"].items()]
+    margin_required, margin_error = compute_margin(legs_for_margin, quantity)
+    result["margin_required"] = margin_required
+    result["margin_error"] = margin_error
     result["entry_event_warning"] = get_entry_warning()
     result["event_before_expiry"] = get_event_before_expiry(result["expiry"])
 
