@@ -139,18 +139,22 @@ IVR_MIN_HISTORY_DAYS = 60        # genuine rank only after a meaningful history 
 # but the final ranking is based on the ACTUAL four legs proposed for the condor.
 MIN_ATM_TOTAL_OI = 500
 MAX_ATM_SPREAD_PCT = 4.0
-IC_MIN_LEG_OI = 150
-IC_MAX_LEG_SPREAD_PCT = 8.0
-IC_MIN_TOTAL_VOLUME = 50
-IC_MIN_CREDIT_TO_MAX_LOSS = 0.15
-IC_MIN_CUSHION_EM = 0.90
+IC_MIN_LEG_OI = 25
+IC_MAX_LEG_SPREAD_PCT = 15.0
+IC_MIN_TOTAL_VOLUME = 10
+IC_MIN_SHORT_OI = 200
+IC_MAX_SHORT_SPREAD_PCT = 7.0
+IC_MIN_SHORT_VOLUME = 10
+IC_MIN_CREDIT_TO_MAX_LOSS = 0.08
+IC_MIN_CUSHION_EM = 0.75
+IC_CHAIN_STRIKE_RANGE_PCT = 0.30
 IC_PREFERRED_DTE_LOW = 21
 IC_PREFERRED_DTE_HIGH = 35
 IC_MIN_DTE = 14
 IC_MAX_DTE = 50
 IC_DEFAULT_SHORT_DELTA_LOW = 0.15
 IC_DEFAULT_SHORT_DELTA_HIGH = 0.20
-IC_WING_WIDTHS_PCT = (0.025, 0.035, 0.05, 0.07)
+IC_WING_WIDTHS_PCT = (0.02, 0.025, 0.035, 0.05, 0.07, 0.10)
 
 # Final IC score: volatility richness 25, range quality 20, expected-move cushion 20,
 # four-leg liquidity 15, trade economics 15, event risk 5.
@@ -1359,8 +1363,8 @@ def build_ic_candidate_from_chain(symbol, spot, expiry, chain, target_delta=0.18
     if not calls or not puts: return None
     ct = float(call_delta if call_delta is not None else target_delta)
     pt = float(put_delta if put_delta is not None else target_delta)
-    call_candidates = [o for o in calls if max(0.10,ct-0.04) <= abs(o["delta"]) <= min(0.30,ct+0.04)]
-    put_candidates = [o for o in puts if max(0.10,pt-0.04) <= abs(o["delta"]) <= min(0.30,pt+0.04)]
+    call_candidates = [o for o in calls if max(0.10,ct-0.06) <= abs(o["delta"]) <= min(0.30,ct+0.06)]
+    put_candidates = [o for o in puts if max(0.10,pt-0.06) <= abs(o["delta"]) <= min(0.30,pt+0.06)]
     if not call_candidates: call_candidates = [min(calls, key=lambda o: abs(abs(o["delta"]) - ct))]
     if not put_candidates: put_candidates = [min(puts, key=lambda o: abs(abs(o["delta"]) - pt))]
     best = None
@@ -1729,59 +1733,125 @@ def screener():
     for o in nfo:
         if o["segment"]=="NFO-OPT": opts_by_sym.setdefault(o["name"],[]).append(o)
     evaluated=[]
-    for r in base[:35]:
+    evaluation_errors=[]
+    deep_evaluated=0
+    # Deep-evaluate the complete usable F&O stock universe. The preliminary score is used
+    # for ordering/caching only; it must not silently remove stocks from IC discovery.
+    for r in base:
         sym=r["symbol"]
-        if r["fo_banned_today"] or not r.get("atm_iv_pct"): continue
+        if r["fo_banned_today"] or not r.get("atm_iv_pct"):
+            continue
         opts=opts_by_sym.get(sym,[])
         expiries=sorted({o["expiry"] for o in opts if min_dte <= (o["expiry"]-today).days <= max_dte})
-        if not expiries: continue
-        # Prefer 21-35 DTE but evaluate all configured expiries and keep the best actual IC.
-        expiry_candidates=sorted(expiries,key=lambda e:(0 if IC_PREFERRED_DTE_LOW <= (e-today).days <= IC_PREFERRED_DTE_HIGH else 1,abs((e-today).days-28)))[:1]
+        if not expiries:
+            continue
+        deep_evaluated += 1
         best=None
-        for exp in expiry_candidates:
-            subset=[o for o in opts if o["expiry"]==exp]
+        # Evaluate every available expiry in the requested DTE window. This prevents a
+        # poor nearest expiry from hiding a much better 21-35 DTE or later monthly IC.
+        for exp in expiries:
+            dte=(exp-today).days
+            # Only quote a practical strike band around spot. The target deltas and hedge
+            # widths used below are inside this band, while the narrower quote set keeps
+            # the full-universe scan manageable.
+            subset=[o for o in opts if o["expiry"]==exp and o.get("strike",0) > 0]
+            if not subset:
+                continue
             data,err=fetch_chain_quotes_for_expiry(sym,exp,subset)
-            if err: continue
+            if err:
+                evaluation_errors.append({"symbol":sym,"expiry":str(exp),"error":err})
+                continue
             ic=build_ic_candidate_from_chain(sym,data["spot"],exp,data["chain"],target_delta=target_delta,lots=1)
-            if ic and (best is None or ic["selection_score"]>best["selection_score"]): best={**ic,"expiry":str(exp),"dte":(exp-today).days,"lot_size":data["lot_size"]}
-        if not best: continue
-        # Real four-leg liquidity gate.
-        legs=[best[k] for k in ("sell_call","buy_call","sell_put","buy_put")]
-        spreads=[x.get("spread_pct") for x in legs if x.get("spread_pct") is not None]
-        min_oi=min(x.get("oi",0) for x in legs); total_vol=sum(x.get("volume",0) for x in legs)
-        leg_liq_ok=(min_oi>=IC_MIN_LEG_OI and (not spreads or max(spreads)<=IC_MAX_LEG_SPREAD_PCT) and total_vol>=IC_MIN_TOTAL_VOLUME)
-        # Range score from trend engine.
+            if ic and (best is None or ic["selection_score"]>best["selection_score"]):
+                best={**ic,"expiry":str(exp),"dte":dte,"lot_size":data["lot_size"]}
+        if not best:
+            continue
+
+        sc,lc,sp,lp=[best[k] for k in ("sell_call","buy_call","sell_put","buy_put")]
+        short_legs=[sc,sp]
+        hedge_legs=[lc,lp]
+        all_legs=[sc,lc,sp,lp]
+        spreads=[x.get("spread_pct") for x in all_legs if x.get("spread_pct") is not None]
+        short_spreads=[x.get("spread_pct") for x in short_legs if x.get("spread_pct") is not None]
+        hedge_spreads=[x.get("spread_pct") for x in hedge_legs if x.get("spread_pct") is not None]
+        short_oi=[x.get("oi",0) for x in short_legs]
+        hedge_oi=[x.get("oi",0) for x in hedge_legs]
+        short_vol=[x.get("volume",0) for x in short_legs]
+        total_vol=sum(x.get("volume",0) for x in all_legs)
+
+        # Liquidity is asymmetric by design: short premium legs need strong liquidity;
+        # hedge legs only need to be executable. Do not let one far-OTM hedge silently
+        # kill an otherwise liquid condor.
+        short_liq_ok=(min(short_oi)>=IC_MIN_SHORT_OI and
+                      (not short_spreads or max(short_spreads)<=IC_MAX_SHORT_SPREAD_PCT) and
+                      min(short_vol)>=IC_MIN_SHORT_VOLUME)
+        hedge_liq_ok=(min(hedge_oi)>=IC_MIN_LEG_OI and
+                      (not hedge_spreads or max(hedge_spreads)<=IC_MAX_LEG_SPREAD_PCT))
+        leg_liq_ok=short_liq_ok and hedge_liq_ok and total_vol>=IC_MIN_TOTAL_VOLUME
+
+        # Range/trend score. Strong directional regimes remain a serious warning, but are
+        # scored so the screener can still show the opportunity instead of returning zero.
         trend=get_trend_regime(sym)
         trend_ok=not trend.get("error")
         if trend_ok:
             reg=trend.get("regime","")
-            range_score=95 if reg=="Range Bound" else 75 if reg in ("Transitioning","Volatile / Mixed") else 20
+            range_score=95 if reg=="Range Bound" else 75 if reg in ("Transitioning","Volatile / Mixed") else 30
             if trend.get("avoid_premium_selling"): range_score=15
         else: range_score=50
+
         iv_score=(r.get("iv_rank_pct") if r.get("iv_rank_pct") is not None else r.get("pre_score",50))
         ivhv=(r.get("iv_hv") or {}).get("ratio")
-        if ivhv is not None: iv_score=0.55*iv_score+0.45*min(100,max(0,(ivhv-0.8)/0.8*100))
+        if ivhv is not None:
+            iv_score=0.55*iv_score+0.45*min(100,max(0,(ivhv-0.8)/0.8*100))
+
         cushion=min(best["ce_cushion"],best["pe_cushion"])
-        cushion_score=score_band(cushion,[(0.8,20),(1.0,45),(1.15,65),(1.3,80),(1.5,95),(999,100)])
+        cushion_score=score_band(cushion,[(0.75,20),(0.90,35),(1.00,50),(1.15,70),(1.30,85),(1.50,95),(999,100)])
         credit_ratio=best["credit"]/best["max_loss"] if best["max_loss"] else 0
-        econ_score=min(100,max(0,credit_ratio/0.5*100))
+        econ_score=score_band(credit_ratio,[(0.08,20),(0.10,30),(0.15,50),(0.20,65),(0.25,78),(0.35,92),(0.50,100),(999,100)])
+
+        # Separate short/hedge liquidity scoring. A wide hedge spread is penalised, not
+        # treated as equivalent to a wide short spread.
+        def spread_score(vals, scale):
+            return sum(min(100,max(0,100-(v/scale)*100)) for v in vals)/len(vals) if vals else 60
+        short_spread_score=spread_score(short_spreads,IC_MAX_SHORT_SPREAD_PCT)
+        hedge_spread_score=spread_score(hedge_spreads,IC_MAX_LEG_SPREAD_PCT)
+        short_oi_score=sum(min(100,math.log10(max(x,1))/4*100) for x in short_oi)/len(short_oi)
+        hedge_oi_score=sum(min(100,math.log10(max(x,1))/4*100) for x in hedge_oi)/len(hedge_oi)
+        liquidity_score=0.55*(0.65*short_spread_score+0.35*short_oi_score)+0.45*(0.65*hedge_spread_score+0.35*hedge_oi_score)
+        if not short_liq_ok: liquidity_score=min(liquidity_score,45)
+        elif not hedge_liq_ok: liquidity_score=min(liquidity_score,65)
+
         event_score,flags=ic_event_risk(sym,best["expiry"])
-        liquidity_score=best["liquidity_score"] if leg_liq_ok else min(best["liquidity_score"],35)
-        final=(IC_SCORE_WEIGHTS["iv"]*iv_score+IC_SCORE_WEIGHTS["range"]*range_score+IC_SCORE_WEIGHTS["cushion"]*cushion_score+
-               IC_SCORE_WEIGHTS["liquidity"]*liquidity_score+IC_SCORE_WEIGHTS["economics"]*econ_score+IC_SCORE_WEIGHTS["event"]*event_score)
+        final=(IC_SCORE_WEIGHTS["iv"]*iv_score+IC_SCORE_WEIGHTS["range"]*range_score+
+               IC_SCORE_WEIGHTS["cushion"]*cushion_score+IC_SCORE_WEIGHTS["liquidity"]*liquidity_score+
+               IC_SCORE_WEIGHTS["economics"]*econ_score+IC_SCORE_WEIGHTS["event"]*event_score)
+
+        # Hard rejection is reserved for genuinely untradeable structures. Cushion and
+        # credit/economics are now scored rather than creating artificial pass/fail cliffs.
         hard_reasons=[]
-        if not leg_liq_ok: hard_reasons.append("four-leg liquidity failed")
-        if trend_ok and trend.get("avoid_premium_selling"): hard_reasons.append("strong trend")
-        if credit_ratio<IC_MIN_CREDIT_TO_MAX_LOSS: hard_reasons.append("low credit/max-loss")
-        if cushion<IC_MIN_CUSHION_EM: hard_reasons.append("short strike too close to expected move")
-        r.update({"ic_score":round(final,1),"ic_label":"Excellent" if final>=80 else "Good" if final>=65 else "Average" if final>=50 else "Avoid",
-                  "ic_expiry":best["expiry"],"ic_dte":best["dte"],"ic_credit_per_share":round(best["credit"],2),
-                  "ic_max_loss_per_share":round(best["max_loss"],2),"ic_credit_max_loss_pct":round(credit_ratio*100,1),
-                  "ic_pop_pct":best["probability_of_profit"],"ic_ce_cushion_em":round(best["ce_cushion"],2),"ic_pe_cushion_em":round(best["pe_cushion"],2),
-                  "ic_liquidity_score":round(liquidity_score,1),"ic_min_leg_oi":min_oi,"ic_total_leg_volume":total_vol,
-                  "ic_max_leg_spread_pct":round(max(spreads),2) if spreads else None,"trend_regime":trend.get("regime") if trend_ok else None,
-                  "trend_adx":trend.get("adx14") if trend_ok else None,"event_score":event_score,"event_flags":flags,"hard_reasons":hard_reasons,
-                  "ic_legs":{"sell_call":best["sell_call"]["strike"],"buy_call":best["buy_call"]["strike"],"sell_put":best["sell_put"]["strike"],"buy_put":best["buy_put"]["strike"]}})
+        if not short_liq_ok: hard_reasons.append("short-leg liquidity failed")
+        if not hedge_liq_ok: hard_reasons.append("hedge-leg liquidity weak")
+        if total_vol<IC_MIN_TOTAL_VOLUME: hard_reasons.append("very low four-leg volume")
+        if credit_ratio<0.08: hard_reasons.append("very low credit/max-loss")
+        if cushion<0.75: hard_reasons.append("short strike inside 0.75x expected move")
+        if best["credit"]<=0 or best["max_loss"]<=0: hard_reasons.append("invalid risk/reward")
+
+        r.update({"ic_score":round(final,1),
+                  "ic_label":"Excellent" if final>=80 else "Good" if final>=65 else "Average" if final>=50 else "Watch",
+                  "ic_expiry":best["expiry"],"ic_dte":best["dte"],
+                  "ic_credit_per_share":round(best["credit"],2),"ic_max_loss_per_share":round(best["max_loss"],2),
+                  "ic_credit_max_loss_pct":round(credit_ratio*100,1),"ic_pop_pct":best["probability_of_profit"],
+                  "ic_ce_cushion_em":round(best["ce_cushion"],2),"ic_pe_cushion_em":round(best["pe_cushion"],2),
+                  "ic_liquidity_score":round(liquidity_score,1),"ic_min_leg_oi":min(x.get("oi",0) for x in all_legs),
+                  "ic_min_short_oi":min(short_oi),"ic_min_hedge_oi":min(hedge_oi),"ic_total_leg_volume":total_vol,
+                  "ic_max_leg_spread_pct":round(max(spreads),2) if spreads else None,
+                  "ic_max_short_spread_pct":round(max(short_spreads),2) if short_spreads else None,
+                  "ic_max_hedge_spread_pct":round(max(hedge_spreads),2) if hedge_spreads else None,
+                  "ic_short_liquidity_ok":short_liq_ok,"ic_hedge_liquidity_ok":hedge_liq_ok,
+                  "trend_regime":trend.get("regime") if trend_ok else None,"trend_adx":trend.get("adx14") if trend_ok else None,
+                  "event_score":event_score,"event_flags":flags,"hard_reasons":hard_reasons,
+                  "ic_legs":{"sell_call":best["sell_call"]["strike"],"buy_call":best["buy_call"]["strike"],
+                             "sell_put":best["sell_put"]["strike"],"buy_put":best["buy_put"]["strike"]}})
         evaluated.append(r)
     eligible=[r for r in evaluated if not r["hard_reasons"]]
     eligible.sort(key=lambda x:x["ic_score"],reverse=True)
@@ -1796,11 +1866,13 @@ def screener():
             r["event_score"],r["event_flags"]=ic_event_risk(r["symbol"],r["ic_expiry"],r.get("headlines"))
     for r in top: r["iv_trend"]=get_iv_trend_from_history(r["symbol"],hist)
     SCREENER_CACHE["results"]=eligible+excluded; SCREENER_CACHE["fetched_at"]=now_ist()
-    return jsonify({"count":len(base),"eligible_count":len(eligible),"stocks":top,"excluded_sample":excluded[:10],
+    return jsonify({"count":len(base),"eligible_count":len(eligible),"stocks":top,"excluded_sample":excluded[:10],"deep_evaluated":deep_evaluated,
                     "ban_list_note":"F&O ban list checked; banned symbols are excluded." if bans is not None else "F&O ban list unavailable — verify manually.",
                     "config":{"target_delta":target_delta,"min_dte":min_dte,"max_dte":max_dte,"preferred_dte":[IC_PREFERRED_DTE_LOW,IC_PREFERRED_DTE_HIGH],
-                              "weights":IC_SCORE_WEIGHTS},
-                    "note":"Iron-Condor-specific ranking: IV richness 25%, range quality 20%, expected-move cushion 20%, four-leg liquidity 15%, economics 15%, event risk 5%. The score is a heuristic, not a backtest or probability guarantee. Kite supplies quotes/depth/OI/volume; earnings dates are not supplied by Kite Connect and are not treated as verified here."})
+                              "weights":IC_SCORE_WEIGHTS,"evaluated_universe":deep_evaluated,
+                              "short_leg_min_oi":IC_MIN_SHORT_OI,"short_leg_max_spread_pct":IC_MAX_SHORT_SPREAD_PCT,
+                              "hedge_min_oi":IC_MIN_LEG_OI,"hedge_max_spread_pct":IC_MAX_LEG_SPREAD_PCT},
+                    "note":"Full-universe Iron-Condor ranking. Every usable F&O stock and every expiry in the requested DTE window is evaluated; multiple delta/wing combinations are considered. Liquidity is asymmetric: short premium legs are held to a stronger execution standard than far-OTM hedges. Cushion and credit/max-loss are scored rather than treated as arbitrary pass/fail cliffs. The score is a heuristic, not a backtest or probability guarantee. Kite supplies quotes/depth/OI/volume; earnings dates are not supplied by Kite Connect and are not treated as verified here."})
 
 
 def get_stock_rank(symbol):
