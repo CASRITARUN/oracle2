@@ -59,8 +59,8 @@ from typing import List, Optional, Callable, Dict, Any, Tuple
 # this process starts) — do NOT hardcode real keys/secrets directly in this file,
 # especially if this file is ever shared, committed to git, or pasted anywhere.
 # ---------------------------------------------------------------------------
-API_KEY = os.environ.get("KITE_API_KEY", "").strip()
-API_SECRET = os.environ.get("KITE_API_SECRET", "").strip()
+API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
+API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
 REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
 
 # If your network does TLS interception (common on office/government networks — you'll see
