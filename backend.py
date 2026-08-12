@@ -235,17 +235,33 @@ def _response_error_message(resp):
     return None
 
 
+def normalize_kotak_mobile(value):
+    """Normalize common Indian mobile formats to the 10-digit value expected by Neo.
+
+    Accepted examples: 9876543210, +919876543210, 919876543210, 09876543210.
+    Quotes/whitespace/separators are removed. Returns None for an invalid value.
+    """
+    if value is None:
+        return None
+    s = str(value).strip().strip('\"\'')
+    digits = re.sub(r"\D", "", s)
+    if digits.startswith("91") and len(digits) == 12:
+        digits = digits[2:]
+    elif digits.startswith("0") and len(digits) == 11:
+        digits = digits[1:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return digits
+    return None
+
+
 class KotakNeoBroker(BrokerInterface):
     name = "KOTAK"
 
     def __init__(self):
         self.consumer_key = os.environ.get("KOTAK_CONSUMER_KEY")
         self.consumer_secret = os.environ.get("KOTAK_CONSUMER_SECRET")  # optional in v2.0.x
-        # Kotak Neo TOTP login expects a valid 10-digit Indian mobile number.
-        # Accept common .env formats such as +919876543210, 919876543210,
-        # 09876543210, or 9876543210 and normalize them before login.
         self.mobile_raw = os.environ.get("KOTAK_MOBILE", "")
-        self.mobile = self._normalize_mobile(self.mobile_raw)
+        self.mobile = normalize_kotak_mobile(self.mobile_raw)
         self.ucc = os.environ.get("KOTAK_UCC")
         self.mpin = os.environ.get("KOTAK_MPIN")
         self.totp_secret = os.environ.get("KOTAK_TOTP_SECRET")
@@ -257,37 +273,20 @@ class KotakNeoBroker(BrokerInterface):
         self._lock = threading.Lock()
 
         missing = [n for n, v in [
-            ("KOTAK_CONSUMER_KEY", self.consumer_key),
-            ("KOTAK_MOBILE", self.mobile),
-            ("KOTAK_UCC", self.ucc),
-            ("KOTAK_MPIN", self.mpin),
+            ("KOTAK_CONSUMER_KEY", self.consumer_key), ("KOTAK_MOBILE", self.mobile),
+            ("KOTAK_UCC", self.ucc), ("KOTAK_MPIN", self.mpin),
             ("KOTAK_TOTP_SECRET", self.totp_secret),
         ] if not v]
+        config_errors = list(missing)
         if self.mobile_raw and not self.mobile:
-            self._config_error = (
-                "KOTAK_MOBILE is invalid. Enter the 10-digit Indian mobile number "
-                "(for example 9876543210) in /etc/kotak-algo.env."
-            )
+            config_errors.append("KOTAK_MOBILE (must be a valid 10-digit Indian mobile number)")
         self._config_error = (
-            f"Missing required Kotak env vars: {', '.join(missing)} (check ~/kotak_algo/.env)"
-            if missing else None
+            f"Invalid/missing Kotak configuration: {', '.join(config_errors)} (check /etc/kotak-algo.env)"
+            if config_errors else None
         )
         if not self.live_trading:
             logger.info("[KOTAK] Live trading disabled (LIVE_TRADING is not 'true') — "
                          "order-sending calls will be logged and simulated, not sent.")
-
-    @staticmethod
-    def _normalize_mobile(value):
-        """Normalize KOTAK_MOBILE to the 10-digit format expected by Neo TOTP login."""
-        raw = str(value or "").strip()
-        digits = "".join(ch for ch in raw if ch.isdigit())
-        if digits.startswith("91") and len(digits) == 12:
-            digits = digits[2:]
-        elif digits.startswith("0") and len(digits) == 11:
-            digits = digits[1:]
-        if len(digits) != 10 or not digits.isdigit() or digits[0] not in "6789":
-            return None
-        return digits
 
     # -- masking helpers, so nothing identifying/secret ever reaches the logs -------------
     def _masked_ucc(self):
