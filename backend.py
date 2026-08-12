@@ -241,9 +241,9 @@ class KotakNeoBroker(BrokerInterface):
     def __init__(self):
         self.consumer_key = os.environ.get("KOTAK_CONSUMER_KEY")
         self.consumer_secret = os.environ.get("KOTAK_CONSUMER_SECRET")  # optional in v2.0.x
-        # Kotak Neo expects the Indian mobile number as a plain 10-digit number.
-        # Accept common .env formats (+91xxxxxxxxxx / 91xxxxxxxxxx / 0xxxxxxxxxx)
-        # and normalize them once at startup.
+        # Kotak Neo TOTP login expects a valid 10-digit Indian mobile number.
+        # Accept common .env formats such as +919876543210, 919876543210,
+        # 09876543210, or 9876543210 and normalize them before login.
         self.mobile_raw = os.environ.get("KOTAK_MOBILE", "")
         self.mobile = self._normalize_mobile(self.mobile_raw)
         self.ucc = os.environ.get("KOTAK_UCC")
@@ -263,39 +263,30 @@ class KotakNeoBroker(BrokerInterface):
             ("KOTAK_MPIN", self.mpin),
             ("KOTAK_TOTP_SECRET", self.totp_secret),
         ] if not v]
-        if not self.mobile and self.mobile_raw:
-            missing.append("KOTAK_MOBILE (must be a valid 10-digit Indian mobile number)")
+        if self.mobile_raw and not self.mobile:
+            self._config_error = (
+                "KOTAK_MOBILE is invalid. Enter the 10-digit Indian mobile number "
+                "(for example 9876543210) in /etc/kotak-algo.env."
+            )
         self._config_error = (
-            f"Missing/invalid required Kotak env vars: {', '.join(missing)} "
-            f"(check /etc/kotak-algo.env)"
+            f"Missing required Kotak env vars: {', '.join(missing)} (check ~/kotak_algo/.env)"
             if missing else None
         )
         if not self.live_trading:
             logger.info("[KOTAK] Live trading disabled (LIVE_TRADING is not 'true') — "
                          "order-sending calls will be logged and simulated, not sent.")
 
-    # -- authentication input helpers -------------------------------------------------------
     @staticmethod
     def _normalize_mobile(value):
-        """Normalize KOTAK_MOBILE to the 10-digit Indian mobile format required by Neo.
-
-        Accepted examples:
-          9876543210
-          09876543210
-          919876543210
-          +919876543210
-          +91 98765 43210
-        """
+        """Normalize KOTAK_MOBILE to the 10-digit format expected by Neo TOTP login."""
         raw = str(value or "").strip()
-        digits = re.sub(r"\D", "", raw)
-
+        digits = "".join(ch for ch in raw if ch.isdigit())
         if digits.startswith("91") and len(digits) == 12:
             digits = digits[2:]
         elif digits.startswith("0") and len(digits) == 11:
             digits = digits[1:]
-
-        if len(digits) != 10 or digits[0] not in "6789":
-            return ""
+        if len(digits) != 10 or not digits.isdigit() or digits[0] not in "6789":
+            return None
         return digits
 
     # -- masking helpers, so nothing identifying/secret ever reaches the logs -------------
@@ -330,7 +321,6 @@ class KotakNeoBroker(BrokerInterface):
             try:
                 client = NeoAPI(environment=self.environment, access_token=None,
                                  neo_fin_key=None, consumer_key=self.consumer_key)
-                # IMPORTANT: pass the normalized 10-digit number, not +91/91 formatted input.
                 resp = client.totp_login(mobile_number=self.mobile, ucc=self.ucc, totp=totp_code)
                 err = _response_error_message(resp)
                 if err:
