@@ -167,7 +167,7 @@
   <table id="icScreenerTable" style="display:none;">
     <thead><tr>
       <th>Rank</th><th>Symbol</th><th>IC Score</th><th>Expiry / DTE</th><th>IV Rank</th><th>IV/HV</th>
-      <th>Regime / ADX</th><th>CE Cushion</th><th>PE Cushion</th><th>Credit/Max Loss</th><th>POP</th>
+      <th>Regime / ADX</th><th>CE Δ</th><th>PE Δ</th><th>CE Cushion</th><th>PE Cushion</th><th>Credit/Max Loss</th><th>POP</th>
       <th>4-Leg Liquidity</th><th>Legs</th><th>Event</th><th></th>
     </tr></thead>
     <tbody></tbody>
@@ -178,8 +178,8 @@
     and evaluates actual four-leg IC structures across up to two best expiries per stock, prioritising the 21–35 DTE window.
     It batches the required option quotes to stay within Zerodha REST limits while still testing multiple available strikes and hedge widths. Short premium legs have a stronger
     execution threshold than far-OTM hedge legs. Expected-move cushion and credit/max-loss are scored rather than
-    treated as arbitrary pass/fail cliffs. Score weights: IV richness 25%, range quality 20%, expected-move cushion 20%,
-    four-leg liquidity 15%, economics 15%, event risk 5%.
+    treated as arbitrary pass/fail cliffs. Score weights: IV richness 20%, range quality 15%, expected-move cushion 25%,
+    four-leg liquidity 10%, economics 15%, delta quality 10%, event risk 5%. Normal mode keeps each short leg within +/-0.03 of the target delta, rejects CE/PE delta asymmetry above 0.04, and risk-adjusts extra premium using expected-move cushion.
   </div>
 </div>
 
@@ -1252,7 +1252,8 @@ async function runIcScreener(force=false) {
         <td><b>${x.symbol}</b></td><td><b>${x.ic_score}</b> ${x.ic_label||""}</td>
         <td>${x.ic_expiry||"—"} / ${x.ic_dte??"—"}</td>
         <td>${x.iv_rank_pct!=null?x.iv_rank_pct+"%":"building"}</td><td>${ivhv}</td>
-        <td>${regime}</td><td>${x.ic_ce_cushion_em??"—"}x</td><td>${x.ic_pe_cushion_em??"—"}x</td>
+        <td>${regime}</td><td>${x.ic_sell_call_delta??"—"}</td><td>${x.ic_sell_put_delta??"—"}</td>
+        <td>${x.ic_ce_cushion_em??"—"}x</td><td>${x.ic_pe_cushion_em??"—"}x</td>
         <td>${x.ic_credit_max_loss_pct??"—"}%</td><td>${x.ic_pop_pct??"—"}%</td>
         <td>${liq}<br><span style="opacity:.65">short OI ${x.ic_min_short_oi??"—"}, hedge OI ${x.ic_min_hedge_oi??"—"}</span></td>
         <td style="font-size:11px;white-space:nowrap">${legs}</td><td style="max-width:180px">${event}</td>
