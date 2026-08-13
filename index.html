@@ -1236,9 +1236,9 @@ async function runIcScreener(force=false) {
   status.textContent="Building actual four-leg ICs across the F&O universe and all selected expiries — this may take a few minutes...";
   try {
     const qs=new URLSearchParams({limit,target_delta:td,min_dte:minDte,max_dte:maxDte,force:force?"true":"false"});
-    const r=await apiFetch(`/api/screener?${qs.toString()}`);
-    const d=await r.json();
-    if(d.error){ status.textContent="Error: "+d.error; return; }
+    const r=await apiFetch(`/api/ic-screener?${qs.toString()}`);
+    const d=await r.json().catch(()=>({error:`HTTP ${r.status}`}));
+    if(!r.ok || d.error){ status.textContent="Error: "+(d.message||d.error||`HTTP ${r.status}`); return; }
     const tbody=document.querySelector("#icScreenerTable tbody"); tbody.innerHTML="";
     (d.stocks||[]).forEach((x,i)=>{
       const ivhv=x.iv_hv ? `${x.iv_hv.ratio} ${x.iv_hv.label||""}` : "—";
@@ -1259,7 +1259,7 @@ async function runIcScreener(force=false) {
       tbody.appendChild(tr);
     });
     document.getElementById("icScreenerTable").style.display="table";
-    status.textContent=`${d.count} F&O stocks scanned → ${d.config?.evaluated_universe ?? d.eligible_count ?? 0} deeply evaluated → ${d.eligible_count} IC candidates. Showing top ${d.stocks?.length||0}.`;
+    status.textContent=`${d.count} F&O stocks scanned → ${d.config?.evaluated_universe ?? d.deep_evaluated ?? 0} deeply evaluated → ${d.eligible_count} IC candidates. Showing top ${d.stocks?.length||0}.` + (d.evaluation_error_count ? ` ${d.evaluation_error_count} symbols had data errors; see server log.` : "");
     const ex=document.getElementById("icScreenerExcluded");
     if(d.excluded_sample&&d.excluded_sample.length){
       ex.innerHTML="<b>Excluded sample:</b> "+d.excluded_sample.map(x=>`${x.symbol} (${(x.hard_reasons||[]).join(", ")||"not qualified"})`).join(" · ");
