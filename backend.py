@@ -59,8 +59,8 @@ from typing import List, Optional, Callable, Dict, Any, Tuple
 # this process starts) — do NOT hardcode real keys/secrets directly in this file,
 # especially if this file is ever shared, committed to git, or pasted anywhere.
 # ---------------------------------------------------------------------------
-API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
-API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
+API_KEY = os.environ.get("KITE_API_KEY", "").strip()
+API_SECRET = os.environ.get("KITE_API_SECRET", "").strip()
 REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
 
 # If your network does TLS interception (common on office/government networks — you'll see
@@ -159,8 +159,10 @@ IC_WING_WIDTHS_PCT = (0.02, 0.025, 0.035, 0.05, 0.07, 0.10)
 # Final IC score: volatility richness 25, range quality 20, expected-move cushion 20,
 # four-leg liquidity 15, trade economics 15, event risk 5.
 IC_SCORE_WEIGHTS = {
-    "iv": 0.25, "range": 0.20, "cushion": 0.20,
-    "liquidity": 0.15, "economics": 0.15, "event": 0.05,
+    # Delta symmetry is deliberately explicit: a 0.18-delta IC should not silently
+    # become a 0.25/0.18 structure merely because the latter collects more premium.
+    "iv": 0.20, "range": 0.15, "cushion": 0.25,
+    "liquidity": 0.10, "economics": 0.15, "delta": 0.10, "event": 0.05,
 }
 SCORE_WEIGHTS = {"iv_richness": 0.40, "calmness": 0.35, "liquidity": 0.25}  # legacy display
 
@@ -1438,8 +1440,13 @@ def build_ic_candidate_from_chain(symbol, spot, expiry, chain, target_delta=0.18
     if not calls or not puts: return None
     ct = float(call_delta if call_delta is not None else target_delta)
     pt = float(put_delta if put_delta is not None else target_delta)
-    call_candidates = [o for o in calls if max(0.10,ct-0.06) <= abs(o["delta"]) <= min(0.30,ct+0.06)]
-    put_candidates = [o for o in puts if max(0.10,pt-0.06) <= abs(o["delta"]) <= min(0.30,pt+0.06)]
+    # Keep the requested short-delta meaning intact.  In normal mode the two short
+    # legs are searched within +/-0.03 delta of the requested target.  This prevents
+    # a 0.25-delta call from replacing a 0.18-delta call simply because its premium is
+    # larger.  Any permitted asymmetry is then explicitly scored below.
+    delta_tolerance = 0.03
+    call_candidates = [o for o in calls if max(0.10,ct-delta_tolerance) <= abs(o["delta"]) <= min(0.30,ct+delta_tolerance)]
+    put_candidates = [o for o in puts if max(0.10,pt-delta_tolerance) <= abs(o["delta"]) <= min(0.30,pt+delta_tolerance)]
     if not call_candidates: call_candidates = [min(calls, key=lambda o: abs(abs(o["delta"]) - ct))]
     if not put_candidates: put_candidates = [min(puts, key=lambda o: abs(abs(o["delta"]) - pt))]
     best = None
@@ -1471,13 +1478,30 @@ def build_ic_candidate_from_chain(symbol, spot, expiry, chain, target_delta=0.18
                 liquidity = 0.65 * liq_score + 0.35 * oi_score
                 econ = min(100, max(0, (credit / max_loss) / 0.5 * 100))
                 dte_score = 100 if IC_PREFERRED_DTE_LOW <= dte <= IC_PREFERRED_DTE_HIGH else max(40, 100 - abs(dte - 28) * 3)
-                score = 0.45 * liquidity + 0.35 * econ + 0.20 * dte_score
+
+                # Risk-adjust the premium advantage.  More premium is useful only if
+                # it is accompanied by enough safety cushion.  A closer short strike
+                # therefore has to earn its extra premium rather than winning on raw
+                # credit alone.
+                min_cushion = min(ce_cushion, pe_cushion)
+                cushion_component = score_band(min_cushion, [(0.75,20),(0.90,35),(1.00,50),(1.15,70),(1.30,85),(1.50,95),(999,100)])
+                delta_gap = abs(abs(sc.get("delta", 0)) - abs(sp.get("delta", 0)))
+                delta_target_error = (abs(abs(sc.get("delta", 0)) - ct) + abs(abs(sp.get("delta", 0)) - pt)) / 2.0
+                delta_symmetry_score = max(0, 100 - (delta_gap / 0.04) * 100)
+                delta_target_score = max(0, 100 - (delta_target_error / 0.03) * 100)
+                delta_score = 0.65 * delta_symmetry_score + 0.35 * delta_target_score
+                # Effective economics: credit/max-loss is discounted when cushion is poor.
+                risk_adjusted_econ = econ * (0.45 + 0.55 * cushion_component / 100.0)
+                score = (0.25 * delta_score + 0.30 * cushion_component + 0.20 * risk_adjusted_econ +
+                         0.15 * liquidity + 0.10 * dte_score)
                 candidate = {"sell_call": sc, "buy_call": lc, "sell_put": sp, "buy_put": lp,
                              "credit": credit, "max_loss": max_loss, "call_wing": cw, "put_wing": pw,
                              "expected_move": em, "ce_cushion": ce_cushion, "pe_cushion": pe_cushion,
                              "probability_of_profit": pop, "liquidity_score": liquidity,
-                             "economics_score": econ, "dte_score": dte_score, "selection_score": score,
-                             "atm_iv": atm_iv}
+                             "economics_score": econ, "risk_adjusted_economics_score": risk_adjusted_econ,
+                             "dte_score": dte_score, "delta_gap": delta_gap,
+                             "delta_target_error": delta_target_error, "delta_symmetry_score": delta_score,
+                             "selection_score": score, "atm_iv": atm_iv}
                 if best is None or candidate["selection_score"] > best["selection_score"]: best = candidate
     return best
 
@@ -2070,6 +2094,10 @@ def ic_screener():
                 iv_score=0.55*iv_score+0.45*min(100,max(0,(ivhv-0.8)/0.8*100))
             cushion=min(best["ce_cushion"],best["pe_cushion"])
             cushion_score=score_band(cushion,[(0.75,20),(0.90,35),(1.00,50),(1.15,70),(1.30,85),(1.50,95),(999,100)])
+            # Delta symmetry is a first-class IC criterion.  This is what prevents a
+            # richer 0.25-delta call from being presented as an ordinary 0.18-delta IC.
+            short_delta_gap=abs(abs(sc.get("delta",0))-abs(sp.get("delta",0)))
+            delta_score=float(best.get("delta_symmetry_score", max(0,100-(short_delta_gap/0.04)*100)))
             credit_ratio=best["credit"]/best["max_loss"] if best["max_loss"] else 0
             econ_score=score_band(credit_ratio,[(0.08,20),(0.10,30),(0.15,50),(0.20,65),(0.25,78),(0.35,92),(0.50,100),(999,100)])
             def spread_score(vals,scale):
@@ -2084,20 +2112,29 @@ def ic_screener():
             event_score,flags=ic_event_risk(sym,best["expiry"])
             final=(IC_SCORE_WEIGHTS["iv"]*iv_score+IC_SCORE_WEIGHTS["range"]*range_score+
                    IC_SCORE_WEIGHTS["cushion"]*cushion_score+IC_SCORE_WEIGHTS["liquidity"]*liquidity_score+
-                   IC_SCORE_WEIGHTS["economics"]*econ_score+IC_SCORE_WEIGHTS["event"]*event_score)
+                   IC_SCORE_WEIGHTS["economics"]*econ_score+IC_SCORE_WEIGHTS["delta"]*delta_score+
+                   IC_SCORE_WEIGHTS["event"]*event_score)
             hard_reasons=[]
             if not short_liq_ok: hard_reasons.append("short-leg liquidity failed")
             if not hedge_liq_ok: hard_reasons.append("hedge-leg liquidity weak")
             if total_vol<IC_MIN_TOTAL_VOLUME: hard_reasons.append("very low four-leg volume")
             if credit_ratio<0.08: hard_reasons.append("very low credit/max-loss")
             if cushion<0.75: hard_reasons.append("short strike inside 0.75x expected move")
+            if short_delta_gap>0.04: hard_reasons.append("short-call/put delta asymmetry exceeds 0.04")
+            if best.get("delta_target_error",0)>0.03: hard_reasons.append("short legs are too far from requested target delta")
             if best["credit"]<=0 or best["max_loss"]<=0: hard_reasons.append("invalid risk/reward")
             out=dict(r)
             out.update({"ic_score":round(final,1),"ic_label":"Excellent" if final>=80 else "Good" if final>=65 else "Average" if final>=50 else "Watch",
                         "ic_expiry":best["expiry"],"ic_dte":best["dte"],"ic_credit_per_share":round(best["credit"],2),
                         "ic_max_loss_per_share":round(best["max_loss"],2),"ic_credit_max_loss_pct":round(credit_ratio*100,1),
                         "ic_pop_pct":best["probability_of_profit"],"ic_ce_cushion_em":round(best["ce_cushion"],2),
-                        "ic_pe_cushion_em":round(best["pe_cushion"],2),"ic_liquidity_score":round(liquidity_score,1),
+                        "ic_pe_cushion_em":round(best["pe_cushion"],2),
+                        "ic_sell_call_delta":round(float(sc.get("delta",0)),3),"ic_sell_put_delta":round(float(sp.get("delta",0)),3),
+                        "ic_buy_call_delta":round(float(lc.get("delta",0)),3),"ic_buy_put_delta":round(float(lp.get("delta",0)),3),
+                        "ic_delta_gap":round(short_delta_gap,3),"ic_delta_score":round(delta_score,1),
+                        "ic_target_delta":round(target_delta,3),
+                        "ic_risk_adjusted_economics_score":round(best.get("risk_adjusted_economics_score",econ_score),1),
+                        "ic_liquidity_score":round(liquidity_score,1),
                         "ic_min_leg_oi":min(x.get("oi",0) for x in all_legs),"ic_min_short_oi":min(short_oi),
                         "ic_min_hedge_oi":min(hedge_oi),"ic_total_leg_volume":total_vol,
                         "ic_max_leg_spread_pct":round(max(spreads),2) if spreads else None,
@@ -2138,9 +2175,10 @@ def ic_screener():
                     "config":{"target_delta":target_delta,"min_dte":min_dte,"max_dte":max_dte,
                               "preferred_dte":[IC_PREFERRED_DTE_LOW,IC_PREFERRED_DTE_HIGH],"max_symbols":max_symbols,
                               "max_expiries_per_symbol":max_expiries,"weights":IC_SCORE_WEIGHTS,
+                              "delta_tolerance":0.03,"max_short_delta_gap":0.04,
                               "short_leg_min_oi":IC_MIN_SHORT_OI,"short_leg_max_spread_pct":IC_MAX_SHORT_SPREAD_PCT,
                               "hedge_min_oi":IC_MIN_LEG_OI,"hedge_max_spread_pct":IC_MAX_LEG_SPREAD_PCT},
-                    "note":"Screen 1 ranks the F&O universe; this screen uses the top ranked stocks, then batches the required option-chain instruments into Kite quote requests. It evaluates up to two preferred expiries per stock by default, prioritising 21–35 DTE, to remain within Zerodha REST limits and avoid browser 504 timeouts. The result is an actual four-leg Zerodha-tradable IC heuristic, not a backtest or guarantee."})
+                    "note":"Screen 1 ranks the F&O universe; this screen uses the top ranked stocks, then batches the required option-chain instruments into Kite quote requests. It evaluates up to two preferred expiries per stock by default, prioritising 21–35 DTE, to remain within Zerodha REST limits and avoid browser 504 timeouts. The result is an actual four-leg Zerodha-tradable IC heuristic. Normal mode keeps both short legs within +/-0.03 of the requested delta and rejects >0.04 CE/PE delta asymmetry; expected-move cushion risk-adjusts the premium/economics score. It is not a backtest or guarantee."})
 
 
 @app.route("/api/screener-health")
