@@ -357,18 +357,32 @@
     <table id="positionsTable" style="display:none;">
       <thead><tr>
         <th><input type="checkbox" id="selectAllPositions" /></th>
-        <th>Symbol</th><th>Side</th><th>Qty</th><th>Entry Price</th><th>LTP</th><th>P&amp;L</th>
-        <th>Exit Price (blank = MARKET)</th><th></th>
+        <th>Symbol</th><th>Side</th><th>Qty</th><th>Entry Price</th>
+        <th>LTP</th><th>LTP P&amp;L / Share</th><th>LTP P&amp;L Total</th>
+        <th>Bid</th><th>Ask</th><th>Market Exit Price</th>
+        <th>Exit P&amp;L / Share</th><th>Exit P&amp;L Total</th>
+        <th>Custom Exit Price</th><th></th>
       </tr></thead>
       <tbody></tbody>
     </table>
+    <div id="positionsTotals" style="display:none; margin-top:14px; padding:14px; border:1px solid var(--border); border-radius:10px; background:#11151d;">
+      <div class="row" style="gap:24px; flex-wrap:wrap;">
+        <div><span class="legend">Total LTP P&amp;L</span><br><strong id="totalLtpPnl">₹0.00</strong></div>
+        <div><span class="legend">Total Market-Exit P&amp;L</span><br><strong id="totalExitPnl">₹0.00</strong></div>
+        <div><span class="legend">LTP vs Exit Difference</span><br><strong id="totalExitGap">₹0.00</strong></div>
+      </div>
+      <div class="legend" style="margin-top:8px;">
+        LTP P&amp;L is theoretical mark-to-market. Market-Exit P&amp;L assumes an immediate executable exit: <b>LONG → Bid</b>, <b>SHORT → Ask</b>.
+        Totals are before brokerage/taxes/charges.
+      </div>
+    </div>
     <div class="legend" id="positionsEmpty">No open F&amp;O positions, or click Refresh.</div>
     <div class="legend">
-      Entry price, LTP and P&amp;L here come straight from Zerodha's live position book — this is
-      every open F&amp;O leg in your account, not just the ones this tool placed. Type a price in a
-      row and Exit (or select several with the checkboxes and click "Exit Selected") to send that
-      as a LIMIT order; leave it blank to exit at MARKET. Selecting several legs and exiting them
-      together sends one order per leg, back to back — it does not net legs against each other.
+      <b>Per-share view:</b> LTP P&amp;L/Share shows the theoretical gain/loss from Entry → LTP.
+      Market Exit Price shows the actual executable side of the market (Bid for LONG, Ask for SHORT),
+      and Exit P&amp;L/Share shows what that immediate exit would approximately realise.
+      Type a Custom Exit Price in a row and click Exit to send a LIMIT order; leave it blank to exit at MARKET.
+      Selecting several legs and exiting them together sends one order per leg.
     </div>
   </div>
 
@@ -1891,27 +1905,52 @@ function renderPositionsTable() {
   tbody.innerHTML = "";
   if (!livePositions.length) {
     document.getElementById("positionsTable").style.display = "none";
+    document.getElementById("positionsTotals").style.display = "none";
     document.getElementById("positionsEmpty").style.display = "block";
     return;
   }
   document.getElementById("positionsEmpty").style.display = "none";
+  let totalLtp = 0;
+  let totalExit = 0;
   livePositions.forEach((p, idx) => {
-    const pnlClass = (p.pnl != null && p.pnl >= 0) ? "pnl-pos" : "pnl-neg";
+    const ltpPnl = Number.isFinite(Number(p.ltp_pnl_total)) ? Number(p.ltp_pnl_total) : null;
+    const exitPnl = Number.isFinite(Number(p.exit_pnl_total)) ? Number(p.exit_pnl_total) : null;
+    if (ltpPnl != null) totalLtp += ltpPnl;
+    if (exitPnl != null) totalExit += exitPnl;
+    const ltpClass = (p.ltp_pnl_per_unit != null && p.ltp_pnl_per_unit >= 0) ? "pnl-pos" : "pnl-neg";
+    const exitClass = (p.exit_pnl_per_unit != null && p.exit_pnl_per_unit >= 0) ? "pnl-pos" : "pnl-neg";
     const sideClass = p.side === "SHORT" ? "sell" : "buy";
+    const money = v => v == null || !Number.isFinite(Number(v)) ? "—" : `₹${Number(v).toFixed(2)}`;
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><input type="checkbox" ${p._selected ? "checked" : ""} onchange="livePositions[${idx}]._selected=this.checked" /></td>
       <td>${p.tradingsymbol}</td>
       <td class="${sideClass}">${p.side}</td>
       <td>${Math.abs(p.quantity)}</td>
-      <td>₹${p.average_price}</td>
-      <td>₹${p.last_price}</td>
-      <td class="${pnlClass}">₹${p.pnl}</td>
+      <td>${money(p.average_price)}</td>
+      <td>${money(p.last_price)}</td>
+      <td class="${ltpClass}">${money(p.ltp_pnl_per_unit)}</td>
+      <td class="${ltpClass}"><b>${money(p.ltp_pnl_total)}</b></td>
+      <td>${money(p.bid)}</td>
+      <td>${money(p.ask)}</td>
+      <td><b>${money(p.exit_price)}</b><br><span class="legend">${p.side === "LONG" ? "Bid" : "Ask"}</span></td>
+      <td class="${exitClass}">${money(p.exit_pnl_per_unit)}</td>
+      <td class="${exitClass}"><b>${money(p.exit_pnl_total)}</b></td>
       <td><input type="number" step="0.05" placeholder="MARKET" style="width:90px;" value="${p._exitPrice}" onchange="livePositions[${idx}]._exitPrice=this.value" /></td>
       <td><button class="danger small-btn" onclick="exitSingleLivePosition(${idx})">Exit</button></td>`;
     tbody.appendChild(tr);
   });
   document.getElementById("positionsTable").style.display = "table";
+  const totals = document.getElementById("positionsTotals");
+  totals.style.display = "block";
+  const totalGap = totalExit - totalLtp;
+  const fmtTotal = v => `₹${Number(v).toFixed(2)}`;
+  document.getElementById("totalLtpPnl").textContent = fmtTotal(totalLtp);
+  document.getElementById("totalExitPnl").textContent = fmtTotal(totalExit);
+  document.getElementById("totalExitGap").textContent = fmtTotal(totalGap);
+  document.getElementById("totalLtpPnl").className = totalLtp >= 0 ? "pnl-pos" : "pnl-neg";
+  document.getElementById("totalExitPnl").className = totalExit >= 0 ? "pnl-pos" : "pnl-neg";
+  document.getElementById("totalExitGap").className = totalGap >= 0 ? "pnl-pos" : "pnl-neg";
 }
 
 document.getElementById("selectAllPositions").onchange = function() {
