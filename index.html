@@ -222,11 +222,15 @@
       <div class="leg-grid" id="legGrid"></div>
 
       <div class="metric-row">
-        <div class="metric profit"><div class="k">Max Profit</div><div class="v" id="m_profit"></div></div>
-        <div class="metric loss"><div class="k">Max Loss</div><div class="v" id="m_loss"></div></div>
+        <div class="metric profit"><div class="k">Max Profit (LTP)</div><div class="v" id="m_profit"></div></div>
+        <div class="metric profit"><div class="k">Max Profit (Executable Entry)</div><div class="v" id="m_exec_profit"></div></div>
+        <div class="metric loss"><div class="k">Max Loss (LTP)</div><div class="v" id="m_loss"></div></div>
+        <div class="metric loss"><div class="k">Max Loss (Executable Entry)</div><div class="v" id="m_exec_loss"></div></div>
         <div class="metric"><div class="k">Margin / Investment Required</div><div class="v" id="m_margin"></div></div>
-        <div class="metric profit"><div class="k">Net Profit After Est. Entry Charges</div><div class="v" id="m_net_profit"></div></div>
-        <div class="metric"><div class="k">Breakeven Range</div><div class="v" id="m_be"></div></div>
+        <div class="metric profit"><div class="k">Net Profit After Entry Charges (Executable)</div><div class="v" id="m_net_profit"></div></div>
+        <div class="metric"><div class="k">Net Credit: LTP / Executable</div><div class="v" id="m_credit_compare"></div></div>
+        <div class="metric"><div class="k">Entry Spread Impact</div><div class="v" id="m_spread_impact"></div></div>
+        <div class="metric"><div class="k">Breakeven: LTP / Executable</div><div class="v" id="m_be"></div></div>
       </div>
 
       <div id="s_warnings"></div>
@@ -324,10 +328,11 @@
     <table id="watchlistTable" style="display:none;">
       <thead>
         <tr><th>Symbol</th><th>Type</th><th>Qty</th><th>Entry Spot</th><th>Current Spot</th><th>Days Left</th>
-            <th>Position Value</th><th>P&amp;L</th><th>Net P&amp;L (after charges)</th><th>Prob. Success</th><th>Max Loss</th><th>Margin</th><th>Zone</th><th></th></tr>
+            <th>Position Value (LTP)</th><th>P&amp;L (LTP)</th><th>Exit P&amp;L (Bid/Ask)</th><th>Net Exit P&amp;L</th><th>Prob. Success</th><th>Max Loss</th><th>Margin</th><th>Zone</th><th></th></tr>
       </thead>
       <tbody></tbody>
     </table>
+    <div class="legend">LTP P&amp;L = theoretical mark using current LTP. Exit P&amp;L = approximate immediately realizable P&amp;L using Ask to buy back short legs and Bid to sell long legs. Net Exit P&amp;L subtracts estimated entry + exit charges.</div>
     <div class="legend" id="watchlistEmpty">No trades entered yet — use section 2 or 4 above.</div>
   </div>
 
@@ -1341,22 +1346,29 @@ document.getElementById("buildBtn").onclick = async () => {
       div.className = "leg-card";
       const potTxt = leg.probability_of_touch_pct != null
         ? `<div style="font-size:11px; color:var(--muted); margin-top:2px;">POT ${leg.probability_of_touch_pct}%</div>` : "";
-      div.innerHTML = `<div class="k">${legLabels[key]}</div><div class="v">${leg.strike} @ ₹${leg.ltp} (Δ${leg.delta})</div>${potTxt}`;
+      const baTxt=`<div style="font-size:11px;color:var(--muted);margin-top:2px;">Bid ₹${leg.bid!=null?leg.bid:"—"} · Ask ₹${leg.ask!=null?leg.ask:"—"}${leg.spread_pct!=null?` · Spread ${leg.spread_pct}%`:""}</div>`;
+      const execPrice=key.startsWith("sell")?leg.bid:leg.ask;
+      const execTxt=`<div style="font-size:11px;color:var(--muted);margin-top:2px;">Entry execution: ${execPrice!=null?"₹"+execPrice:"LTP fallback"} (${key.startsWith("sell")?"Bid":"Ask"})</div>`;
+      div.innerHTML=`<div class="k">${legLabels[key]}</div><div class="v">${leg.strike} @ ₹${leg.ltp} (Δ${leg.delta})</div>${baTxt}${execTxt}${potTxt}`;
       legGrid.appendChild(div);
     });
 
-    document.getElementById("m_profit").textContent = "₹" + d.max_profit;
-    document.getElementById("m_loss").textContent = d.max_loss === null ? "Unlimited" : "₹" + d.max_loss;
-    document.getElementById("m_margin").textContent = d.margin_required !== null && d.margin_required !== undefined
-      ? "₹" + d.margin_required : (d.margin_error ? "Unavailable" : "—");
-    document.getElementById("m_net_profit").textContent = d.net_profit_after_entry_charges !== null
-      ? "₹" + d.net_profit_after_entry_charges : "—";
-    document.getElementById("m_be").textContent = `${d.breakeven_lower} — ${d.breakeven_upper}`;
+    document.getElementById("m_profit").textContent=d.max_profit==null?"—":"₹"+d.max_profit;
+    document.getElementById("m_exec_profit").textContent=d.executable_max_profit==null?"—":"₹"+d.executable_max_profit;
+    document.getElementById("m_loss").textContent=d.max_loss===null?"Unlimited":"₹"+d.max_loss;
+    document.getElementById("m_exec_loss").textContent=d.executable_max_loss==null?"—":"₹"+d.executable_max_loss;
+    document.getElementById("m_margin").textContent=d.margin_required!==null&&d.margin_required!==undefined?"₹"+d.margin_required:(d.margin_error?"Unavailable":"—");
+    document.getElementById("m_net_profit").textContent=d.net_profit_after_entry_charges!==null?"₹"+d.net_profit_after_entry_charges:"—";
+    document.getElementById("m_credit_compare").textContent=d.net_credit_per_share!=null?`₹${d.net_credit_per_share} / ₹${d.executable_net_credit_per_share??d.net_credit_per_share}`:"—";
+    document.getElementById("m_spread_impact").textContent=d.entry_spread_impact_per_share!=null?`₹${d.entry_spread_impact_per_share} / share`:"—";
+    document.getElementById("m_be").textContent=`${d.breakeven_lower} — ${d.breakeven_upper} / ${d.executable_breakeven_lower??d.breakeven_lower} — ${d.executable_breakeven_upper??d.breakeven_upper}`;
     let noteText = d.note;
     if (d.available_call_strikes_above_short) noteText += ` | Nearby call strikes: ${d.available_call_strikes_above_short.join(", ")}`;
     if (d.available_put_strikes_below_short) noteText += ` | Nearby put strikes: ${d.available_put_strikes_below_short.join(", ")}`;
     if (d.margin_error) noteText += ` | Margin lookup failed: ${d.margin_error}`;
     if (d.estimated_entry_charges) noteText += ` | Est. entry charges: ₹${d.estimated_entry_charges.total} (brokerage ₹${d.estimated_entry_charges.brokerage}, STT ₹${d.estimated_entry_charges.stt}, exchange+SEBI+GST ₹${(d.estimated_entry_charges.exchange_txn_charges + d.estimated_entry_charges.sebi_fee + d.estimated_entry_charges.gst).toFixed(2)}, stamp duty ₹${d.estimated_entry_charges.stamp_duty}) — entry side only, exit charges apply too if closed before expiry.`;
+    if (d.estimated_entry_charges_ltp) noteText += ` LTP-entry charges would be ~₹${d.estimated_entry_charges_ltp.total}.`;
+    if (d.entry_spread_impact_per_share != null && Math.abs(d.entry_spread_impact_per_share) > 0) noteText += ` ⚠ Bid/Ask execution reduces theoretical credit by ₹${d.entry_spread_impact_per_share}/share versus LTP.`;
     if (d.entry_event_warning) noteText += ` ⚠ ${d.entry_event_warning}`;
     if (d.event_before_expiry) noteText += ` | Note: ${d.event_before_expiry.label} on ${d.event_before_expiry.date} falls before this expiry.`;
     document.getElementById("s_note").textContent = noteText;
@@ -1557,12 +1569,12 @@ document.getElementById("chainBtn").onclick = async () => {
     callsBody.innerHTML = ""; putsBody.innerHTML = "";
     d.calls.forEach(o => {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${o.strike}</td><td>${o.ltp}</td><td>${o.oi}</td><td>${o.iv_pct}</td><td>${o.delta}</td>`;
+      tr.innerHTML = `<td>${o.strike}</td><td>${o.ltp}</td><td>${o.bid ?? "—"}</td><td>${o.ask ?? "—"}</td><td>${o.spread_pct != null ? o.spread_pct + "%" : "—"}</td><td>${o.oi}</td><td>${o.iv_pct}</td><td>${o.delta}</td>`;
       callsBody.appendChild(tr);
     });
     d.puts.forEach(o => {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${o.strike}</td><td>${o.ltp}</td><td>${o.oi}</td><td>${o.iv_pct}</td><td>${o.delta}</td>`;
+      tr.innerHTML = `<td>${o.strike}</td><td>${o.ltp}</td><td>${o.bid ?? "—"}</td><td>${o.ask ?? "—"}</td><td>${o.spread_pct != null ? o.spread_pct + "%" : "—"}</td><td>${o.oi}</td><td>${o.iv_pct}</td><td>${o.delta}</td>`;
       putsBody.appendChild(tr);
     });
     document.getElementById("chainBox").style.display = "block";
@@ -1605,7 +1617,7 @@ async function loadWatchlist() {
       const qty = p.quantity || p.lot_size;
       if (p.mtm_error) {
         tr.innerHTML = `<td>${p.symbol}</td><td>${typeLabel}</td><td>${qty}</td><td>${p.entry_spot ?? "-"}</td>
-                        <td colspan="6" style="color:var(--red);">${p.mtm_error}</td>
+                        <td colspan="7" style="color:var(--red);">${p.mtm_error}</td>
                         <td>${maxLossDisplay}</td><td>${marginDisplay}</td><td><span class="pill warn">Error</span></td>
                         <td><button class="secondary small-btn" onclick="removePosition('${p.id}')">Remove</button></td>`;
         tbody.appendChild(tr);
@@ -1627,7 +1639,8 @@ async function loadWatchlist() {
                       <td>${p.current.days_left}</td>
                       <td>₹${p.current.current_position_value}</td>
                       <td class="${pnlClass}">₹${p.current.pnl}</td>
-                      <td class="${netPnlClass}" title="Round-trip est. charges: ₹${p.current.estimated_round_trip_charges}">₹${p.current.net_pnl_after_charges}</td>
+                      <td class="${p.current.executable_pnl >= 0 ? "pnl-pos" : "pnl-neg"}" title="Immediate exit: short legs at Ask, long legs at Bid">₹${p.current.executable_pnl}</td>
+                      <td class="${netPnlClass}" title="Executable exit after estimated round-trip charges: ₹${p.current.estimated_round_trip_charges}">₹${p.current.net_pnl_after_charges}</td>
                       <td>${p.current.probability_of_success_pct ?? "-"}%</td>
                       <td>${maxLossDisplay}</td>
                       <td>${marginDisplay}</td>
@@ -1646,17 +1659,20 @@ async function loadWatchlist() {
       detailTr.id = detailId;
       detailTr.style.display = "none";
       const legLabels = {sell_call: "Sell Call", buy_call: "Buy Call", sell_put: "Sell Put", buy_put: "Buy Put"};
-      let legHtml = `<td colspan="14"><div style="display:flex; gap:20px; padding:10px 0; flex-wrap:wrap;">`;
+      let legHtml = `<td colspan="15"><div style="display:flex; gap:20px; padding:10px 0; flex-wrap:wrap;">`;
       Object.keys(legLabels).forEach(k => {
         const lg = p.current.legs_current && p.current.legs_current[k];
         if (!lg) return;
         const legPnlClass = lg.pnl >= 0 ? "pnl-pos" : "pnl-neg";
         const deltaLine = lg.current_delta !== undefined
           ? `<div style="color:var(--muted); font-size:11px;">Current delta: ${lg.current_delta}</div>` : "";
-        legHtml += `<div style="background:#0f1115; border-radius:6px; padding:8px 12px;">
+        const execLegClass=lg.executable_pnl>=0?"pnl-pos":"pnl-neg";
+        legHtml += `<div style="background:#0f1115; border-radius:6px; padding:8px 12px; min-width:190px;">
                       <div style="color:var(--muted); font-size:11px;">${legLabels[k]} (strike ${lg.strike})</div>
-                      <div style="font-size:13px;">Entry ₹${lg.entry_price} → Now ₹${lg.current_price}</div>
-                      <div class="${legPnlClass}" style="font-size:13px;">P&amp;L ₹${lg.pnl}</div>
+                      <div style="font-size:13px;">Entry ₹${lg.entry_price} → LTP ₹${lg.current_price}</div>
+                      <div style="color:var(--muted);font-size:11px;">Bid ₹${lg.bid ?? "—"} · Ask ₹${lg.ask ?? "—"}</div>
+                      <div class="${legPnlClass}" style="font-size:13px;">LTP P&amp;L ₹${lg.pnl}</div>
+                      <div class="${execLegClass}" style="font-size:13px;">Exit P&amp;L ₹${lg.executable_pnl} (exit ₹${lg.exit_price_executable})</div>
                       ${deltaLine}
                     </div>`;
       });
