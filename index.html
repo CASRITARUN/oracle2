@@ -174,8 +174,9 @@
   </table>
   <div id="icScreenerExcluded" class="legend" style="display:none;margin-top:10px;"></div>
   <div class="legend">
-    The screener evaluates the full usable F&amp;O stock universe and every expiry inside the selected DTE window.
-    It tests multiple available strikes around the target delta and hedge widths. Short premium legs have a stronger
+    Screen 1 ranks the full usable F&amp;O stock universe. Screen 2 then takes the top ranked stocks from Screen 1
+    and evaluates actual four-leg IC structures across up to two best expiries per stock, prioritising the 21–35 DTE window.
+    It batches the required option quotes to stay within Zerodha REST limits while still testing multiple available strikes and hedge widths. Short premium legs have a stronger
     execution threshold than far-OTM hedge legs. Expected-move cushion and credit/max-loss are scored rather than
     treated as arbitrary pass/fail cliffs. Score weights: IV richness 25%, range quality 20%, expected-move cushion 20%,
     four-leg liquidity 15%, economics 15%, event risk 5%.
@@ -1233,7 +1234,7 @@ async function runIcScreener(force=false) {
   const minDte=document.getElementById("icMinDte").value || 14;
   const maxDte=document.getElementById("icMaxDte").value || 50;
   const limit=document.getElementById("icLimit").value || 25;
-  status.textContent="Building actual four-leg ICs across the F&O universe and all selected expiries — this may take a few minutes...";
+  status.textContent="Building actual four-leg ICs from the top Screen-1 candidates and batching Zerodha option quotes...";
   try {
     const qs=new URLSearchParams({limit,target_delta:td,min_dte:minDte,max_dte:maxDte,force:force?"true":"false"});
     const r=await apiFetch(`/api/ic-screener?${qs.toString()}`);
@@ -1259,7 +1260,7 @@ async function runIcScreener(force=false) {
       tbody.appendChild(tr);
     });
     document.getElementById("icScreenerTable").style.display="table";
-    status.textContent=`${d.count} F&O stocks scanned → ${d.config?.evaluated_universe ?? d.deep_evaluated ?? 0} deeply evaluated → ${d.eligible_count} IC candidates. Showing top ${d.stocks?.length||0}.` + (d.evaluation_error_count ? ` ${d.evaluation_error_count} symbols had data errors; see server log.` : "");
+    status.textContent=`${d.count} Screen-1 candidates → ${d.deep_evaluated ?? 0} evaluated → ${d.eligible_count} IC candidates. Showing top ${d.stocks?.length||0}.` + (d.option_quote_instruments ? ` ${d.option_quote_instruments} option instruments batched.` : "") + (d.evaluation_error_count ? ` ${d.evaluation_error_count} data issues.` : "");
     const ex=document.getElementById("icScreenerExcluded");
     if(d.excluded_sample&&d.excluded_sample.length){
       ex.innerHTML="<b>Excluded sample:</b> "+d.excluded_sample.map(x=>`${x.symbol} (${(x.hard_reasons||[]).join(", ")||"not qualified"})`).join(" · ");
