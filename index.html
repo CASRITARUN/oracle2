@@ -367,13 +367,24 @@
     </table>
     <div id="positionsTotals" style="display:none; margin-top:14px; padding:14px; border:1px solid var(--border); border-radius:10px; background:#11151d;">
       <div class="row" style="gap:24px; flex-wrap:wrap;">
-        <div><span class="legend">Total LTP P&amp;L</span><br><strong id="totalLtpPnl">₹0.00</strong></div>
-        <div><span class="legend">Total Market-Exit P&amp;L</span><br><strong id="totalExitPnl">₹0.00</strong></div>
+        <div><span class="legend">Total LTP P&amp;L — All Open Legs</span><br><strong id="totalLtpPnl">₹0.00</strong></div>
+        <div><span class="legend">Total Market-Exit P&amp;L — All Open Legs</span><br><strong id="totalExitPnl">₹0.00</strong></div>
         <div><span class="legend">LTP vs Exit Difference</span><br><strong id="totalExitGap">₹0.00</strong></div>
       </div>
       <div class="legend" style="margin-top:8px;">
-        LTP P&amp;L is theoretical mark-to-market. Market-Exit P&amp;L assumes an immediate executable exit: <b>LONG → Bid</b>, <b>SHORT → Ask</b>.
+        <b>LTP P&amp;L</b> is the theoretical mark-to-market: LONG = (LTP − Entry) × Qty; SHORT = (Entry − LTP) × Qty.
+        <b>Market-Exit P&amp;L</b> is the approximate amount realizable immediately: LONG exits at Bid; SHORT exits at Ask.
         Totals are before brokerage/taxes/charges.
+      </div>
+      <div style="margin-top:16px; overflow-x:auto;">
+        <div style="font-weight:700; margin-bottom:8px;">Underlying-wise total P&amp;L — all open legs of the same stock</div>
+        <table id="positionGroupsTable" style="display:none; width:100%;">
+          <thead><tr>
+            <th>Underlying</th><th>Open Legs</th><th>Total Qty</th>
+            <th>LTP P&amp;L Total</th><th>Market-Exit P&amp;L Total</th><th>LTP vs Exit</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </div>
     <div class="legend" id="positionsEmpty">No open F&amp;O positions, or click Refresh.</div>
@@ -1910,47 +1921,124 @@ function renderPositionsTable() {
     return;
   }
   document.getElementById("positionsEmpty").style.display = "none";
-  let totalLtp = 0;
-  let totalExit = 0;
+
+  // Always calculate the numbers in the browser from Entry + LTP/Bid/Ask as a
+  // fallback. This makes the display correct even if an older backend is still
+  // returning only average_price/last_price from Kite.
+  const num = v => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const qtyAbs = p => Math.abs(num(p.quantity) || 0);
+  const side = p => String(p.side || ((num(p.quantity) || 0) < 0 ? "SHORT" : "LONG")).toUpperCase();
+  const calc = p => {
+    const entry = num(p.average_price);
+    const ltp = num(p.last_price ?? p.ltp);
+    const bid = num(p.bid);
+    const ask = num(p.ask);
+    const q = qtyAbs(p);
+    let ltpPer = num(p.ltp_pnl_per_unit);
+    let ltpTotal = num(p.ltp_pnl_total);
+    let exitPrice = num(p.exit_price);
+    let exitPer = num(p.exit_pnl_per_unit);
+    let exitTotal = num(p.exit_pnl_total);
+
+    if (ltpPer == null && entry != null && ltp != null) {
+      ltpPer = side(p) === "LONG" ? ltp - entry : entry - ltp;
+    }
+    if (ltpTotal == null && ltpPer != null) ltpTotal = ltpPer * q;
+
+    if (exitPrice == null) exitPrice = side(p) === "LONG" ? bid : ask;
+    if (exitPer == null && entry != null && exitPrice != null) {
+      exitPer = side(p) === "LONG" ? exitPrice - entry : entry - exitPrice;
+    }
+    if (exitTotal == null && exitPer != null) exitTotal = exitPer * q;
+    return {entry, ltp, bid, ask, q, ltpPer, ltpTotal, exitPrice, exitPer, exitTotal};
+  };
+
+  const money = v => v == null || !Number.isFinite(Number(v)) ? "—" : `₹${Number(v).toFixed(2)}`;
+  const signedMoney = v => {
+    if (v == null || !Number.isFinite(Number(v))) return "—";
+    const n = Number(v);
+    return `${n >= 0 ? "+" : "−"}₹${Math.abs(n).toFixed(2)}`;
+  };
+  const pnlClass = v => (v != null && Number(v) >= 0) ? "pnl-pos" : "pnl-neg";
+
+  let totalLtp = 0, totalExit = 0;
+  const groups = new Map();
+
   livePositions.forEach((p, idx) => {
-    const ltpPnl = Number.isFinite(Number(p.ltp_pnl_total)) ? Number(p.ltp_pnl_total) : null;
-    const exitPnl = Number.isFinite(Number(p.exit_pnl_total)) ? Number(p.exit_pnl_total) : null;
-    if (ltpPnl != null) totalLtp += ltpPnl;
-    if (exitPnl != null) totalExit += exitPnl;
-    const ltpClass = (p.ltp_pnl_per_unit != null && p.ltp_pnl_per_unit >= 0) ? "pnl-pos" : "pnl-neg";
-    const exitClass = (p.exit_pnl_per_unit != null && p.exit_pnl_per_unit >= 0) ? "pnl-pos" : "pnl-neg";
-    const sideClass = p.side === "SHORT" ? "sell" : "buy";
-    const money = v => v == null || !Number.isFinite(Number(v)) ? "—" : `₹${Number(v).toFixed(2)}`;
+    const c = calc(p);
+    // Keep the calculated values on the row so later refresh/exit actions use
+    // the same displayed values.
+    p._calc = c;
+    if (c.ltpTotal != null) totalLtp += c.ltpTotal;
+    if (c.exitTotal != null) totalExit += c.exitTotal;
+
+    // For options, Zerodha's tradingsymbol contains DDMMM after the underlying,
+    // e.g. IREDA26AUG110PE -> IREDA. Fall back to the whole symbol if it cannot
+    // be parsed. This groups all four IREDA legs together.
+    const ts = String(p.tradingsymbol || "");
+    const m = ts.match(/^(.+?)(\d{2}[A-Z]{3})/);
+    const underlying = m ? m[1] : ts;
+    p._underlying = underlying;
+    if (!groups.has(underlying)) groups.set(underlying, {legs:0, qty:0, ltp:0, exit:0, ltpKnown:true, exitKnown:true});
+    const g = groups.get(underlying);
+    g.legs += 1; g.qty += c.q;
+    if (c.ltpTotal != null) g.ltp += c.ltpTotal; else g.ltpKnown = false;
+    if (c.exitTotal != null) g.exit += c.exitTotal; else g.exitKnown = false;
+
+    const ltpClass = pnlClass(c.ltpPer);
+    const exitClass = pnlClass(c.exitPer);
+    const sideClass = side(p) === "SHORT" ? "sell" : "buy";
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><input type="checkbox" ${p._selected ? "checked" : ""} onchange="livePositions[${idx}]._selected=this.checked" /></td>
       <td>${p.tradingsymbol}</td>
-      <td class="${sideClass}">${p.side}</td>
-      <td>${Math.abs(p.quantity)}</td>
-      <td>${money(p.average_price)}</td>
-      <td>${money(p.last_price)}</td>
-      <td class="${ltpClass}">${money(p.ltp_pnl_per_unit)}</td>
-      <td class="${ltpClass}"><b>${money(p.ltp_pnl_total)}</b></td>
-      <td>${money(p.bid)}</td>
-      <td>${money(p.ask)}</td>
-      <td><b>${money(p.exit_price)}</b><br><span class="legend">${p.side === "LONG" ? "Bid" : "Ask"}</span></td>
-      <td class="${exitClass}">${money(p.exit_pnl_per_unit)}</td>
-      <td class="${exitClass}"><b>${money(p.exit_pnl_total)}</b></td>
+      <td class="${sideClass}">${side(p)}</td>
+      <td>${c.q}</td>
+      <td>${money(c.entry)}</td>
+      <td>${money(c.ltp)}</td>
+      <td class="${ltpClass}">${signedMoney(c.ltpPer)}</td>
+      <td class="${ltpClass}"><b>${signedMoney(c.ltpTotal)}</b></td>
+      <td>${money(c.bid)}</td>
+      <td>${money(c.ask)}</td>
+      <td><b>${money(c.exitPrice)}</b><br><span class="legend">${side(p) === "LONG" ? "Bid" : "Ask"}</span></td>
+      <td class="${exitClass}">${signedMoney(c.exitPer)}</td>
+      <td class="${exitClass}"><b>${signedMoney(c.exitTotal)}</b></td>
       <td><input type="number" step="0.05" placeholder="MARKET" style="width:90px;" value="${p._exitPrice}" onchange="livePositions[${idx}]._exitPrice=this.value" /></td>
       <td><button class="danger small-btn" onclick="exitSingleLivePosition(${idx})">Exit</button></td>`;
     tbody.appendChild(tr);
   });
+
   document.getElementById("positionsTable").style.display = "table";
   const totals = document.getElementById("positionsTotals");
   totals.style.display = "block";
   const totalGap = totalExit - totalLtp;
-  const fmtTotal = v => `₹${Number(v).toFixed(2)}`;
+  const fmtTotal = v => `${v >= 0 ? "+" : "−"}₹${Math.abs(Number(v)).toFixed(2)}`;
   document.getElementById("totalLtpPnl").textContent = fmtTotal(totalLtp);
   document.getElementById("totalExitPnl").textContent = fmtTotal(totalExit);
   document.getElementById("totalExitGap").textContent = fmtTotal(totalGap);
   document.getElementById("totalLtpPnl").className = totalLtp >= 0 ? "pnl-pos" : "pnl-neg";
   document.getElementById("totalExitPnl").className = totalExit >= 0 ? "pnl-pos" : "pnl-neg";
   document.getElementById("totalExitGap").className = totalGap >= 0 ? "pnl-pos" : "pnl-neg";
+
+  // Underlying-wise summary: e.g. all four IREDA legs are added together.
+  const gt = document.querySelector("#positionGroupsTable tbody");
+  gt.innerHTML = "";
+  for (const [underlying, g] of groups) {
+    const gap = g.exit - g.ltp;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><b>${underlying}</b></td>
+      <td>${g.legs}</td>
+      <td>${g.qty}</td>
+      <td class="${pnlClass(g.ltp)}"><b>${g.ltpKnown ? fmtTotal(g.ltp) : "—"}</b></td>
+      <td class="${pnlClass(g.exit)}"><b>${g.exitKnown ? fmtTotal(g.exit) : "—"}</b></td>
+      <td class="${pnlClass(gap)}"><b>${g.ltpKnown && g.exitKnown ? fmtTotal(gap) : "—"}</b></td>`;
+    gt.appendChild(tr);
+  }
+  document.getElementById("positionGroupsTable").style.display = "table";
 }
 
 document.getElementById("selectAllPositions").onchange = function() {
