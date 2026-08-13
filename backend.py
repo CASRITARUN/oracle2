@@ -230,6 +230,76 @@ def get_fo_ban_list():
                        f"before trading — this filter is best-effort only.")
 
 
+def _quote_cache_get(keys):
+    now = time.monotonic()
+    out = {}
+    for k in keys:
+        item = _QUOTE_CACHE.get(k)
+        if item and now - item["ts"] <= _QUOTE_CACHE_TTL:
+            out[k] = item["quote"]
+    return out
+
+
+def kite_quote_bulk(keys, *, chunk_size=500, retries=1):
+    """Rate-limited, cached wrapper around Kite's /quote endpoint.
+
+    Kite supports up to 500 instruments per /quote call, but the endpoint is limited to
+    1 request/sec. A 429 is followed by a cooldown before retrying. This function is
+    intentionally used by the screeners so one scan cannot DOS its own API session.
+    """
+    global _QUOTE_LAST_AT, _QUOTE_COOLDOWN_UNTIL
+    keys = list(dict.fromkeys(k for k in keys if k))
+    if not keys:
+        return {}
+    result = _quote_cache_get(keys)
+    missing = [k for k in keys if k not in result]
+    if not missing:
+        return result
+
+    for start in range(0, len(missing), max(1, min(int(chunk_size), 500))):
+        chunk = missing[start:start + max(1, min(int(chunk_size), 500))]
+        attempt = 0
+        while True:
+            with _QUOTE_LOCK:
+                now = time.monotonic()
+                wait_for = max(_QUOTE_LAST_AT + _QUOTE_MIN_INTERVAL - now,
+                               _QUOTE_COOLDOWN_UNTIL - now, 0.0)
+                if wait_for > 0:
+                    time.sleep(wait_for)
+                try:
+                    raw = kite.quote(chunk)
+                    _QUOTE_LAST_AT = time.monotonic()
+                    raw = raw or {}
+                    for k, q in raw.items():
+                        _QUOTE_CACHE[k] = {"quote": q, "ts": time.monotonic()}
+                        result[k] = q
+                    break
+                except Exception as e:
+                    msg = str(e).lower()
+                    is_429 = "too many requests" in msg or getattr(e, "code", None) == 429
+                    _QUOTE_LAST_AT = time.monotonic()
+                    if is_429 and attempt < retries:
+                        _QUOTE_COOLDOWN_UNTIL = time.monotonic() + _QUOTE_429_COOLDOWN
+                        attempt += 1
+                        logger.warning("Kite quote rate limit hit; cooling down %.1fs before retry", _QUOTE_429_COOLDOWN)
+                        time.sleep(_QUOTE_429_COOLDOWN)
+                        continue
+                    logger.warning("Kite quote batch failed (%d instruments): %s", len(chunk), e)
+                    break
+    return result
+
+
+def seed_spot_cache_from_prices(rows):
+    now = time.monotonic()
+    for r in rows:
+        sym = str(r.get("symbol", "")).upper()
+        price = r.get("ltp") or r.get("last_close")
+        if sym and price:
+            _QUOTE_CACHE[f"NSE:{sym}"] = {
+                "quote": {"last_price": float(price)}, "ts": now
+            }
+
+
 def pick_atm_contracts(nfo_opts_for_symbol, last_close, today):
     """Given this symbol's NFO-OPT instruments, last close price, and today's date, picks the
     nearest valid expiry (same MIN_DAYS_TO_EXPIRY rule as the strategy builder) and the strike
@@ -293,14 +363,7 @@ def get_atm_iv_and_liquidity_bulk(candidates, nfo):
             needed_keys.append(f"NFO:{ce_ts}")
             needed_keys.append(f"NFO:{pe_ts}")
 
-    quotes = {}
-    chunk_size = 200
-    for i in range(0, len(needed_keys), chunk_size):
-        chunk = needed_keys[i:i + chunk_size]
-        try:
-            quotes.update(kite.quote(chunk))
-        except Exception:
-            continue  # skip this chunk rather than fail the whole screener
+    quotes = kite_quote_bulk(needed_keys, chunk_size=500, retries=1)
 
     out = {}
     for sym, (ce_ts, pe_ts, strike, expiry, T) in picks.items():
@@ -360,9 +423,21 @@ logging.basicConfig(
 logger = logging.getLogger("kite_dashboard")
 kite = KiteConnect(api_key=API_KEY)
 
+# Zerodha Quote API protection. Quote is limited to 1 request/second and a maximum of
+# 500 instruments per request. Keep one process-wide gate so Screen 1, Screen 2 and
+# other quote consumers cannot accidentally burst the API.
+_QUOTE_LOCK = threading.Lock()
+_QUOTE_LAST_AT = 0.0
+_QUOTE_COOLDOWN_UNTIL = 0.0
+_QUOTE_CACHE = {}  # key -> {"quote": dict, "ts": monotonic_seconds}
+_QUOTE_CACHE_TTL = float(os.environ.get("KITE_QUOTE_CACHE_TTL", "3.0"))
+_QUOTE_MIN_INTERVAL = float(os.environ.get("KITE_QUOTE_MIN_INTERVAL", "1.05"))
+_QUOTE_429_COOLDOWN = float(os.environ.get("KITE_QUOTE_429_COOLDOWN", "10.5"))
+
 SESSION = {"access_token": None, "logged_in_at": None}
 INSTRUMENT_CACHE = {"nfo": None, "nse": None, "fetched_at": None}
 SCREENER_CACHE = {"results": None, "fetched_at": None}
+IC_SCREENER_CACHE = {"results": None, "fetched_at": None}
 
 POSITIONS_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
 _positions_lock = threading.Lock()
@@ -1199,7 +1274,7 @@ def get_trend_regime(symbol):
 
 def get_india_vix():
     try:
-        q = kite.quote(["NSE:INDIA VIX"])["NSE:INDIA VIX"]
+        q = kite_quote_bulk(["NSE:INDIA VIX"])["NSE:INDIA VIX"]
         return q["last_price"], None
     except Exception as e:
         return None, str(e)
@@ -1407,14 +1482,12 @@ def build_ic_candidate_from_chain(symbol, spot, expiry, chain, target_delta=0.18
     return best
 
 
-def fetch_chain_quotes_for_expiry(symbol, expiry, opts):
-    """Quote one expiry in batches; Kite's quote API supplies LTP, depth, OI and volume."""
+def fetch_chain_quotes_for_expiry(symbol, expiry, opts, spot_override=None):
+    """Quote one expiry in rate-limited batches; spot is supplied from the screener cache
+    whenever possible so an extra NSE quote request is never made per stock/expiry."""
     keys = [f"NFO:{o['tradingsymbol']}" for o in opts]
-    quotes = {}
-    for i in range(0, len(keys), 200):
-        try: quotes.update(kite.quote(keys[i:i+200]))
-        except Exception as e: logger.warning("quote batch failed for %s: %s", symbol, e)
-    spot, err = get_spot_price(symbol)
+    quotes = kite_quote_bulk(keys, chunk_size=500, retries=1)
+    spot, err = (spot_override, None) if spot_override else get_spot_price(symbol)
     if err: return None, err
     T = max((expiry-now_ist().date()).days, 0) / 365.0
     chain=[]
@@ -1605,6 +1678,8 @@ def refresh_data():
     get_instruments(force=True)
     SCREENER_CACHE["results"] = None
     SCREENER_CACHE["fetched_at"] = None
+    IC_SCREENER_CACHE["results"] = None
+    IC_SCREENER_CACHE["fetched_at"] = None
     return jsonify({"ok": True, "message": "Instrument cache cleared. Re-run the screener to refresh rankings."})
 
 
@@ -1689,8 +1764,158 @@ def fo_universe_route():
     return jsonify({"indices": list(INDEX_SYMBOLS.keys()), "stocks": stocks})
 
 
+
+
 @app.route("/api/screener")
 def screener():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    limit = int(request.args.get("limit", 25))
+    force = request.args.get("force", "false").lower() == "true"
+    include_news = request.args.get("news", "true").lower() == "true"
+    today = now_ist().date()
+    today_str = str(today)
+
+    universe = fo_stock_universe(force=force)
+    nfo, nse = get_instruments(force=force)
+    symbol_to_token = {i["tradingsymbol"]: i["instrument_token"] for i in nse if i["exchange"] == "NSE"}
+
+    # --- Pass 1: calmness (HV/ATR from daily closes) — same as before ---
+    results = []
+    for name in universe:
+        token = symbol_to_token.get(name)
+        if not token:
+            continue
+        try:
+            hv, atr_pct, ltp = historical_vol_and_atr(token)
+        except Exception:
+            continue
+        if hv is None:
+            continue
+        results.append({"symbol": name, "ltp": round(ltp, 2),
+                         "hv_annualized_pct": round(hv, 2), "atr_pct_of_price": round(atr_pct, 2)})
+        if len(results) >= 300:
+            break
+
+    # Seed shared spot cache from the already-computed historical close. This prevents
+    # the later option-chain scan from making one NSE Quote request per stock.
+    seed_spot_cache_from_prices(results)
+    # --- Pass 2: ATM IV + liquidity, batched across all candidates at once ---
+    candidates = [{"symbol": r["symbol"], "last_close": r["ltp"]} for r in results]
+    try:
+        iv_liquidity = get_atm_iv_and_liquidity_bulk(candidates, nfo)
+    except Exception as e:
+        iv_liquidity = {}
+        logger.warning(f"ATM IV/liquidity batch fetch failed: {e}")
+
+    iv_history = load_iv_history()
+    for r in results:
+        info = iv_liquidity.get(r["symbol"])
+        if not info:
+            r["atm_iv_pct"] = None
+            r["atm_oi_total"] = None
+            r["atm_spread_pct"] = None
+            r["iv_rank_pct"] = None
+            r["iv_rank_history_days"] = 0
+            r["liquidity_ok"] = False
+            continue
+        r.update(info)
+        rank_pct, hist_days = update_iv_history_and_get_rank(r["symbol"], info["atm_iv_pct"], iv_history, today_str)
+        r["iv_rank_pct"] = rank_pct
+        r["iv_rank_history_days"] = hist_days
+        r["liquidity_ok"] = (info["atm_oi_total"] >= MIN_ATM_TOTAL_OI and
+                              info["atm_spread_pct"] is not None and info["atm_spread_pct"] <= MAX_ATM_SPREAD_PCT)
+        r["iv_hv"] = classify_iv_hv(r.get("atm_iv_pct"), r.get("hv_annualized_pct"))
+    save_iv_history(iv_history)
+
+    # --- Pass 3: best-effort F&O ban list, excludes banned symbols from top picks ---
+    ban_symbols, ban_error = get_fo_ban_list()
+    for r in results:
+        r["fo_banned_today"] = (ban_symbols is not None and r["symbol"] in ban_symbols)
+
+    # --- Composite score: rich IV (same-day cross-sectional percentile, since most stocks
+    # won't have 20+ days of stored history yet) + calm underlying + tradeable liquidity ---
+    all_iv = [r["atm_iv_pct"] for r in results]
+    all_hv = [r["hv_annualized_pct"] for r in results]
+    all_atr = [r["atr_pct_of_price"] for r in results]
+    all_oi = [r["atm_oi_total"] for r in results if r["atm_oi_total"]]
+    all_spread = [r["atm_spread_pct"] for r in results if r["atm_spread_pct"] is not None]
+
+    eligible = []
+    for r in results:
+        iv_richness_pct = (r["iv_rank_pct"] if r["iv_rank_pct"] is not None
+                            else _percentile_rank(r["atm_iv_pct"], all_iv))
+        calm_hv_pct = 100 - _percentile_rank(r["hv_annualized_pct"], all_hv)
+        calm_atr_pct = 100 - _percentile_rank(r["atr_pct_of_price"], all_atr)
+        calmness_pct = (calm_hv_pct + calm_atr_pct) / 2
+        oi_pct = _percentile_rank(r["atm_oi_total"], all_oi)
+        spread_pct_rank = 100 - _percentile_rank(r["atm_spread_pct"], all_spread)
+        liquidity_pct = (oi_pct + spread_pct_rank) / 2
+
+        composite = (SCORE_WEIGHTS["iv_richness"] * iv_richness_pct +
+                     SCORE_WEIGHTS["calmness"] * calmness_pct +
+                     SCORE_WEIGHTS["liquidity"] * liquidity_pct)
+        r["iv_richness_score"] = round(iv_richness_pct, 1)
+        r["calmness_score"] = round(calmness_pct, 1)
+        r["liquidity_score"] = round(liquidity_pct, 1)
+        r["composite_score"] = round(composite, 1)
+        if r["liquidity_ok"] and not r["fo_banned_today"] and r["atm_iv_pct"] is not None:
+            eligible.append(r)
+
+    eligible.sort(key=lambda r: r["composite_score"], reverse=True)
+    for i, r in enumerate(eligible):
+        r["rank"] = i + 1
+        r["total"] = len(eligible)
+
+    # Everything else (illiquid, banned, or IV/liquidity data unavailable) still gets returned
+    # further down the list so nothing silently disappears, just clearly marked as excluded.
+    excluded = [r for r in results if r not in eligible]
+    for r in excluded:
+        r["rank"] = None
+        r["total"] = len(eligible)
+
+    top = eligible[:limit]
+
+    # --- Pass 4: headlines, ONLY for the final top-N being shown, to keep this fast ---
+    if include_news:
+        for r in top[:NEWS_FOR_TOP_N]:
+            r["headlines"], r["headlines_error"] = _get_headlines_best_effort(r["symbol"])
+    for r in top[:NEWS_FOR_TOP_N]:
+        r["iv_trend"] = get_iv_trend_from_history(r["symbol"], iv_history)
+
+    SCREENER_CACHE["results"] = eligible + excluded
+    SCREENER_CACHE["fetched_at"] = now_ist()
+
+    return jsonify({
+        "count": len(results), "eligible_count": len(eligible), "stocks": top,
+        "excluded_sample": excluded[:10],
+        "ban_list_note": ban_error if ban_error else "F&O ban list fetched OK — banned symbols excluded above.",
+        "note": ("Ranked by a composite score for OPTION-SELLING: IV richness (real IV Rank once "
+                 "20+ days of history accumulate in iv_history.json, cross-sectional IV percentile "
+                 "until then) 40%, calmness (inverse HV+ATR) 35%, ATM liquidity (OI + spread) 25%. "
+                 f"Stocks are excluded from ranking if ATM combined OI < {MIN_ATM_TOTAL_OI} lots, "
+                 f"ATM spread > {MAX_ATM_SPREAD_PCT}%, on today's F&O ban list, or IV couldn't be "
+                 "computed. Headlines are a best-effort keyword scan, NOT sentiment analysis or "
+                 "verified news — read the actual articles, and still check earnings/corporate "
+                 "action dates yourself before trading."),
+    })
+
+
+def get_stock_rank(symbol):
+    if not SCREENER_CACHE["results"]:
+        return None
+    for r in SCREENER_CACHE["results"]:
+        if r["symbol"] == symbol:
+            return {"rank": r["rank"], "total": r["total"],
+                     "hv_annualized_pct": r["hv_annualized_pct"], "atr_pct_of_price": r["atr_pct_of_price"],
+                     "atm_iv_pct": r.get("atm_iv_pct"), "iv_rank_pct": r.get("iv_rank_pct"),
+                     "composite_score": r.get("composite_score"), "liquidity_ok": r.get("liquidity_ok"),
+                     "fo_banned_today": r.get("fo_banned_today"),
+                     "screener_age_minutes": round((now_ist() - SCREENER_CACHE["fetched_at"]).total_seconds() / 60, 1)}
+    return None
+
+@app.route("/api/ic-screener")
+def ic_screener():
     if not require_session(): return jsonify({"error":"not_logged_in"}),401
     limit=max(1,min(int(request.args.get("limit",25)),50))
     force=request.args.get("force","false").lower()=="true"
@@ -1707,6 +1932,7 @@ def screener():
         except Exception: continue
         if hv is not None and ltp: base.append({"symbol":sym,"ltp":round(ltp,2),"hv_annualized_pct":round(hv,2),"atr_pct_of_price":round(atr,2)})
         if len(base)>=300: break
+    seed_spot_cache_from_prices(base)
     candidates=[{"symbol":r["symbol"],"last_close":r["ltp"]} for r in base]
     try: atm_info=get_atm_iv_and_liquidity_bulk(candidates,nfo)
     except Exception: atm_info={}
@@ -1738,121 +1964,127 @@ def screener():
     # Deep-evaluate the complete usable F&O stock universe. The preliminary score is used
     # for ordering/caching only; it must not silently remove stocks from IC discovery.
     for r in base:
-        sym=r["symbol"]
-        if r["fo_banned_today"] or not r.get("atm_iv_pct"):
-            continue
-        opts=opts_by_sym.get(sym,[])
-        expiries=sorted({o["expiry"] for o in opts if min_dte <= (o["expiry"]-today).days <= max_dte})
-        if not expiries:
-            continue
-        deep_evaluated += 1
-        best=None
-        # Evaluate every available expiry in the requested DTE window. This prevents a
-        # poor nearest expiry from hiding a much better 21-35 DTE or later monthly IC.
-        for exp in expiries:
-            dte=(exp-today).days
-            # Only quote a practical strike band around spot. The target deltas and hedge
-            # widths used below are inside this band, while the narrower quote set keeps
-            # the full-universe scan manageable.
-            subset=[o for o in opts if o["expiry"]==exp and o.get("strike",0) > 0]
-            if not subset:
+        try:
+            sym=r["symbol"]
+            if r["fo_banned_today"] or not r.get("atm_iv_pct"):
                 continue
-            data,err=fetch_chain_quotes_for_expiry(sym,exp,subset)
-            if err:
-                evaluation_errors.append({"symbol":sym,"expiry":str(exp),"error":err})
+            opts=opts_by_sym.get(sym,[])
+            expiries=sorted({o["expiry"] for o in opts if min_dte <= (o["expiry"]-today).days <= max_dte})
+            if not expiries:
                 continue
-            ic=build_ic_candidate_from_chain(sym,data["spot"],exp,data["chain"],target_delta=target_delta,lots=1)
-            if ic and (best is None or ic["selection_score"]>best["selection_score"]):
-                best={**ic,"expiry":str(exp),"dte":dte,"lot_size":data["lot_size"]}
-        if not best:
+            deep_evaluated += 1
+            best=None
+            # Evaluate every available expiry in the requested DTE window. This prevents a
+            # poor nearest expiry from hiding a much better 21-35 DTE or later monthly IC.
+            for exp in expiries:
+                dte=(exp-today).days
+                # Only quote a practical strike band around spot. The target deltas and hedge
+                # widths used below are inside this band, while the narrower quote set keeps
+                # the full-universe scan manageable.
+                spot_ref=float(r.get("ltp") or 0)
+                subset=[o for o in opts if o["expiry"]==exp and o.get("strike",0) > 0 and (not spot_ref or abs(float(o["strike"])-spot_ref)/spot_ref <= IC_CHAIN_STRIKE_RANGE_PCT)]
+                if not subset:
+                    continue
+                data,err=fetch_chain_quotes_for_expiry(sym,exp,subset,spot_override=spot_ref)
+                if err:
+                    evaluation_errors.append({"symbol":sym,"expiry":str(exp),"error":err})
+                    continue
+                ic=build_ic_candidate_from_chain(sym,data["spot"],exp,data["chain"],target_delta=target_delta,lots=1)
+                if ic and (best is None or ic["selection_score"]>best["selection_score"]):
+                    best={**ic,"expiry":str(exp),"dte":dte,"lot_size":data["lot_size"]}
+            if not best:
+                continue
+
+            sc,lc,sp,lp=[best[k] for k in ("sell_call","buy_call","sell_put","buy_put")]
+            short_legs=[sc,sp]
+            hedge_legs=[lc,lp]
+            all_legs=[sc,lc,sp,lp]
+            spreads=[x.get("spread_pct") for x in all_legs if x.get("spread_pct") is not None]
+            short_spreads=[x.get("spread_pct") for x in short_legs if x.get("spread_pct") is not None]
+            hedge_spreads=[x.get("spread_pct") for x in hedge_legs if x.get("spread_pct") is not None]
+            short_oi=[x.get("oi",0) for x in short_legs]
+            hedge_oi=[x.get("oi",0) for x in hedge_legs]
+            short_vol=[x.get("volume",0) for x in short_legs]
+            total_vol=sum(x.get("volume",0) for x in all_legs)
+
+            # Liquidity is asymmetric by design: short premium legs need strong liquidity;
+            # hedge legs only need to be executable. Do not let one far-OTM hedge silently
+            # kill an otherwise liquid condor.
+            short_liq_ok=(min(short_oi)>=IC_MIN_SHORT_OI and
+                          (not short_spreads or max(short_spreads)<=IC_MAX_SHORT_SPREAD_PCT) and
+                          min(short_vol)>=IC_MIN_SHORT_VOLUME)
+            hedge_liq_ok=(min(hedge_oi)>=IC_MIN_LEG_OI and
+                          (not hedge_spreads or max(hedge_spreads)<=IC_MAX_LEG_SPREAD_PCT))
+            leg_liq_ok=short_liq_ok and hedge_liq_ok and total_vol>=IC_MIN_TOTAL_VOLUME
+
+            # Range/trend score. Strong directional regimes remain a serious warning, but are
+            # scored so the screener can still show the opportunity instead of returning zero.
+            trend=get_trend_regime(sym)
+            trend_ok=not trend.get("error")
+            if trend_ok:
+                reg=trend.get("regime","")
+                range_score=95 if reg=="Range Bound" else 75 if reg in ("Transitioning","Volatile / Mixed") else 30
+                if trend.get("avoid_premium_selling"): range_score=15
+            else: range_score=50
+
+            iv_score=(r.get("iv_rank_pct") if r.get("iv_rank_pct") is not None else r.get("pre_score",50))
+            ivhv=(r.get("iv_hv") or {}).get("ratio")
+            if ivhv is not None:
+                iv_score=0.55*iv_score+0.45*min(100,max(0,(ivhv-0.8)/0.8*100))
+
+            cushion=min(best["ce_cushion"],best["pe_cushion"])
+            cushion_score=score_band(cushion,[(0.75,20),(0.90,35),(1.00,50),(1.15,70),(1.30,85),(1.50,95),(999,100)])
+            credit_ratio=best["credit"]/best["max_loss"] if best["max_loss"] else 0
+            econ_score=score_band(credit_ratio,[(0.08,20),(0.10,30),(0.15,50),(0.20,65),(0.25,78),(0.35,92),(0.50,100),(999,100)])
+
+            # Separate short/hedge liquidity scoring. A wide hedge spread is penalised, not
+            # treated as equivalent to a wide short spread.
+            def spread_score(vals, scale):
+                return sum(min(100,max(0,100-(v/scale)*100)) for v in vals)/len(vals) if vals else 60
+            short_spread_score=spread_score(short_spreads,IC_MAX_SHORT_SPREAD_PCT)
+            hedge_spread_score=spread_score(hedge_spreads,IC_MAX_LEG_SPREAD_PCT)
+            short_oi_score=sum(min(100,math.log10(max(x,1))/4*100) for x in short_oi)/len(short_oi)
+            hedge_oi_score=sum(min(100,math.log10(max(x,1))/4*100) for x in hedge_oi)/len(hedge_oi)
+            liquidity_score=0.55*(0.65*short_spread_score+0.35*short_oi_score)+0.45*(0.65*hedge_spread_score+0.35*hedge_oi_score)
+            if not short_liq_ok: liquidity_score=min(liquidity_score,45)
+            elif not hedge_liq_ok: liquidity_score=min(liquidity_score,65)
+
+            event_score,flags=ic_event_risk(sym,best["expiry"])
+            final=(IC_SCORE_WEIGHTS["iv"]*iv_score+IC_SCORE_WEIGHTS["range"]*range_score+
+                   IC_SCORE_WEIGHTS["cushion"]*cushion_score+IC_SCORE_WEIGHTS["liquidity"]*liquidity_score+
+                   IC_SCORE_WEIGHTS["economics"]*econ_score+IC_SCORE_WEIGHTS["event"]*event_score)
+
+            # Hard rejection is reserved for genuinely untradeable structures. Cushion and
+            # credit/economics are now scored rather than creating artificial pass/fail cliffs.
+            hard_reasons=[]
+            if not short_liq_ok: hard_reasons.append("short-leg liquidity failed")
+            if not hedge_liq_ok: hard_reasons.append("hedge-leg liquidity weak")
+            if total_vol<IC_MIN_TOTAL_VOLUME: hard_reasons.append("very low four-leg volume")
+            if credit_ratio<0.08: hard_reasons.append("very low credit/max-loss")
+            if cushion<0.75: hard_reasons.append("short strike inside 0.75x expected move")
+            if best["credit"]<=0 or best["max_loss"]<=0: hard_reasons.append("invalid risk/reward")
+
+            r.update({"ic_score":round(final,1),
+                      "ic_label":"Excellent" if final>=80 else "Good" if final>=65 else "Average" if final>=50 else "Watch",
+                      "ic_expiry":best["expiry"],"ic_dte":best["dte"],
+                      "ic_credit_per_share":round(best["credit"],2),"ic_max_loss_per_share":round(best["max_loss"],2),
+                      "ic_credit_max_loss_pct":round(credit_ratio*100,1),"ic_pop_pct":best["probability_of_profit"],
+                      "ic_ce_cushion_em":round(best["ce_cushion"],2),"ic_pe_cushion_em":round(best["pe_cushion"],2),
+                      "ic_liquidity_score":round(liquidity_score,1),"ic_min_leg_oi":min(x.get("oi",0) for x in all_legs),
+                      "ic_min_short_oi":min(short_oi),"ic_min_hedge_oi":min(hedge_oi),"ic_total_leg_volume":total_vol,
+                      "ic_max_leg_spread_pct":round(max(spreads),2) if spreads else None,
+                      "ic_max_short_spread_pct":round(max(short_spreads),2) if short_spreads else None,
+                      "ic_max_hedge_spread_pct":round(max(hedge_spreads),2) if hedge_spreads else None,
+                      "ic_short_liquidity_ok":short_liq_ok,"ic_hedge_liquidity_ok":hedge_liq_ok,
+                      "trend_regime":trend.get("regime") if trend_ok else None,"trend_adx":trend.get("adx14") if trend_ok else None,
+                      "event_score":event_score,"event_flags":flags,"hard_reasons":hard_reasons,
+                      "ic_legs":{"sell_call":best["sell_call"]["strike"],"buy_call":best["buy_call"]["strike"],
+                                 "sell_put":best["sell_put"]["strike"],"buy_put":best["buy_put"]["strike"]}})
+            evaluated.append(r)
+        except Exception as e:
+            evaluation_errors.append({"symbol":sym,"error":str(e)})
+            logger.exception("IC screener failed for %s", sym)
             continue
-
-        sc,lc,sp,lp=[best[k] for k in ("sell_call","buy_call","sell_put","buy_put")]
-        short_legs=[sc,sp]
-        hedge_legs=[lc,lp]
-        all_legs=[sc,lc,sp,lp]
-        spreads=[x.get("spread_pct") for x in all_legs if x.get("spread_pct") is not None]
-        short_spreads=[x.get("spread_pct") for x in short_legs if x.get("spread_pct") is not None]
-        hedge_spreads=[x.get("spread_pct") for x in hedge_legs if x.get("spread_pct") is not None]
-        short_oi=[x.get("oi",0) for x in short_legs]
-        hedge_oi=[x.get("oi",0) for x in hedge_legs]
-        short_vol=[x.get("volume",0) for x in short_legs]
-        total_vol=sum(x.get("volume",0) for x in all_legs)
-
-        # Liquidity is asymmetric by design: short premium legs need strong liquidity;
-        # hedge legs only need to be executable. Do not let one far-OTM hedge silently
-        # kill an otherwise liquid condor.
-        short_liq_ok=(min(short_oi)>=IC_MIN_SHORT_OI and
-                      (not short_spreads or max(short_spreads)<=IC_MAX_SHORT_SPREAD_PCT) and
-                      min(short_vol)>=IC_MIN_SHORT_VOLUME)
-        hedge_liq_ok=(min(hedge_oi)>=IC_MIN_LEG_OI and
-                      (not hedge_spreads or max(hedge_spreads)<=IC_MAX_LEG_SPREAD_PCT))
-        leg_liq_ok=short_liq_ok and hedge_liq_ok and total_vol>=IC_MIN_TOTAL_VOLUME
-
-        # Range/trend score. Strong directional regimes remain a serious warning, but are
-        # scored so the screener can still show the opportunity instead of returning zero.
-        trend=get_trend_regime(sym)
-        trend_ok=not trend.get("error")
-        if trend_ok:
-            reg=trend.get("regime","")
-            range_score=95 if reg=="Range Bound" else 75 if reg in ("Transitioning","Volatile / Mixed") else 30
-            if trend.get("avoid_premium_selling"): range_score=15
-        else: range_score=50
-
-        iv_score=(r.get("iv_rank_pct") if r.get("iv_rank_pct") is not None else r.get("pre_score",50))
-        ivhv=(r.get("iv_hv") or {}).get("ratio")
-        if ivhv is not None:
-            iv_score=0.55*iv_score+0.45*min(100,max(0,(ivhv-0.8)/0.8*100))
-
-        cushion=min(best["ce_cushion"],best["pe_cushion"])
-        cushion_score=score_band(cushion,[(0.75,20),(0.90,35),(1.00,50),(1.15,70),(1.30,85),(1.50,95),(999,100)])
-        credit_ratio=best["credit"]/best["max_loss"] if best["max_loss"] else 0
-        econ_score=score_band(credit_ratio,[(0.08,20),(0.10,30),(0.15,50),(0.20,65),(0.25,78),(0.35,92),(0.50,100),(999,100)])
-
-        # Separate short/hedge liquidity scoring. A wide hedge spread is penalised, not
-        # treated as equivalent to a wide short spread.
-        def spread_score(vals, scale):
-            return sum(min(100,max(0,100-(v/scale)*100)) for v in vals)/len(vals) if vals else 60
-        short_spread_score=spread_score(short_spreads,IC_MAX_SHORT_SPREAD_PCT)
-        hedge_spread_score=spread_score(hedge_spreads,IC_MAX_LEG_SPREAD_PCT)
-        short_oi_score=sum(min(100,math.log10(max(x,1))/4*100) for x in short_oi)/len(short_oi)
-        hedge_oi_score=sum(min(100,math.log10(max(x,1))/4*100) for x in hedge_oi)/len(hedge_oi)
-        liquidity_score=0.55*(0.65*short_spread_score+0.35*short_oi_score)+0.45*(0.65*hedge_spread_score+0.35*hedge_oi_score)
-        if not short_liq_ok: liquidity_score=min(liquidity_score,45)
-        elif not hedge_liq_ok: liquidity_score=min(liquidity_score,65)
-
-        event_score,flags=ic_event_risk(sym,best["expiry"])
-        final=(IC_SCORE_WEIGHTS["iv"]*iv_score+IC_SCORE_WEIGHTS["range"]*range_score+
-               IC_SCORE_WEIGHTS["cushion"]*cushion_score+IC_SCORE_WEIGHTS["liquidity"]*liquidity_score+
-               IC_SCORE_WEIGHTS["economics"]*econ_score+IC_SCORE_WEIGHTS["event"]*event_score)
-
-        # Hard rejection is reserved for genuinely untradeable structures. Cushion and
-        # credit/economics are now scored rather than creating artificial pass/fail cliffs.
-        hard_reasons=[]
-        if not short_liq_ok: hard_reasons.append("short-leg liquidity failed")
-        if not hedge_liq_ok: hard_reasons.append("hedge-leg liquidity weak")
-        if total_vol<IC_MIN_TOTAL_VOLUME: hard_reasons.append("very low four-leg volume")
-        if credit_ratio<0.08: hard_reasons.append("very low credit/max-loss")
-        if cushion<0.75: hard_reasons.append("short strike inside 0.75x expected move")
-        if best["credit"]<=0 or best["max_loss"]<=0: hard_reasons.append("invalid risk/reward")
-
-        r.update({"ic_score":round(final,1),
-                  "ic_label":"Excellent" if final>=80 else "Good" if final>=65 else "Average" if final>=50 else "Watch",
-                  "ic_expiry":best["expiry"],"ic_dte":best["dte"],
-                  "ic_credit_per_share":round(best["credit"],2),"ic_max_loss_per_share":round(best["max_loss"],2),
-                  "ic_credit_max_loss_pct":round(credit_ratio*100,1),"ic_pop_pct":best["probability_of_profit"],
-                  "ic_ce_cushion_em":round(best["ce_cushion"],2),"ic_pe_cushion_em":round(best["pe_cushion"],2),
-                  "ic_liquidity_score":round(liquidity_score,1),"ic_min_leg_oi":min(x.get("oi",0) for x in all_legs),
-                  "ic_min_short_oi":min(short_oi),"ic_min_hedge_oi":min(hedge_oi),"ic_total_leg_volume":total_vol,
-                  "ic_max_leg_spread_pct":round(max(spreads),2) if spreads else None,
-                  "ic_max_short_spread_pct":round(max(short_spreads),2) if short_spreads else None,
-                  "ic_max_hedge_spread_pct":round(max(hedge_spreads),2) if hedge_spreads else None,
-                  "ic_short_liquidity_ok":short_liq_ok,"ic_hedge_liquidity_ok":hedge_liq_ok,
-                  "trend_regime":trend.get("regime") if trend_ok else None,"trend_adx":trend.get("adx14") if trend_ok else None,
-                  "event_score":event_score,"event_flags":flags,"hard_reasons":hard_reasons,
-                  "ic_legs":{"sell_call":best["sell_call"]["strike"],"buy_call":best["buy_call"]["strike"],
-                             "sell_put":best["sell_put"]["strike"],"buy_put":best["buy_put"]["strike"]}})
-        evaluated.append(r)
     eligible=[r for r in evaluated if not r["hard_reasons"]]
     eligible.sort(key=lambda x:x["ic_score"],reverse=True)
     for i,r in enumerate(eligible,1): r["rank"]=i; r["total"]=len(eligible)
@@ -1865,8 +2097,9 @@ def screener():
             # Refresh event risk with the actual headlines available now.
             r["event_score"],r["event_flags"]=ic_event_risk(r["symbol"],r["ic_expiry"],r.get("headlines"))
     for r in top: r["iv_trend"]=get_iv_trend_from_history(r["symbol"],hist)
-    SCREENER_CACHE["results"]=eligible+excluded; SCREENER_CACHE["fetched_at"]=now_ist()
-    return jsonify({"count":len(base),"eligible_count":len(eligible),"stocks":top,"excluded_sample":excluded[:10],"deep_evaluated":deep_evaluated,
+    IC_SCREENER_CACHE["results"]=eligible+excluded; IC_SCREENER_CACHE["fetched_at"]=now_ist()
+    return jsonify({"count":len(base),"eligible_count":len(eligible),"stocks":top,"excluded_sample":excluded[:10],"deep_evaluated":deep_evaluated,"evaluation_error_count":len(evaluation_errors),
+                    "evaluation_errors_sample":evaluation_errors[:10],
                     "ban_list_note":"F&O ban list checked; banned symbols are excluded." if bans is not None else "F&O ban list unavailable — verify manually.",
                     "config":{"target_delta":target_delta,"min_dte":min_dte,"max_dte":max_dte,"preferred_dte":[IC_PREFERRED_DTE_LOW,IC_PREFERRED_DTE_HIGH],
                               "weights":IC_SCORE_WEIGHTS,"evaluated_universe":deep_evaluated,
@@ -1875,35 +2108,39 @@ def screener():
                     "note":"Full-universe Iron-Condor ranking. Every usable F&O stock and every expiry in the requested DTE window is evaluated; multiple delta/wing combinations are considered. Liquidity is asymmetric: short premium legs are held to a stronger execution standard than far-OTM hedges. Cushion and credit/max-loss are scored rather than treated as arbitrary pass/fail cliffs. The score is a heuristic, not a backtest or probability guarantee. Kite supplies quotes/depth/OI/volume; earnings dates are not supplied by Kite Connect and are not treated as verified here."})
 
 
-def get_stock_rank(symbol):
-    if not SCREENER_CACHE["results"]: return None
-    for r in SCREENER_CACHE["results"]:
-        if r["symbol"]==symbol:
-            return {k:r.get(k) for k in ("rank","total","hv_annualized_pct","atr_pct_of_price","atm_iv_pct","iv_rank_pct","composite_score","liquidity_ok","fo_banned_today",
-                                          "ic_score","ic_label","ic_expiry","ic_dte","ic_credit_per_share","ic_max_loss_per_share","ic_credit_max_loss_pct","ic_pop_pct",
-                                          "ic_ce_cushion_em","ic_pe_cushion_em","ic_liquidity_score","ic_min_leg_oi","ic_total_leg_volume","ic_max_leg_spread_pct","trend_regime","trend_adx","event_flags")} | {"screener_age_minutes":round((now_ist()-SCREENER_CACHE["fetched_at"]).total_seconds()/60,1)}
-    return None
+
+@app.route("/api/screener-health")
+def screener_health():
+    if not require_session():
+        return jsonify({"error":"not_logged_in"}), 401
+    now = time.monotonic()
+    return jsonify({"stock_screener_cache":bool(SCREENER_CACHE.get("results")),
+                    "ic_screener_cache":bool(IC_SCREENER_CACHE.get("results")),
+                    "ic_error_count":len(IC_SCREENER_CACHE.get("errors",[])),
+                    "quote_cache_size":len(_QUOTE_CACHE),
+                    "quote_cooldown_seconds":round(max(0.0, _QUOTE_COOLDOWN_UNTIL-now),2),
+                    "quote_min_interval":_QUOTE_MIN_INTERVAL,
+                    "quote_cache_ttl":_QUOTE_CACHE_TTL})
 
 
 # ---------------------------------------------------------------------------
 # Expiry list + option chain (supports stocks AND indices, any expiry you pick)
 # ---------------------------------------------------------------------------
 def get_spot_price(symbol):
-    """Returns (spot_price, error_dict_or_None). Handles both index symbols and F&O stocks."""
+    """Returns (spot_price, error_dict_or_None). Uses the shared quote cache first and
+    only falls back to a rate-limited single Quote call when no cached value exists."""
     symbol = symbol.upper()
-    if symbol in INDEX_SYMBOLS:
-        key = INDEX_SYMBOLS[symbol]
-        try:
-            quote = kite.quote([key])[key]
+    key = INDEX_SYMBOLS.get(symbol) if symbol in INDEX_SYMBOLS else f"NSE:{symbol}"
+    cached = _quote_cache_get([key]).get(key)
+    if cached and cached.get("last_price") is not None:
+        return cached["last_price"], None
+    try:
+        quote = kite_quote_bulk([key], chunk_size=500, retries=1).get(key)
+        if quote and quote.get("last_price") is not None:
             return quote["last_price"], None
-        except Exception as e:
-            return None, {"error": f"Could not fetch {symbol} index quote: {e}"}
-    _, nse = get_instruments()
-    nse_match = [i for i in nse if i["exchange"] == "NSE" and i["tradingsymbol"] == symbol]
-    if not nse_match:
-        return None, {"error": f"{symbol} not found on NSE and not a recognized index (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY)"}
-    quote = kite.quote([f"NSE:{symbol}"])[f"NSE:{symbol}"]
-    return quote["last_price"], None
+        return None, {"error": f"No live quote returned for {symbol}"}
+    except Exception as e:
+        return None, {"error": f"Could not fetch {symbol} quote: {e}"}
 
 
 @app.route("/api/expiries/<symbol>")
@@ -1954,7 +2191,7 @@ def get_chain_for_symbol(symbol, expiry_str=None):
     chain = [o for o in opts if o["expiry"] == expiry]
     lot_size = chain[0]["lot_size"]
     inst_keys = [f"NFO:{o['tradingsymbol']}" for o in chain]
-    quotes = kite.quote(inst_keys)
+    quotes = kite_quote_bulk(inst_keys)
 
     enriched = []
     for o in chain:
@@ -2474,7 +2711,7 @@ def position_greeks(position):
 
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
     try:
-        quotes = kite.quote(inst_keys)
+        quotes = kite_quote_bulk(inst_keys)
     except Exception as e:
         return {"error": str(e)}
 
@@ -2729,7 +2966,7 @@ def calendar_watchlist_curve(pos_id):
     inst_keys = [f"NFO:{position['legs']['buy_call_far']['tradingsymbol']}",
                  f"NFO:{position['legs']['buy_put_far']['tradingsymbol']}"]
     try:
-        quotes = kite.quote(inst_keys)
+        quotes = kite_quote_bulk(inst_keys)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -2787,7 +3024,7 @@ def mark_to_market_calendar(position):
     leg_keys = ["sell_call_near", "sell_put_near", "buy_call_far", "buy_put_far"]
 
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
-    quotes = kite.quote(inst_keys)
+    quotes = kite_quote_bulk(inst_keys)
 
     prices, missing_legs = {}, []
     for k in leg_keys:
@@ -2922,7 +3159,7 @@ def mark_to_market(position):
     quantity = position.get("quantity", position["lot_size"])
 
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
-    quotes = kite.quote(inst_keys)
+    quotes = kite_quote_bulk(inst_keys)
 
     prices, missing_legs = {}, []
     for k in leg_keys:
@@ -3315,7 +3552,7 @@ def build_close_orders(position):
     quantity = position.get("quantity", position["lot_size"])
     leg_keys = leg_keys_for(position)
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
-    quotes = kite.quote(inst_keys)
+    quotes = kite_quote_bulk(inst_keys)
 
     orders = []
     for k in leg_keys:
@@ -3525,7 +3762,7 @@ def broker_positions_exit():
     if any_priced:
         inst_keys = [f"NFO:{lg['tradingsymbol']}" for lg in legs_to_place]
         try:
-            quotes = kite.quote(inst_keys)
+            quotes = kite_quote_bulk(inst_keys)
         except Exception:
             quotes = {}
         for lg in legs_to_place:
@@ -3558,7 +3795,7 @@ def broker_quote(instrument):
     if not require_session(): return jsonify({"error":"not_logged_in"}),401
     try:
         key=instrument if ":" in instrument else f"NSE:{instrument.upper()}"
-        return jsonify({"quote":kite.quote([key]).get(key)})
+        return jsonify({"quote":kite_quote_bulk([key]).get(key)})
     except Exception as e: return jsonify({"error":str(e)}),400
 
 @app.route("/api/trades")
@@ -4432,7 +4669,7 @@ def _monitor_autotrade_positions(state, trades):
         if trade["status"] != "open":
             continue
         try:
-            q = kite.quote([f"NFO:{trade['tradingsymbol']}"]).get(f"NFO:{trade['tradingsymbol']}")
+            q = kite_quote_bulk([f"NFO:{trade['tradingsymbol']}"]).get(f"NFO:{trade['tradingsymbol']}")
             ltp = extract_price(q)
         except Exception as e:
             state["last_error"] = f"Quote fetch failed for {trade['tradingsymbol']}: {e}"
@@ -4658,7 +4895,7 @@ def autotrade_close_all():
     for trade in trades:
         if trade["status"] == "open":
             try:
-                q = kite.quote([f"NFO:{trade['tradingsymbol']}"]).get(f"NFO:{trade['tradingsymbol']}")
+                q = kite_quote_bulk([f"NFO:{trade['tradingsymbol']}"]).get(f"NFO:{trade['tradingsymbol']}")
                 trade["last_ltp"] = extract_price(q) or trade["last_ltp"]
             except Exception:
                 pass
