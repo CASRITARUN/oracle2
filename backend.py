@@ -59,8 +59,8 @@ from typing import List, Optional, Callable, Dict, Any, Tuple
 # this process starts) — do NOT hardcode real keys/secrets directly in this file,
 # especially if this file is ever shared, committed to git, or pasted anywhere.
 # ---------------------------------------------------------------------------
-API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
-API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
+API_KEY = os.environ.get("KITE_API_KEY", "").strip()
+API_SECRET = os.environ.get("KITE_API_SECRET", "").strip()
 REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
 
 # If your network does TLS interception (common on office/government networks — you'll see
@@ -242,7 +242,7 @@ def _quote_cache_get(keys):
     return out
 
 
-def kite_quote_bulk(keys, *, chunk_size=500, retries=1):
+def kite_quote_bulk(keys, *, chunk_size=500, retries=1, force_refresh=False):
     """Rate-limited, cached wrapper around Kite's /quote endpoint.
 
     Kite supports up to 500 instruments per /quote call, but the endpoint is limited to
@@ -253,8 +253,8 @@ def kite_quote_bulk(keys, *, chunk_size=500, retries=1):
     keys = list(dict.fromkeys(k for k in keys if k))
     if not keys:
         return {}
-    result = _quote_cache_get(keys)
-    missing = [k for k in keys if k not in result]
+    result = {} if force_refresh else _quote_cache_get(keys)
+    missing = list(keys) if force_refresh else [k for k in keys if k not in result]
     if not missing:
         return result
 
@@ -1552,7 +1552,7 @@ def refresh_execution_quotes(position):
     quantity = position.get("quantity", position["lot_size"])
     leg_keys = leg_keys_for(position)
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
-    quotes = kite.quote(inst_keys)
+    quotes = kite_quote_bulk(inst_keys, force_refresh=True)
 
     orders = []
     for k in leg_keys:
@@ -3815,13 +3815,14 @@ def broker_positions():
         pos = kite.positions()
         net = pos.get("net", [])
         rows = []
+        open_rows = []
         for p in net:
             if p.get("exchange") != "NFO":
                 continue
             qty = int(p.get("quantity") or 0)
             if qty == 0:
                 continue  # already flat — nothing open on this tradingsymbol
-            rows.append({
+            row = {
                 "tradingsymbol": p.get("tradingsymbol"),
                 "product": p.get("product"),
                 "quantity": qty,
@@ -3830,8 +3831,36 @@ def broker_positions():
                 "last_price": p.get("last_price"),
                 "pnl": p.get("pnl"),
                 "close_price": p.get("close_price"),
-            })
-        return jsonify({"positions": rows})
+                "bid": None,
+                "ask": None,
+                "exit_price": None,
+                "exit_price_basis": None,
+            }
+            rows.append(row)
+            if p.get("tradingsymbol"):
+                open_rows.append(row)
+
+        # Fetch LIVE market depth for every open NFO leg.  Do not use the position
+        # response's close_price as Bid/Ask: it is not the current executable quote.
+        # A LONG position is closed with SELL at Bid; a SHORT position is closed
+        # with BUY at Ask.  This is also what the frontend uses for the displayed
+        # immediately-executable P&L.
+        if open_rows:
+            quote_keys = [f"NFO:{r['tradingsymbol']}" for r in open_rows]
+            quotes = kite_quote_bulk(quote_keys, force_refresh=True)
+            for r in open_rows:
+                q = quotes.get(f"NFO:{r['tradingsymbol']}") or {}
+                bid, ask = extract_bid_ask(q)
+                r["bid"] = bid
+                r["ask"] = ask
+                if r["side"] == "LONG":
+                    r["exit_price"] = bid
+                    r["exit_price_basis"] = "BID"
+                else:
+                    r["exit_price"] = ask
+                    r["exit_price_basis"] = "ASK"
+
+        return jsonify({"positions": rows, "refreshed_at": now_ist().strftime("%H:%M:%S")})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -3857,44 +3886,68 @@ def broker_positions_exit():
     product = body.get("product", "NRML")
 
     legs_to_place = []
-    any_priced = False
     for lg in legs:
         if not lg.get("tradingsymbol"):
             continue
         qty = abs(int(lg.get("quantity") or 0))
         if qty <= 0:
             continue
-        close_txn = "SELL" if str(lg.get("side", "LONG")).upper() == "LONG" else "BUY"
+        side = str(lg.get("side", "LONG")).upper()
+        close_txn = "SELL" if side == "LONG" else "BUY"
         price = lg.get("price")
-        if price not in (None, ""):
-            any_priced = True
         legs_to_place.append({
             "leg": lg["tradingsymbol"], "tradingsymbol": lg["tradingsymbol"],
             "transaction_type": close_txn, "quantity": qty,
             "price": float(price) if price not in (None, "") else None,
+            "_original_side": side,
         })
 
     if not legs_to_place:
         return jsonify({"error": "No valid legs to place."}), 400
 
-    # If ANY leg in this batch was given a specific price, place the whole batch as LIMIT orders
-    # (legs without a price fall back to their live reference price computed per-leg below);
-    # otherwise place everything MARKET.
-    if any_priced:
-        inst_keys = [f"NFO:{lg['tradingsymbol']}" for lg in legs_to_place]
-        try:
-            quotes = kite_quote_bulk(inst_keys)
-        except Exception:
-            quotes = {}
-        for lg in legs_to_place:
-            if lg["price"] is None:
-                lg["price"] = extract_price(quotes.get(f"NFO:{lg['tradingsymbol']}"))
-        order_type = "LIMIT"
-    else:
-        order_type = "MARKET"
+    # Zerodha market orders are not used by this exit path.  For every leg whose
+    # custom price is blank, fetch a FRESH quote immediately before placement:
+    #   LONG -> SELL at best Bid
+    #   SHORT -> BUY at best Ask
+    # These are marketable LIMIT orders and are intended to execute immediately
+    # at the current executable side, subject to the quote still being available
+    # when the order reaches the exchange.
+    inst_keys = [f"NFO:{lg['tradingsymbol']}" for lg in legs_to_place]
+    try:
+        quotes = kite_quote_bulk(inst_keys, force_refresh=True)
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch live Bid/Ask for exit: {e}"}), 502
 
+    missing = []
+    for lg in legs_to_place:
+        if lg["price"] is not None:
+            continue  # user explicitly supplied a custom LIMIT price
+        q = quotes.get(f"NFO:{lg['tradingsymbol']}") or {}
+        bid, ask = extract_bid_ask(q)
+        auto_price = bid if lg["_original_side"] == "LONG" else ask
+        if auto_price is None:
+            missing.append(lg["tradingsymbol"])
+        else:
+            lg["price"] = auto_price
+
+    if missing:
+        return jsonify({
+            "error": "Live Bid/Ask unavailable for: " + ", ".join(missing) +
+                     ". No exit orders were placed. Refresh positions and try again."
+        }), 502
+
+    for lg in legs_to_place:
+        lg.pop("_original_side", None)
+
+    # Always LIMIT here.  Blank custom prices are automatically converted to the
+    # correct marketable Bid/Ask price above.
+    order_type = "LIMIT"
     results = place_basket_orders(legs_to_place, product, order_type, sequence_for_margin=False)
-    return jsonify({"results": results})
+    return jsonify({
+        "results": results,
+        "order_type": order_type,
+        "note": "Auto-priced exits use fresh Bid for LONG positions and fresh Ask for SHORT positions."
+    })
 
 
 @app.route("/api/broker/account")
