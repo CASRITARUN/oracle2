@@ -2,7 +2,7 @@
 Kite Option-Selling Dashboard — local backend
 ------------------------------------------------
 Run:  python backend.py
-Then open: https://algo2.wecon.in
+Then open: https://algo.wecon.in
 
 What this does
 - Logs you into Kite Connect (daily login, token expires every day - that's Kite's design, not a bug here)
@@ -25,10 +25,6 @@ IMPORTANT
   account using real money. Nothing is placed without you explicitly confirming on the preview screen.
   If one leg of a multi-leg order fails, you may be left holding a partial, unhedged position — the
   tool stops immediately on the first failure and tells you to check your Zerodha app right away.
-- REQUIRES kiteconnect >= 5.1.1 (`pip install --upgrade kiteconnect`). Exchanges now reject MARKET/
-  SL-M orders placed via the API without a market_protection value (SEBI's retail algo-trading rules);
-  this file always sends one, but older SDK versions don't accept the parameter at all — see the
-  try/except around kite.place_order() in place_basket_orders() for the fallback behavior.
 """
 
 import os
@@ -38,7 +34,7 @@ import json
 import threading
 import logging
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify, send_from_directory, redirect
 
@@ -50,8 +46,6 @@ except ImportError:
 
 import numpy as np
 import requests
-from dataclasses import dataclass, field
-from typing import List, Optional, Callable, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------------
 # CONFIG — fill these in from https://developers.kite.trade (your app)
@@ -61,7 +55,8 @@ from typing import List, Optional, Callable, Dict, Any, Tuple
 # ---------------------------------------------------------------------------
 API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
 API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
-REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
+REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo.wecon.in/api/callback")
+
 # If your network does TLS interception (common on office/government networks — you'll see
 # "self-signed certificate in certificate chain" errors), set this env var to allow the news
 # feature specifically to fall back to an unverified request. This does NOT affect Kite API calls
@@ -74,20 +69,6 @@ MIN_DAYS_TO_EXPIRY = 7
 DEFAULT_TARGET_DELTA = 0.18
 DEFAULT_WING_WIDTH_PCT = 0.05
 CHAIN_STRIKE_RANGE_PCT = 0.25
-
-# --- Double Calendar Spread defaults ---
-# A double calendar is: SELL a near-term call + SELL a near-term put (usually a bit OTM each side),
-# and BUY a far-term call + far-term put at the SAME two strikes. It's a net-DEBIT, defined-risk
-# trade that profits from the near leg decaying faster than the far leg (positive theta, long vega) —
-# the "sweet spot" is the underlying sitting between the two short strikes at near expiry.
-DEFAULT_CALENDAR_OTM_PCT = 0.03      # each strike this far OTM from spot, in "otm_pct" strike mode
-DEFAULT_CALENDAR_TARGET_DELTA = 0.25 # used instead of otm_pct in "delta" strike mode
-CALENDAR_TARGET_GAP_DAYS = 30        # preferred day-gap between near and far expiry when auto-picking
-CALENDAR_CURVE_POINTS = 41           # number of spot points sampled for the payoff curve
-CALENDAR_CURVE_RANGE_PCT = 0.15      # curve spans spot x (1 +/- this), i.e. +/-15% around current spot
-# Exit-suggestion thresholds for tracked calendar positions (informational only, never auto-exits)
-CALENDAR_STOP_LOSS_DEBIT_MULTIPLE = 0.5   # suggest exit if loss reaches this multiple of debit paid
-CALENDAR_NEAR_EXPIRY_DAYS_WARNING = 3     # suggest exit/roll when this close to near-leg expiry (gamma risk)
 
 # --- Exit / stop-loss suggestion rule (informational only — this tool never auto-exits) ---
 # Trigger a suggested-exit flag when EITHER condition is met, whichever occurs first:
@@ -116,56 +97,20 @@ CHARGES = {
 # one snapshot per day, in a small local file. Until enough days have accumulated, iv_rank will
 # be null and we fall back to a same-day cross-sectional IV percentile (how rich this stock's IV
 # is TODAY relative to the other F&O stocks scanned today) so the field is never just empty.
-# NSE/BSE trade on IST (UTC+5:30) regardless of what timezone this server's OS happens to be set
-# to. Every "today", market-hours check, and historical-data window in this file needs to line up
-# with the EXCHANGE's clock, not the server's -- so all of that goes through this helper instead of
-# the bare now_ist(), which would silently use the server's local timezone and could otherwise
-# leave charts/scans looking "stuck" a few hours behind (or ahead) if the server isn't set to IST.
-IST = timezone(timedelta(hours=5, minutes=30))
-
-
-def now_ist():
-    """Current wall-clock time in IST, as a naive datetime (matching what Kite's historical-data
-    API expects, and what date/market-hours comparisons elsewhere in this file assume)."""
-    return datetime.now(IST).replace(tzinfo=None)
-
-
 IV_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "iv_history.json")
-IVR_LOOKBACK_DAYS = 252
-IVR_MIN_HISTORY_DAYS = 60        # genuine rank only after a meaningful history is available
+IVR_LOOKBACK_DAYS = 252          # ~1 trading year of daily ATM-IV snapshots kept per symbol
+IVR_MIN_HISTORY_DAYS = 20        # need at least this many stored days before trusting a real IV rank
 
-# Iron-Condor-specific screening. The ATM pair is still useful as a first liquidity gate,
-# but the final ranking is based on the ACTUAL four legs proposed for the condor.
-MIN_ATM_TOTAL_OI = 500
-MAX_ATM_SPREAD_PCT = 4.0
-IC_MIN_LEG_OI = 25
-IC_MAX_LEG_SPREAD_PCT = 15.0
-IC_MIN_TOTAL_VOLUME = 10
-IC_MIN_SHORT_OI = 200
-IC_MAX_SHORT_SPREAD_PCT = 7.0
-IC_MIN_SHORT_VOLUME = 10
-IC_MIN_CREDIT_TO_MAX_LOSS = 0.08
-IC_MIN_CUSHION_EM = 0.75
-IC_CHAIN_STRIKE_RANGE_PCT = 0.30
-IC_PREFERRED_DTE_LOW = 21
-IC_PREFERRED_DTE_HIGH = 35
-IC_MIN_DTE = 14
-IC_MAX_DTE = 50
-IC_DEFAULT_SHORT_DELTA_LOW = 0.15
-IC_DEFAULT_SHORT_DELTA_HIGH = 0.20
-IC_WING_WIDTHS_PCT = (0.02, 0.025, 0.035, 0.05, 0.07, 0.10)
+# Liquidity gate applied to the ATM strike (both legs) before a stock is allowed into the
+# "top picks" ranking — a calm, high-IV stock is still a bad pick if you can't get filled near mid.
+MIN_ATM_TOTAL_OI = 500           # combined ATM CE+PE open interest, in contracts (lots), not shares
+MAX_ATM_SPREAD_PCT = 4.0         # combined ATM CE+PE avg bid-ask spread, as % of mid price
 
-# Final IC score: volatility richness 25, range quality 20, expected-move cushion 20,
-# four-leg liquidity 15, trade economics 15, event risk 5.
-IC_SCORE_WEIGHTS = {
-    # Delta symmetry is deliberately explicit: a 0.18-delta IC should not silently
-    # become a 0.25/0.18 structure merely because the latter collects more premium.
-    "iv": 0.20, "range": 0.15, "cushion": 0.25,
-    "liquidity": 0.10, "economics": 0.15, "delta": 0.10, "event": 0.05,
-}
-SCORE_WEIGHTS = {"iv_richness": 0.40, "calmness": 0.35, "liquidity": 0.25}  # legacy display
+# Composite score weights (must sum to 1.0). Higher composite = better candidate for this
+# option-SELLING strategy: rich premium (high IV) + calm underlying + liquid enough to trade.
+SCORE_WEIGHTS = {"iv_richness": 0.40, "calmness": 0.35, "liquidity": 0.25}
 
-NEWS_FOR_TOP_N = 10
+NEWS_FOR_TOP_N = 10              # only fetch headlines for the final top-N shown, to keep this fast
 FO_BAN_LIST_URL = "https://nsearchives.nseindia.com/content/fo/fo_secban.csv"
 
 
@@ -231,76 +176,6 @@ def get_fo_ban_list():
                        f"before trading — this filter is best-effort only.")
 
 
-def _quote_cache_get(keys):
-    now = time.monotonic()
-    out = {}
-    for k in keys:
-        item = _QUOTE_CACHE.get(k)
-        if item and now - item["ts"] <= _QUOTE_CACHE_TTL:
-            out[k] = item["quote"]
-    return out
-
-
-def kite_quote_bulk(keys, *, chunk_size=500, retries=1):
-    """Rate-limited, cached wrapper around Kite's /quote endpoint.
-
-    Kite supports up to 500 instruments per /quote call, but the endpoint is limited to
-    1 request/sec. A 429 is followed by a cooldown before retrying. This function is
-    intentionally used by the screeners so one scan cannot DOS its own API session.
-    """
-    global _QUOTE_LAST_AT, _QUOTE_COOLDOWN_UNTIL
-    keys = list(dict.fromkeys(k for k in keys if k))
-    if not keys:
-        return {}
-    result = _quote_cache_get(keys)
-    missing = [k for k in keys if k not in result]
-    if not missing:
-        return result
-
-    for start in range(0, len(missing), max(1, min(int(chunk_size), 500))):
-        chunk = missing[start:start + max(1, min(int(chunk_size), 500))]
-        attempt = 0
-        while True:
-            with _QUOTE_LOCK:
-                now = time.monotonic()
-                wait_for = max(_QUOTE_LAST_AT + _QUOTE_MIN_INTERVAL - now,
-                               _QUOTE_COOLDOWN_UNTIL - now, 0.0)
-                if wait_for > 0:
-                    time.sleep(wait_for)
-                try:
-                    raw = kite.quote(chunk)
-                    _QUOTE_LAST_AT = time.monotonic()
-                    raw = raw or {}
-                    for k, q in raw.items():
-                        _QUOTE_CACHE[k] = {"quote": q, "ts": time.monotonic()}
-                        result[k] = q
-                    break
-                except Exception as e:
-                    msg = str(e).lower()
-                    is_429 = "too many requests" in msg or getattr(e, "code", None) == 429
-                    _QUOTE_LAST_AT = time.monotonic()
-                    if is_429 and attempt < retries:
-                        _QUOTE_COOLDOWN_UNTIL = time.monotonic() + _QUOTE_429_COOLDOWN
-                        attempt += 1
-                        logger.warning("Kite quote rate limit hit; cooling down %.1fs before retry", _QUOTE_429_COOLDOWN)
-                        time.sleep(_QUOTE_429_COOLDOWN)
-                        continue
-                    logger.warning("Kite quote batch failed (%d instruments): %s", len(chunk), e)
-                    break
-    return result
-
-
-def seed_spot_cache_from_prices(rows):
-    now = time.monotonic()
-    for r in rows:
-        sym = str(r.get("symbol", "")).upper()
-        price = r.get("ltp") or r.get("last_close")
-        if sym and price:
-            _QUOTE_CACHE[f"NSE:{sym}"] = {
-                "quote": {"last_price": float(price)}, "ts": now
-            }
-
-
 def pick_atm_contracts(nfo_opts_for_symbol, last_close, today):
     """Given this symbol's NFO-OPT instruments, last close price, and today's date, picks the
     nearest valid expiry (same MIN_DAYS_TO_EXPIRY rule as the strategy builder) and the strike
@@ -347,7 +222,7 @@ def get_atm_iv_and_liquidity_bulk(candidates, nfo):
     a full option chain per stock (like get_chain_for_symbol does for a single symbol) would mean
     hundreds of extra round-trips here. Returns {symbol: {atm_iv_pct, atm_oi_total, spread_pct,
     expiry}} — a symbol is omitted if its ATM contracts couldn't be resolved or quoted."""
-    today = now_ist().date()
+    today = datetime.now().date()
     opts_by_symbol = {}
     for o in nfo:
         if o["segment"] == "NFO-OPT":
@@ -364,7 +239,14 @@ def get_atm_iv_and_liquidity_bulk(candidates, nfo):
             needed_keys.append(f"NFO:{ce_ts}")
             needed_keys.append(f"NFO:{pe_ts}")
 
-    quotes = kite_quote_bulk(needed_keys, chunk_size=500, retries=1)
+    quotes = {}
+    chunk_size = 200
+    for i in range(0, len(needed_keys), chunk_size):
+        chunk = needed_keys[i:i + chunk_size]
+        try:
+            quotes.update(kite.quote(chunk))
+        except Exception:
+            continue  # skip this chunk rather than fail the whole screener
 
     out = {}
     for sym, (ce_ts, pe_ts, strike, expiry, T) in picks.items():
@@ -424,21 +306,9 @@ logging.basicConfig(
 logger = logging.getLogger("kite_dashboard")
 kite = KiteConnect(api_key=API_KEY)
 
-# Zerodha Quote API protection. Quote is limited to 1 request/second and a maximum of
-# 500 instruments per request. Keep one process-wide gate so Screen 1, Screen 2 and
-# other quote consumers cannot accidentally burst the API.
-_QUOTE_LOCK = threading.Lock()
-_QUOTE_LAST_AT = 0.0
-_QUOTE_COOLDOWN_UNTIL = 0.0
-_QUOTE_CACHE = {}  # key -> {"quote": dict, "ts": monotonic_seconds}
-_QUOTE_CACHE_TTL = float(os.environ.get("KITE_QUOTE_CACHE_TTL", "3.0"))
-_QUOTE_MIN_INTERVAL = float(os.environ.get("KITE_QUOTE_MIN_INTERVAL", "1.05"))
-_QUOTE_429_COOLDOWN = float(os.environ.get("KITE_QUOTE_429_COOLDOWN", "10.5"))
-
 SESSION = {"access_token": None, "logged_in_at": None}
 INSTRUMENT_CACHE = {"nfo": None, "nse": None, "fetched_at": None}
 SCREENER_CACHE = {"results": None, "fetched_at": None}
-IC_SCREENER_CACHE = {"results": None, "fetched_at": None}
 
 POSITIONS_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
 _positions_lock = threading.Lock()
@@ -509,7 +379,7 @@ def seed_event_calendar_if_missing():
 
 def get_upcoming_events(days_ahead=45):
     events = load_event_calendar()
-    today = now_ist().date()
+    today = datetime.now().date()
     upcoming = []
     for idx, e in enumerate(events):
         try:
@@ -541,7 +411,7 @@ def get_event_before_expiry(expiry_str):
         expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
     except Exception:
         return None
-    today = now_ist().date()
+    today = datetime.now().date()
     days_to_expiry = max((expiry_date - today).days, 0)
     events = get_upcoming_events(days_ahead=days_to_expiry)
     return events[0] if events else None
@@ -582,7 +452,7 @@ def archive_closed_position(position, close_results):
 
     history.append({
         "id": position["id"], "symbol": position["symbol"], "strategy_type": position.get("strategy_type"),
-        "added_on": position.get("added_on"), "closed_on": now_ist().date().isoformat(),
+        "added_on": position.get("added_on"), "closed_on": datetime.now().date().isoformat(),
         "entry_max_profit": position.get("entry_max_profit"), "entry_max_loss": position.get("entry_max_loss"),
         "estimated_realized_pnl": round(est_realized_pnl, 2),
         "entry_charges": entry_charges_total, "estimated_exit_charges": exit_charges["total"],
@@ -639,704 +509,6 @@ def implied_vol(price, S, K, T, opt_type, r=RISK_FREE_RATE):
     return (lo + hi) / 2
 
 
-# ---------------------------------------------------------------------------
-# Greeks — Gamma / Theta / Vega (Delta/Price/IV are above) + portfolio aggregation, used by the
-# Dynamic Delta-Neutral Adjustment Engine further down. Reuses the exact same bs_price / bs_delta /
-# norm_cdf already defined above so every Greek across the whole app is priced identically.
-#
-# Sign convention: a SHORT leg (you sold it) contributes the NEGATIVE of the raw per-unit option
-# Greek to the portfolio; a LONG leg (bought, e.g. a hedge) contributes the raw (positive) Greek.
-# This is expressed by passing `quantity` already signed (negative = short, positive = long) — every
-# Greek is multiplied by that signed quantity, so the sign logic lives in exactly one place.
-# ---------------------------------------------------------------------------
-def norm_pdf(x):
-    return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
-
-
-def _d1_d2(S, K, T, r, sigma):
-    d1 = (math.log(S / K) + (r + sigma ** 2 / 2) * T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
-    return d1, d2
-
-
-def bs_gamma(S, K, T, r, sigma):
-    """Identical for calls and puts at the same strike/expiry. Per 1-point move in the underlying."""
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    d1, _ = _d1_d2(S, K, T, r, sigma)
-    return norm_pdf(d1) / (S * sigma * math.sqrt(T))
-
-
-def bs_vega(S, K, T, r, sigma):
-    """Per 1 percentage point (0.01) change in IV — the convention traders actually quote."""
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    d1, _ = _d1_d2(S, K, T, r, sigma)
-    return S * norm_pdf(d1) * math.sqrt(T) / 100.0
-
-
-def bs_theta(S, K, T, r, sigma, opt_type):
-    """Per calendar day (annualized theta / 365)."""
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    d1, d2 = _d1_d2(S, K, T, r, sigma)
-    term1 = -(S * norm_pdf(d1) * sigma) / (2 * math.sqrt(T))
-    if opt_type == "CE":
-        term2 = -r * K * math.exp(-r * T) * norm_cdf(d2)
-    else:
-        term2 = r * K * math.exp(-r * T) * norm_cdf(-d2)
-    return (term1 + term2) / 365.0
-
-
-@dataclass
-class LegGreeks:
-    tradingsymbol: str
-    role: str            # "sell_call" | "sell_put" | "buy_call" | "buy_put" | ...
-    opt_type: str         # "CE" | "PE"
-    strike: float
-    quantity: int          # SIGNED: negative for short legs, positive for long legs
-    ltp: float
-    delta: float
-    gamma: float
-    theta: float
-    vega: float
-    mtm: float
-
-
-@dataclass
-class PortfolioGreeks:
-    symbol: str
-    spot: float
-    net_delta: float = 0.0
-    net_gamma: float = 0.0
-    net_theta: float = 0.0
-    net_vega: float = 0.0
-    mtm: float = 0.0
-    legs: List[LegGreeks] = field(default_factory=list)
-
-    def as_dict(self):
-        return {
-            "symbol": self.symbol, "spot": self.spot,
-            "net_delta": round(self.net_delta, 2), "net_gamma": round(self.net_gamma, 4),
-            "net_theta": round(self.net_theta, 2), "net_vega": round(self.net_vega, 2),
-            "mtm": round(self.mtm, 2),
-            "legs": [vars(l) for l in self.legs],
-        }
-
-
-class PortfolioGreeksEngine:
-    """Computes per-leg and portfolio-level Greeks from plain dicts. The caller is responsible for
-    fetching live spot/LTP/IV and passing them in."""
-
-    def __init__(self, risk_free_rate=RISK_FREE_RATE):
-        self.r = risk_free_rate
-
-    def leg_greeks(self, *, opt_type, strike, spot, T, iv, ltp, quantity, role, tradingsymbol,
-                   entry_premium=None):
-        delta = bs_delta(spot, strike, T, self.r, iv, opt_type) * quantity
-        gamma = bs_gamma(spot, strike, T, self.r, iv) * quantity
-        theta = bs_theta(spot, strike, T, self.r, iv, opt_type) * quantity
-        vega = bs_vega(spot, strike, T, self.r, iv) * quantity
-        mtm = 0.0
-        if entry_premium is not None:
-            # Short leg profits when ltp falls below entry premium; long leg profits when ltp rises.
-            per_unit_pnl = (entry_premium - ltp) if quantity < 0 else (ltp - entry_premium)
-            mtm = per_unit_pnl * abs(quantity)
-        return LegGreeks(tradingsymbol, role, opt_type, strike, quantity, ltp,
-                          round(delta, 4), round(gamma, 6), round(theta, 4), round(vega, 4),
-                          round(mtm, 2))
-
-    def portfolio_greeks(self, symbol, spot, legs):
-        """legs: iterable of dicts, each with opt_type, strike, T, iv, ltp, quantity (signed), role,
-        tradingsymbol, and optionally entry_premium (for MTM)."""
-        pg = PortfolioGreeks(symbol=symbol, spot=spot)
-        for leg in legs:
-            lg = self.leg_greeks(**leg)
-            pg.legs.append(lg)
-            pg.net_delta += lg.delta
-            pg.net_gamma += lg.gamma
-            pg.net_theta += lg.theta
-            pg.net_vega += lg.vega
-            pg.mtm += lg.mtm
-        return pg
-
-
-# ---------------------------------------------------------------------------
-# Risk Management — configurable gates for the Delta Neutral Adjustment Engine. Every check here is
-# a pure function of (limits, current numbers) -> (allowed: bool, reason: str); nothing in this
-# section places or cancels orders, it only decides whether the Adjustment Engine / Execution code
-# further down is ALLOWED to act.
-# ---------------------------------------------------------------------------
-@dataclass
-class RiskLimits:
-    max_adjustments_per_day: int = 6
-    max_loss_per_position: float = 15000.0        # Rs, absolute MTM loss on a single position
-    max_daily_mtm_loss: float = 25000.0            # Rs, absolute MTM loss across ALL positions today
-    min_premium_for_adjustment: float = 8.0        # Rs; don't roll/adjust into a leg worth less than this
-    profit_targets_pct: Tuple[float, ...] = (25.0, 50.0, 70.0, 90.0)   # staged profit-booking levels
-    stop_loss_pct: float = 200.0                   # % of credit received; exit if MTM loss exceeds this
-
-
-class RiskManager:
-    def __init__(self, limits: RiskLimits):
-        self.limits = limits
-
-    def can_adjust(self, *, adjustments_today: int, position_mtm: float, daily_mtm: float,
-                    proposed_leg_premium: Optional[float] = None) -> Tuple[bool, str]:
-        if adjustments_today >= self.limits.max_adjustments_per_day:
-            return False, f"Max adjustments/day reached ({self.limits.max_adjustments_per_day})"
-        if position_mtm <= -abs(self.limits.max_loss_per_position):
-            return False, f"Position MTM loss (Rs {position_mtm:.0f}) exceeds max loss per position"
-        if daily_mtm <= -abs(self.limits.max_daily_mtm_loss):
-            return False, f"Daily MTM loss (Rs {daily_mtm:.0f}) exceeds max daily loss for this symbol"
-        if proposed_leg_premium is not None and proposed_leg_premium < self.limits.min_premium_for_adjustment:
-            return False, (f"Proposed leg premium Rs {proposed_leg_premium:.2f} is below the minimum "
-                            f"Rs {self.limits.min_premium_for_adjustment} required to bother adjusting")
-        return True, "OK"
-
-    def breached_daily_loss(self, daily_mtm: float) -> bool:
-        return daily_mtm <= -abs(self.limits.max_daily_mtm_loss)
-
-    def profit_target_hit(self, credit_received: float, current_mtm: float) -> Optional[float]:
-        """Returns the highest configured profit-target % that's been reached, or None. Positions
-        are meant to be closed in FULL the moment any configured target is hit."""
-        if credit_received <= 0:
-            return None
-        pct_captured = (current_mtm / credit_received) * 100.0
-        hit = [t for t in sorted(self.limits.profit_targets_pct) if pct_captured >= t]
-        return max(hit) if hit else None
-
-    def stop_loss_hit(self, credit_received: float, current_mtm: float) -> bool:
-        if credit_received <= 0:
-            return False
-        loss_pct = (-current_mtm / credit_received) * 100.0
-        return loss_pct >= self.limits.stop_loss_pct
-
-
-# ---------------------------------------------------------------------------
-# Adjustment Engine — Scenario A/B logic and a transparent multi-factor scorer (this IS the "AI
-# Recommendation Engine" from the spec, implemented as an inspectable weighted-score model rather
-# than an opaque trained model, so every number that drives a decision is loggable and auditable).
-#
-# --- Why net delta goes NEGATIVE when the market moves UP (easy to get backwards) ---
-# Selling a call is a short-delta position (lose as price rises, like being short the underlying);
-# selling a put is a long-delta position (lose as price falls, like being long the underlying). In a
-# roughly delta-neutral short strangle/condor, both are sized to net close to zero. If the underlying
-# RISES: the short call moves closer to the money -> its delta magnitude grows -> your (negative)
-# delta exposure from that leg grows more negative; the short put moves further OTM -> its delta
-# shrinks toward zero -> your (positive) exposure from that leg shrinks. Both effects push net
-# portfolio delta MORE NEGATIVE as spot rises (consistent with losing money as price rises = negative
-# delta). The mirror is true on the way down:
-#     net_delta very NEGATIVE  <=>  market has moved UP, the CALL side is under stress  (Scenario A)
-#     net_delta very POSITIVE  <=>  market has moved DOWN, the PUT side is under stress (Scenario B)
-# ---------------------------------------------------------------------------
-@dataclass
-class AdjustmentCandidate:
-    action: str                  # "roll_put_up" | "roll_call_down" | "roll_call_further_otm" |
-                                  # "roll_put_further_otm" | "convert_iron_fly" | "add_hedge" | "no_action"
-    description: str
-    legs_to_close: list = field(default_factory=list)   # leg dicts to buy back / sell to close
-    legs_to_open: list = field(default_factory=list)    # leg dicts describing the new legs
-    expected_delta_after: float = 0.0
-    additional_premium: float = 0.0     # Rs collected (positive) or paid (negative) net of this adjustment
-    margin_impact: float = 0.0          # Rs, additional margin this adjustment is expected to require
-    risk_reduction_score: float = 0.0   # 0-1: how much closer to delta-neutral this gets you
-    probability_of_profit: float = 0.0  # 0-1
-    expected_drawdown: float = 0.0      # Rs, rough worst-case add-on risk from taking this action
-    score: float = 0.0
-    reasoning: str = ""
-
-
-class AdjustmentEngine:
-    def __init__(self, delta_threshold=10.0, gamma_threshold=None, weights=None):
-        self.delta_threshold = delta_threshold
-        self.gamma_threshold = gamma_threshold
-        # Weighted composite score — every factor normalized to a comparable 0..1-ish scale before
-        # weighting, so no single factor dominates purely because of its raw units (Rs vs a
-        # probability vs a percentage). Weights are configurable from Settings.
-        self.weights = weights or {
-            "expected_profit": 0.30, "risk_reduction": 0.30, "additional_premium": 0.15,
-            "margin_impact": 0.10, "probability_of_profit": 0.10, "expected_drawdown": 0.05,
-        }
-
-    def needs_adjustment(self, net_delta: float, net_gamma: Optional[float] = None):
-        """Ignore small delta changes — only trigger on a genuine, configured threshold breach."""
-        if abs(net_delta) < self.delta_threshold:
-            return False, "Delta within threshold, no action needed"
-        return True, f"Net delta {net_delta:+.1f} exceeds threshold +/-{self.delta_threshold}"
-
-    def scenario(self, net_delta: float) -> str:
-        """See class docstring above for the sign derivation. "up" = call side under stress (market
-        has risen); "down" = put side under stress (market has fallen)."""
-        return "up" if net_delta < 0 else "down"
-
-    def generate_candidates(self, position, portfolio_greeks, candidate_fetcher: Callable) -> List[AdjustmentCandidate]:
-        """Builds every viable AdjustmentCandidate for the current breach, per the priority list:
-        roll the threatened short strike further away, OR roll the calmer side's short strike closer
-        (collects more premium and adds offsetting delta), OR convert to an Iron Fly if that
-        materially flattens delta, OR add a standalone hedge if no roll alone brings delta back in
-        range. `candidate_fetcher(scenario, position, portfolio_greeks) -> list[dict]` supplies the
-        actual tradable strikes/premiums (live option chain)."""
-        scenario = self.scenario(portfolio_greeks.net_delta)
-        raw = candidate_fetcher(scenario, position, portfolio_greeks) or []
-        candidates = [AdjustmentCandidate(**c) for c in raw]
-        if not candidates:
-            candidates.append(AdjustmentCandidate(
-                action="no_action",
-                description="No viable roll/hedge candidate found within the configured strike/delta range",
-                expected_delta_after=portfolio_greeks.net_delta))
-        return candidates
-
-    def _score_candidate(self, cand: AdjustmentCandidate) -> AdjustmentCandidate:
-        expected_profit_norm = min(max(cand.additional_premium / 500.0, -1.0), 1.0)
-        risk_reduction_norm = min(max(cand.risk_reduction_score, 0.0), 1.0)
-        additional_premium_norm = min(max(cand.additional_premium / 500.0, -1.0), 1.0)
-        margin_norm = 1.0 - min(max(cand.margin_impact / 50000.0, 0.0), 1.0)
-        pop_norm = min(max(cand.probability_of_profit, 0.0), 1.0)
-        drawdown_norm = 1.0 - min(max(cand.expected_drawdown / 20000.0, 0.0), 1.0)
-
-        w = self.weights
-        score = (w["expected_profit"] * expected_profit_norm
-                 + w["risk_reduction"] * risk_reduction_norm
-                 + w["additional_premium"] * additional_premium_norm
-                 + w["margin_impact"] * margin_norm
-                 + w["probability_of_profit"] * pop_norm
-                 + w["expected_drawdown"] * drawdown_norm)
-        cand.score = round(score, 4)
-        cand.reasoning = (
-            f"{cand.action}: expected_profit={expected_profit_norm:.2f}, risk_reduction={risk_reduction_norm:.2f}, "
-            f"premium={additional_premium_norm:.2f}, margin={margin_norm:.2f}, pop={pop_norm:.2f}, "
-            f"drawdown={drawdown_norm:.2f} -> composite score {cand.score}"
-        )
-        return cand
-
-    def recommend(self, position, portfolio_greeks, candidate_fetcher: Callable):
-        """Full pipeline: threshold check -> generate candidates -> score -> pick the best.
-        Returns (recommended: AdjustmentCandidate | None, all_candidates: list, trigger_reason: str)."""
-        trigger, reason = self.needs_adjustment(portfolio_greeks.net_delta, portfolio_greeks.net_gamma)
-        if not trigger:
-            return None, [], reason
-        candidates = self.generate_candidates(position, portfolio_greeks, candidate_fetcher)
-        for c in candidates:
-            self._score_candidate(c)
-        candidates.sort(key=lambda c: c.score, reverse=True)
-        best = candidates[0] if candidates else None
-        return best, candidates, reason
-
-
-# ---------------------------------------------------------------------------
-# Execution wrapper — thin and deliberately dependency-injected: it takes backend's OWN
-# place_basket_orders function as an argument rather than calling the broker directly, so there is
-# exactly one place in this file that ever calls the real broker order-placement API.
-# ---------------------------------------------------------------------------
-@dataclass
-class ExecutionResult:
-    ok: bool
-    orders: list = field(default_factory=list)
-    error: str = None
-
-
-class AdjustmentExecutor:
-    def __init__(self, place_orders_fn: Callable[[List[Dict[str, Any]], str, str], list], product="NRML"):
-        self.place_orders_fn = place_orders_fn
-        self.product = product
-
-    def _build_legs(self, candidate):
-        legs = []
-        for leg in candidate.legs_to_close:
-            legs.append({
-                "leg": f"close_{leg['role']}", "tradingsymbol": leg["tradingsymbol"],
-                "transaction_type": "BUY" if leg["quantity"] < 0 else "SELL",
-                "quantity": abs(leg["quantity"]),
-            })
-        for leg in candidate.legs_to_open:
-            legs.append({
-                "leg": f"open_{leg['role']}", "tradingsymbol": leg["tradingsymbol"],
-                "transaction_type": "SELL" if leg["role"].startswith("sell") else "BUY",
-                "quantity": abs(leg["quantity"]),
-            })
-        return legs
-
-    def execute(self, candidate, execution_mode="track"):
-        """In "track" mode (default, matches the auto-trade engine's paper-trading pattern), no real
-        order is sent — fills are simulated immediately so downstream P&L/logging behaves exactly as
-        it would live."""
-        legs = self._build_legs(candidate)
-        if not legs:
-            return ExecutionResult(ok=True, orders=[])
-        if execution_mode == "track":
-            simulated = [{"status": "placed", "order_id": f"TRACK-ADJ-{i}", **leg}
-                         for i, leg in enumerate(legs)]
-            return ExecutionResult(ok=True, orders=simulated)
-        results = self.place_orders_fn(legs, self.product, "MARKET")
-        failed = [r for r in results if r.get("status") != "placed"]
-        return ExecutionResult(ok=not failed, orders=results,
-                                error=None if not failed else f"{len(failed)} leg(s) failed to place")
-
-
-# ---------------------------------------------------------------------------
-# Adjustment logging — structured, append-only JSON-lines log of every adjustment considered/taken.
-# ---------------------------------------------------------------------------
-class AdjustmentLogger:
-    def __init__(self, log_path):
-        self.log_path = log_path
-        self._lock = threading.Lock()
-        d = os.path.dirname(log_path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-
-    def log_adjustment(self, *, ts, symbol, spot, delta_before, delta_after, action,
-                        premium_collected, reason, execution_mode, candidates_considered=None):
-        entry = {
-            "ts": ts, "symbol": symbol, "spot": spot,
-            "delta_before": round(delta_before, 2), "delta_after": round(delta_after, 2),
-            "action": action,
-            "premium_collected": round(premium_collected, 2) if premium_collected else 0.0,
-            "reason": reason, "execution_mode": execution_mode,
-            "candidates_considered": candidates_considered or [],
-        }
-        with self._lock:
-            with open(self.log_path, "a") as f:
-                f.write(json.dumps(entry, default=str) + "\n")
-        return entry
-
-    def read_recent(self, limit=200):
-        if not os.path.exists(self.log_path):
-            return []
-        with self._lock:
-            with open(self.log_path, "r") as f:
-                lines = f.readlines()
-        out = []
-        for line in lines[-limit:]:
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                continue
-        out.reverse()
-        return out
-
-
-
-# ---------------------------------------------------------------------------
-# Delta Neutral Engine config + JSON-file persisted state — mirrors the AUTOTRADE_DEFAULTS /
-# load_autotrade_state pattern already used above, so both subsystems are operated the same way
-# (arm/disarm, a fixed set of configurable keys, daily counters that roll over at day-change).
-# ---------------------------------------------------------------------------
-DELTA_ENGINE_STATE_FILE = os.path.join(os.path.dirname(__file__), "delta_engine_state.json")
-_delta_engine_state_lock = threading.Lock()
-
-DELTA_ENGINE_DEFAULTS = {
-    "enabled": False,                # armed or not — monitoring/adjustment never runs unless True
-    # "track" (default, paper — no real orders) or "live". Mirrors the autotrade execution_mode
-    # safety pattern exactly: NOT settable via the bulk config route, only via a dedicated ack-gated
-    # route, so a stray "Save settings" click can never flip this to real orders.
-    "execution_mode": "track",
-    "symbols": ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
-    "delta_threshold": 10.0,         # absolute net portfolio delta that triggers an adjustment
-    "gamma_threshold": None,         # optional secondary confirmation; None = delta alone triggers
-    "max_adjustments_per_day": 6,
-    "max_loss_per_position": 15000.0,
-    "max_daily_mtm_loss": 25000.0,
-    "min_premium_for_adjustment": 8.0,
-    "profit_targets_pct": [25, 50, 70, 90],
-    "stop_loss_pct": 200.0,
-    "hedge_distance_pct": 2.5,
-    "delta_range_low": 0.15,
-    "delta_range_high": 0.20,
-    "expiry_selection": "nearest",   # "nearest" | "next"
-    "spot_poll_seconds": 1,          # underlying spot LTP refresh cadence (the "tick" loop)
-    "greeks_poll_seconds": 5,        # option-chain/premium refresh cadence (heavier call, rate-limited)
-    # Every risk counter below is keyed BY SYMBOL, not pooled -- a bad day on BANKNIFTY never eats
-    # into NIFTY's adjustment budget or vice versa, and each is evaluated independently.
-    "adjustments_today_by_symbol": {},   # {"NIFTY": 2, "BANKNIFTY": 0, ...}
-    "daily_mtm_by_symbol": {},           # {"NIFTY": -1200.0, ...}
-    "paused_symbols_today": [],          # symbols whose OWN daily-loss limit tripped -- new adjustments
-                                          # are skipped for just that symbol for the rest of the day;
-                                          # profit-target/stop-loss closing still applies to it as normal
-    "day": None,
-    "last_recommendation": None,
-    "last_scan_at": None,
-    "last_error": None,
-    "disarm_reason": None,
-}
-
-DELTA_ENGINE_CONFIGURABLE_KEYS = (
-    "symbols", "delta_threshold", "gamma_threshold", "max_adjustments_per_day",
-    "max_loss_per_position", "max_daily_mtm_loss", "min_premium_for_adjustment",
-    "profit_targets_pct", "stop_loss_pct", "hedge_distance_pct", "delta_range_low",
-    "delta_range_high", "expiry_selection", "spot_poll_seconds", "greeks_poll_seconds",
-)
-
-
-def dn_load_state():
-    if not os.path.exists(DELTA_ENGINE_STATE_FILE):
-        return dict(DELTA_ENGINE_DEFAULTS)
-    try:
-        with open(DELTA_ENGINE_STATE_FILE, "r") as f:
-            state = json.load(f)
-        merged = dict(DELTA_ENGINE_DEFAULTS)
-        merged.update(state)
-        return merged
-    except Exception:
-        return dict(DELTA_ENGINE_DEFAULTS)
-
-
-def dn_save_state(state):
-    with _delta_engine_state_lock:
-        with open(DELTA_ENGINE_STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2, default=str)
-
-
-# ---------------------------------------------------------------------------
-# Trading-logic enhancements: IV/HV, Expected Move, Probability of Touch,
-# Trend Detection (EMA/ADX/RSI), Volatility Regime. All heuristic / best-effort —
-# these support decision-making, they don't replace it.
-# ---------------------------------------------------------------------------
-def classify_iv_hv(iv_pct, hv_pct):
-    """IV/HV ratio + label. Rich IV relative to how much the stock actually moves is the
-    core edge in option selling — HV alone or IV alone can both be misleading."""
-    if not iv_pct or not hv_pct:
-        return None
-    ratio = iv_pct / hv_pct
-    if ratio > 1.30:
-        label = "Excellent"
-    elif ratio >= 1.10:
-        label = "Good"
-    elif ratio >= 1.0:
-        label = "Fair"
-    else:
-        label = "Avoid"
-    return {"iv_pct": iv_pct, "hv_pct": hv_pct, "ratio": round(ratio, 2), "label": label}
-
-
-def get_iv_trend_from_history(symbol, history):
-    """5/10/20-trading-day IV trend from the same iv_history.json used for IV Rank."""
-    series = sorted(history.get(symbol, []), key=lambda p: p["date"])
-    if len(series) < 2:
-        return None
-    today_iv = series[-1]["iv"]
-
-    def n_ago(n):
-        idx = len(series) - 1 - n
-        return series[idx]["iv"] if idx >= 0 else None
-
-    iv_5, iv_10, iv_20 = n_ago(5), n_ago(10), n_ago(20)
-    trend = "Stable"
-    if iv_5 is not None:
-        if today_iv > iv_5 * 1.05:
-            trend = "Rising"
-        elif today_iv < iv_5 * 0.95:
-            trend = "Falling"
-    return {"iv_now": today_iv, "iv_5d_ago": iv_5, "iv_10d_ago": iv_10, "iv_20d_ago": iv_20, "trend": trend}
-
-
-def expected_move(spot, atm_iv_pct, days_to_expiry):
-    """Expected Move = Spot x IV x sqrt(DTE/365). The standard 1-sigma range option sellers use
-    to decide whether a strike has enough of a cushion."""
-    if spot is None or atm_iv_pct is None or days_to_expiry is None:
-        return None
-    T = max(days_to_expiry, 0) / 365.0
-    em = spot * (atm_iv_pct / 100.0) * math.sqrt(T)
-    return {"expected_move": round(em, 2), "expected_move_pct": round(em / spot * 100, 2) if spot else None,
-            "upper": round(spot + em, 2), "lower": round(spot - em, 2)}
-
-
-def probability_of_touch(delta):
-    """Standard trading-desk approximation: POT is roughly 2x the delta of the strike (since
-    touching the strike at any point is roughly twice as likely as finishing beyond it at expiry)."""
-    if delta is None:
-        return None
-    return round(min(100.0, abs(delta) * 2 * 100), 1)
-
-
-def _ema(values, period):
-    if len(values) < period:
-        return None
-    ema = float(np.mean(values[:period]))
-    alpha = 2.0 / (period + 1)
-    for v in values[period:]:
-        ema = alpha * v + (1 - alpha) * ema
-    return ema
-
-
-def _rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return None
-    deltas = np.diff(closes)
-    gains = np.where(deltas > 0, deltas, 0.0)
-    losses = np.where(deltas < 0, -deltas, 0.0)
-    avg_gain = float(np.mean(gains[:period]))
-    avg_loss = float(np.mean(losses[:period]))
-    for i in range(period, len(deltas)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return float(100 - 100 / (1 + rs))
-
-
-def _rma(values, period):
-    """Wilder's smoothed moving average, used by ADX."""
-    if len(values) < period:
-        return np.array([])
-    rma = np.zeros(len(values) - period + 1)
-    rma[0] = np.mean(values[:period])
-    alpha = 1.0 / period
-    for i in range(1, len(rma)):
-        rma[i] = rma[i - 1] + alpha * (values[period - 1 + i] - rma[i - 1])
-    return rma
-
-
-def _adx(highs, lows, closes, period=14):
-    if len(closes) < period * 2 + 1:
-        return None
-    up_move = highs[1:] - highs[:-1]
-    down_move = lows[:-1] - lows[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    tr = np.maximum(highs[1:] - lows[1:],
-                     np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
-    atr_rma, plus_rma, minus_rma = _rma(tr, period), _rma(plus_dm, period), _rma(minus_dm, period)
-    n = min(len(atr_rma), len(plus_rma), len(minus_rma))
-    if n == 0:
-        return None
-    atr_safe = np.where(atr_rma[-n:] == 0, 1e-9, atr_rma[-n:])
-    plus_di = 100 * plus_rma[-n:] / atr_safe
-    minus_di = 100 * minus_rma[-n:] / atr_safe
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1e-9, (plus_di + minus_di))
-    if len(dx) < period:
-        return float(np.mean(dx))
-    adx_series = _rma(dx, period)
-    return float(adx_series[-1]) if len(adx_series) else float(np.mean(dx))
-
-
-def resolve_token_for_symbol(symbol):
-    """Shared instrument-token lookup for stocks AND indices (used by trend detection)."""
-    symbol = symbol.upper()
-    _, nse = get_instruments()
-    if symbol in INDEX_SYMBOLS:
-        wanted = INDEX_SYMBOLS[symbol].split(":")[1]
-        for i in nse:
-            if i["segment"] == "INDICES" and i["tradingsymbol"] == wanted:
-                return i["instrument_token"], None
-        return None, f"Could not resolve index token for {symbol}"
-    matches = [i for i in nse if i["exchange"] == "NSE" and i["tradingsymbol"] == symbol]
-    if not matches:
-        return None, f"{symbol} not found on NSE"
-    return matches[0]["instrument_token"], None
-
-
-def classify_trend_regime(ema20, ema50, ema100, adx, rsi):
-    trending = adx is not None and adx >= 25
-    bullish_stack = ema50 is not None and ema20 > ema50 and (ema100 is None or ema50 > ema100)
-    bearish_stack = ema50 is not None and ema20 < ema50 and (ema100 is None or ema50 < ema100)
-    if trending and bullish_stack and rsi is not None and rsi > 55:
-        return "Strong Uptrend", True
-    if trending and bearish_stack and rsi is not None and rsi < 45:
-        return "Strong Downtrend", True
-    if adx is not None and adx < 20 and rsi is not None and 40 <= rsi <= 60:
-        return "Range Bound", False
-    if adx is not None and 20 <= adx < 25:
-        return "Transitioning", False
-    return "Volatile / Mixed", False
-
-
-def get_trend_regime(symbol):
-    """EMA20/50/100 + ADX14 + RSI14 off ~220 days of daily candles. Premium selling (Iron
-    Condor/Strangle) works best in Range Bound markets — strong trends should generally be
-    avoided or handled with directional spreads instead."""
-    token, err = resolve_token_for_symbol(symbol)
-    if err:
-        return {"error": err}
-    to_date = now_ist()
-    from_date = to_date - timedelta(days=220)
-    try:
-        candles = kite.historical_data(token, from_date, to_date, "day")
-    except Exception as e:
-        return {"error": f"Historical data fetch failed: {e}"}
-    if len(candles) < 30:
-        return {"error": "Not enough historical data to classify trend (need 30+ trading days)"}
-    closes = np.array([c["close"] for c in candles])
-    highs = np.array([c["high"] for c in candles])
-    lows = np.array([c["low"] for c in candles])
-    ema20, ema50, ema100 = _ema(closes, 20), _ema(closes, 50), _ema(closes, 100)
-    adx, rsi = _adx(highs, lows, closes, 14), _rsi(closes, 14)
-    if ema20 is None or adx is None or rsi is None:
-        return {"error": "Not enough historical data for a reliable trend read"}
-    regime, avoid_selling = classify_trend_regime(ema20, ema50, ema100, adx, rsi)
-    return {"symbol": symbol.upper(), "ema20": round(ema20, 2),
-            "ema50": round(ema50, 2) if ema50 is not None else None,
-            "ema100": round(ema100, 2) if ema100 is not None else None,
-            "adx14": round(adx, 1), "rsi14": round(rsi, 1),
-            "regime": regime, "avoid_premium_selling": avoid_selling,
-            "note": "Heuristic (EMA slope + ADX strength + RSI), not a guaranteed signal."}
-
-
-def get_india_vix():
-    try:
-        q = kite_quote_bulk(["NSE:INDIA VIX"])["NSE:INDIA VIX"]
-        return q["last_price"], None
-    except Exception as e:
-        return None, str(e)
-
-
-def classify_volatility_regime(vix, iv_rank_pct):
-    """Commonly-cited India VIX bands. Thresholds are approximate conventions, not a rule
-    from any exchange — re-check against current market context."""
-    if vix is None:
-        return {"label": "Unknown", "recommendation": "Suitable",
-                "note": "India VIX unavailable right now; regime not classified."}
-    if vix < 12:
-        label = "Low Volatility"
-    elif vix < 18:
-        label = "Normal"
-    elif vix < 25:
-        label = "High Volatility"
-    else:
-        label = "Extreme"
-    if label == "Low Volatility":
-        rec = "Reduce Size" if (iv_rank_pct is not None and iv_rank_pct < 30) else "Suitable"
-    elif label == "Normal":
-        rec = "Suitable"
-    elif label == "High Volatility":
-        rec = "Reduce Size"
-    else:
-        rec = "Avoid"
-    return {"label": label, "india_vix": round(vix, 2), "recommendation": rec}
-
-
-def suggest_strategy_family(iv_rank_pct, trend):
-    """Simple rule table: strong trend -> directional spread; otherwise pick the non-directional
-    structure that fits the current IV regime."""
-    trend_label = trend.get("regime") if trend and not trend.get("error") else None
-    if trend_label in ("Strong Uptrend", "Strong Downtrend"):
-        base = "Bull Put Spread (directional credit spread)" if trend_label == "Strong Uptrend" \
-            else "Bear Call Spread (directional credit spread)"
-        return {"suggested": base,
-                "reason": f"{trend_label} detected — avoid non-directional premium selling "
-                          f"(Iron Condor/Strangle) into a strong trend."}
-    if iv_rank_pct is None:
-        return {"suggested": None,
-                "reason": "IV rank unavailable (run the Screener first) — can't classify IV regime yet."}
-    if iv_rank_pct >= 70:
-        return {"suggested": "Short Strangle or Iron Fly",
-                "reason": f"IV rank {iv_rank_pct}% is high — rich premium supports a more aggressive structure."}
-    if iv_rank_pct >= 40:
-        return {"suggested": "Iron Condor",
-                "reason": f"IV rank {iv_rank_pct}% is moderate — a defined-risk Iron Condor is the standard fit."}
-    return {"suggested": "Single-side Credit Spread, or skip",
-            "reason": f"IV rank {iv_rank_pct}% is low — premium is thin here."}
-
-
-def recommended_position_size(capital, risk_pct, max_loss_per_lot):
-    if not capital or not risk_pct or not max_loss_per_lot or max_loss_per_lot <= 0:
-        return None
-    max_risk_amount = capital * risk_pct / 100.0
-    lots = int(max_risk_amount // max_loss_per_lot)
-    return {"max_risk_amount": round(max_risk_amount, 2), "recommended_lots": max(lots, 0)}
-
-
 def extract_price(quote):
     """Fall back to bid/ask midpoint when last_price is 0 (illiquid/deep-OTM contracts that
     haven't traded today but still have resting orders) instead of silently dropping the strike."""
@@ -1359,172 +531,56 @@ def extract_price(quote):
     return None
 
 
-def quote_stats(q):
-    """Return best bid/ask, mid, spread %, top-level quantity and quote volume from a Kite quote."""
-    if not q:
-        return {"bid": None, "ask": None, "mid": None, "spread_pct": None, "bid_qty": 0, "ask_qty": 0,
-                "volume": 0, "oi": 0}
-    depth = q.get("depth", {}) or {}
-    buys = [x for x in depth.get("buy", []) if x.get("price", 0) > 0]
-    sells = [x for x in depth.get("sell", []) if x.get("price", 0) > 0]
-    bid = buys[0]["price"] if buys else None
-    ask = sells[0]["price"] if sells else None
-    mid = (bid + ask) / 2 if bid is not None and ask is not None else extract_price(q)
-    spread = ((ask - bid) / mid * 100) if bid is not None and ask is not None and mid else None
-    return {"bid": bid, "ask": ask, "mid": mid, "spread_pct": spread,
-            "bid_qty": int(buys[0].get("quantity", 0)) if buys else 0,
-            "ask_qty": int(sells[0].get("quantity", 0)) if sells else 0,
-            "volume": int(q.get("volume", 0) or 0), "oi": int(q.get("oi", 0) or 0)}
+
+def extract_bid_ask(quote):
+    """Return Zerodha best bid and best ask from live market depth."""
+    if not quote:
+        return None, None
+    depth = quote.get("depth", {}) or {}
+    buys = [b for b in (depth.get("buy") or []) if float(b.get("price") or 0) > 0]
+    sells = [s for s in (depth.get("sell") or []) if float(s.get("price") or 0) > 0]
+    bid = float(buys[0]["price"]) if buys else None
+    ask = float(sells[0]["price"]) if sells else None
+    return bid, ask
 
 
-def option_quality(o, q):
-    st = quote_stats(q)
-    return {**o, "ltp": extract_price(q), "bid": st["bid"], "ask": st["ask"],
-            "mid": st["mid"], "spread_pct": round(st["spread_pct"], 2) if st["spread_pct"] is not None else None,
-            "volume": st["volume"], "oi": st["oi"], "bid_qty": st["bid_qty"], "ask_qty": st["ask_qty"]}
+def recommended_limit_price(transaction_type, bid, ask, ltp=None):
+    """Marketable LIMIT: BUY uses best Ask; SELL uses best Bid."""
+    return (ask if ask is not None else ltp) if transaction_type == "BUY" else (bid if bid is not None else ltp)
 
 
-def normal_cdf(x):
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+def refresh_execution_quotes(position):
+    """Fetch fresh LTP/Bid/Ask and recommended LIMIT prices for all entry legs."""
+    quantity = position.get("quantity", position["lot_size"])
+    leg_keys = leg_keys_for(position)
+    inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
+    quotes = kite.quote(inst_keys)
 
-
-def model_expiry_probability_between(spot, lower, upper, iv_pct, days):
-    """Approximate risk-neutral probability of expiry spot between two prices using lognormal BS distribution."""
-    if not all(v is not None for v in (spot, lower, upper, iv_pct, days)) or spot <= 0 or lower <= 0 or upper <= lower or iv_pct <= 0:
-        return None
-    T = max(days, 1) / 365.0
-    sigma = iv_pct / 100.0
-    vol = sigma * math.sqrt(T)
-    mu = math.log(spot) + (RISK_FREE_RATE - 0.5 * sigma * sigma) * T
-    if vol <= 0:
-        return None
-    z_lo = (math.log(lower) - mu) / vol
-    z_hi = (math.log(upper) - mu) / vol
-    return round(max(0.0, min(1.0, normal_cdf(z_hi) - normal_cdf(z_lo))) * 100, 1)
-
-
-def score_band(value, bands):
-    for threshold, score in bands:
-        if value <= threshold:
-            return score
-    return bands[-1][1]
-
-
-def ic_event_risk(symbol, expiry_str, headlines=None):
-    """Only use data actually available to this application: seeded/manual event calendar + headline scan.
-    Zerodha does not provide an earnings calendar through Kite Connect, so this is deliberately not presented
-    as an earnings-date guarantee."""
-    flags = []
-    expiry_event = get_event_before_expiry(expiry_str)
-    if expiry_event:
-        flags.append({"type": "calendar", "label": expiry_event.get("label"), "date": expiry_event.get("date")})
-    risky_words = ("result", "earnings", "dividend", "bonus", "split", "merger", "demerger", "acquisition",
-                   "buyback", "order", "regulatory", "court", "approval", "rating", "downgrade", "upgrade")
-    for h in headlines or []:
-        title = (h.get("title") or "").lower()
-        if any(w in title for w in risky_words):
-            flags.append({"type": "headline", "label": h.get("title"), "date": h.get("pub_date")})
-    score = 100
-    if any(x["type"] == "calendar" for x in flags): score -= 50
-    if any(x["type"] == "headline" for x in flags): score -= 25
-    return max(0, score), flags
-
-
-def build_ic_candidate_from_chain(symbol, spot, expiry, chain, target_delta=0.18, wing_width_pct=None,
-                                   lots=1, force_symmetric=False, call_delta=None, put_delta=None):
-    """Build an IC from already-quoted chain data. Optimises liquidity/economics while preserving
-    the user's target delta; this is the core used by both the screener and strategy builder."""
-    calls = sorted([o for o in chain if o["instrument_type"] == "CE" and o.get("delta") is not None], key=lambda x: x["strike"])
-    puts = sorted([o for o in chain if o["instrument_type"] == "PE" and o.get("delta") is not None], key=lambda x: x["strike"])
-    if not calls or not puts: return None
-    ct = float(call_delta if call_delta is not None else target_delta)
-    pt = float(put_delta if put_delta is not None else target_delta)
-    # Keep the requested short-delta meaning intact.  In normal mode the two short
-    # legs are searched within +/-0.03 delta of the requested target.  This prevents
-    # a 0.25-delta call from replacing a 0.18-delta call simply because its premium is
-    # larger.  Any permitted asymmetry is then explicitly scored below.
-    delta_tolerance = 0.03
-    call_candidates = [o for o in calls if max(0.10,ct-delta_tolerance) <= abs(o["delta"]) <= min(0.30,ct+delta_tolerance)]
-    put_candidates = [o for o in puts if max(0.10,pt-delta_tolerance) <= abs(o["delta"]) <= min(0.30,pt+delta_tolerance)]
-    if not call_candidates: call_candidates = [min(calls, key=lambda o: abs(abs(o["delta"]) - ct))]
-    if not put_candidates: put_candidates = [min(puts, key=lambda o: abs(abs(o["delta"]) - pt))]
-    best = None
-    widths = [wing_width_pct] if wing_width_pct else list(IC_WING_WIDTHS_PCT)
-    for sc in call_candidates:
-        for sp in put_candidates:
-            for w in widths:
-                ca = [o for o in calls if o["strike"] > sc["strike"]]
-                pb = [o for o in puts if o["strike"] < sp["strike"]]
-                if not ca or not pb: continue
-                lc = min(ca, key=lambda o: abs(o["strike"] - sc["strike"] * (1 + w)))
-                lp = min(pb, key=lambda o: abs(o["strike"] - sp["strike"] * (1 - w)))
-                if any(o.get("mid") is None for o in (sc, sp, lc, lp)): continue
-                credit = (sc["mid"] + sp["mid"]) - (lc["mid"] + lp["mid"])
-                cw, pw = lc["strike"] - sc["strike"], sp["strike"] - lp["strike"]
-                max_loss = max(cw, pw) - credit
-                if credit <= 0 or max_loss <= 0: continue
-                dte = max((expiry - now_ist().date()).days, 1)
-                atm_iv = np.mean([o.get("iv", 0) for o in chain if abs(o["strike"]-spot) == min(abs(x["strike"]-spot) for x in chain)])
-                em = expected_move(spot, atm_iv, dte)
-                if not em: continue
-                ce_cushion = (sc["strike"] - spot) / em["expected_move"] if em["expected_move"] else 0
-                pe_cushion = (spot - sp["strike"]) / em["expected_move"] if em["expected_move"] else 0
-                be_low, be_high = sp["strike"] - credit, sc["strike"] + credit
-                pop = model_expiry_probability_between(spot, be_low, be_high, atm_iv, dte)
-                leg_spreads = [o.get("spread_pct") for o in (sc, sp, lc, lp) if o.get("spread_pct") is not None]
-                liq_score = sum(min(100, max(0, 100 - x * 10)) for x in leg_spreads) / len(leg_spreads) if leg_spreads else 0
-                oi_score = sum(min(100, math.log10(max(o.get("oi",0),1)) / 4 * 100) for o in (sc,sp,lc,lp)) / 4
-                liquidity = 0.65 * liq_score + 0.35 * oi_score
-                econ = min(100, max(0, (credit / max_loss) / 0.5 * 100))
-                dte_score = 100 if IC_PREFERRED_DTE_LOW <= dte <= IC_PREFERRED_DTE_HIGH else max(40, 100 - abs(dte - 28) * 3)
-
-                # Risk-adjust the premium advantage.  More premium is useful only if
-                # it is accompanied by enough safety cushion.  A closer short strike
-                # therefore has to earn its extra premium rather than winning on raw
-                # credit alone.
-                min_cushion = min(ce_cushion, pe_cushion)
-                cushion_component = score_band(min_cushion, [(0.75,20),(0.90,35),(1.00,50),(1.15,70),(1.30,85),(1.50,95),(999,100)])
-                delta_gap = abs(abs(sc.get("delta", 0)) - abs(sp.get("delta", 0)))
-                delta_target_error = (abs(abs(sc.get("delta", 0)) - ct) + abs(abs(sp.get("delta", 0)) - pt)) / 2.0
-                delta_symmetry_score = max(0, 100 - (delta_gap / 0.04) * 100)
-                delta_target_score = max(0, 100 - (delta_target_error / 0.03) * 100)
-                delta_score = 0.65 * delta_symmetry_score + 0.35 * delta_target_score
-                # Effective economics: credit/max-loss is discounted when cushion is poor.
-                risk_adjusted_econ = econ * (0.45 + 0.55 * cushion_component / 100.0)
-                score = (0.25 * delta_score + 0.30 * cushion_component + 0.20 * risk_adjusted_econ +
-                         0.15 * liquidity + 0.10 * dte_score)
-                candidate = {"sell_call": sc, "buy_call": lc, "sell_put": sp, "buy_put": lp,
-                             "credit": credit, "max_loss": max_loss, "call_wing": cw, "put_wing": pw,
-                             "expected_move": em, "ce_cushion": ce_cushion, "pe_cushion": pe_cushion,
-                             "probability_of_profit": pop, "liquidity_score": liquidity,
-                             "economics_score": econ, "risk_adjusted_economics_score": risk_adjusted_econ,
-                             "dte_score": dte_score, "delta_gap": delta_gap,
-                             "delta_target_error": delta_target_error, "delta_symmetry_score": delta_score,
-                             "selection_score": score, "atm_iv": atm_iv}
-                if best is None or candidate["selection_score"] > best["selection_score"]: best = candidate
-    return best
-
-
-def fetch_chain_quotes_for_expiry(symbol, expiry, opts, spot_override=None, quotes_override=None):
-    """Build one quoted option chain. If quotes_override is supplied, NO REST quote request is
-    made here; this is what lets the IC screener batch thousands of option instruments into a
-    small number of Kite /quote calls instead of making one request per stock/expiry."""
-    keys = [f"NFO:{o['tradingsymbol']}" for o in opts]
-    quotes = quotes_override if quotes_override is not None else kite_quote_bulk(keys, chunk_size=500, retries=1)
-    spot, err = (spot_override, None) if spot_override else get_spot_price(symbol)
-    if err: return None, err
-    T = max((expiry-now_ist().date()).days, 0) / 365.0
-    chain=[]
-    for o in opts:
-        q=quotes.get(f"NFO:{o['tradingsymbol']}")
-        mid=quote_stats(q).get("mid")
-        if mid is None: continue
-        iv=implied_vol(mid, spot, o['strike'], T, o['instrument_type'])
-        if iv is None or not math.isfinite(iv) or iv <= 0:
-            continue
-        chain.append(option_quality({**o, "iv": round(iv*100,1), "delta": round(bs_delta(spot,o['strike'],T,RISK_FREE_RATE,iv,o['instrument_type']),3)}, q))
-    return {"spot":spot,"T":T,"chain":chain,"lot_size":opts[0]["lot_size"] if opts else None}, None
-
+    orders = []
+    for k in leg_keys:
+        leg = position["legs"][k]
+        txn = "SELL" if k.startswith("sell") else "BUY"
+        q = quotes.get(f"NFO:{leg['tradingsymbol']}") or {}
+        ltp = q.get("last_price")
+        bid, ask = extract_bid_ask(q)
+        auto_price = recommended_limit_price(txn, bid, ask, ltp)
+        orders.append({
+            "leg": k,
+            "tradingsymbol": leg["tradingsymbol"],
+            "transaction_type": txn,
+            "quantity": quantity,
+            "ltp": ltp,
+            "bid": bid,
+            "ask": ask,
+            "recommended_limit_price": auto_price,
+            "reference_price": auto_price,
+            "price_source": (
+                "BID" if txn == "SELL" and bid is not None else
+                "ASK" if txn == "BUY" and ask is not None else
+                "LTP_FALLBACK"
+            ),
+        })
+    return orders
 
 def compute_margin(legs_for_margin, quantity, product="NRML"):
     """legs_for_margin: list of {'tradingsymbol': ..., 'transaction_type': 'BUY'/'SELL'}.
@@ -1604,7 +660,7 @@ def callback():
         return "Login failed: no request_token received.", 400
     data = kite.generate_session(request_token, api_secret=API_SECRET)
     SESSION["access_token"] = data["access_token"]
-    SESSION["logged_in_at"] = now_ist().isoformat()
+    SESSION["logged_in_at"] = datetime.now().isoformat()
     kite.set_access_token(SESSION["access_token"])
     return redirect("/")
 
@@ -1678,7 +734,7 @@ def handle_any_exception(e):
 # Instrument cache
 # ---------------------------------------------------------------------------
 def get_instruments(force=False):
-    now = now_ist()
+    now = datetime.now()
     if (force or INSTRUMENT_CACHE["fetched_at"] is None or
             now - INSTRUMENT_CACHE["fetched_at"] > timedelta(hours=6)):
         INSTRUMENT_CACHE["nfo"] = kite.instruments("NFO")
@@ -1704,8 +760,6 @@ def refresh_data():
     get_instruments(force=True)
     SCREENER_CACHE["results"] = None
     SCREENER_CACHE["fetched_at"] = None
-    IC_SCREENER_CACHE["results"] = None
-    IC_SCREENER_CACHE["fetched_at"] = None
     return jsonify({"ok": True, "message": "Instrument cache cleared. Re-run the screener to refresh rankings."})
 
 
@@ -1758,7 +812,7 @@ def event_calendar_delete(index):
 # Volatility screener
 # ---------------------------------------------------------------------------
 def historical_vol_and_atr(nse_token, days=60):
-    to_date = now_ist()
+    to_date = datetime.now()
     from_date = to_date - timedelta(days=days + 20)
     candles = kite.historical_data(nse_token, from_date, to_date, "day")
     if len(candles) < 10:
@@ -1776,22 +830,6 @@ def historical_vol_and_atr(nse_token, days=60):
     return hv_annualized, atr_pct, last_close
 
 
-@app.route("/api/fo-universe")
-def fo_universe_route():
-    """Indices + the real, current list of individual F&O stocks -- used by the Auto Trade tab's
-    universe picker so you're selecting symbols that actually have tradable options, instead of
-    typing a symbol blind and having it silently fail to scan."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    try:
-        stocks = fo_stock_universe()
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    return jsonify({"indices": list(INDEX_SYMBOLS.keys()), "stocks": stocks})
-
-
-
-
 @app.route("/api/screener")
 def screener():
     if not require_session():
@@ -1799,7 +837,7 @@ def screener():
     limit = int(request.args.get("limit", 25))
     force = request.args.get("force", "false").lower() == "true"
     include_news = request.args.get("news", "true").lower() == "true"
-    today = now_ist().date()
+    today = datetime.now().date()
     today_str = str(today)
 
     universe = fo_stock_universe(force=force)
@@ -1823,9 +861,6 @@ def screener():
         if len(results) >= 300:
             break
 
-    # Seed shared spot cache from the already-computed historical close. This prevents
-    # the later option-chain scan from making one NSE Quote request per stock.
-    seed_spot_cache_from_prices(results)
     # --- Pass 2: ATM IV + liquidity, batched across all candidates at once ---
     candidates = [{"symbol": r["symbol"], "last_close": r["ltp"]} for r in results]
     try:
@@ -1851,7 +886,6 @@ def screener():
         r["iv_rank_history_days"] = hist_days
         r["liquidity_ok"] = (info["atm_oi_total"] >= MIN_ATM_TOTAL_OI and
                               info["atm_spread_pct"] is not None and info["atm_spread_pct"] <= MAX_ATM_SPREAD_PCT)
-        r["iv_hv"] = classify_iv_hv(r.get("atm_iv_pct"), r.get("hv_annualized_pct"))
     save_iv_history(iv_history)
 
     # --- Pass 3: best-effort F&O ban list, excludes banned symbols from top picks ---
@@ -1906,11 +940,9 @@ def screener():
     if include_news:
         for r in top[:NEWS_FOR_TOP_N]:
             r["headlines"], r["headlines_error"] = _get_headlines_best_effort(r["symbol"])
-    for r in top[:NEWS_FOR_TOP_N]:
-        r["iv_trend"] = get_iv_trend_from_history(r["symbol"], iv_history)
 
     SCREENER_CACHE["results"] = eligible + excluded
-    SCREENER_CACHE["fetched_at"] = now_ist()
+    SCREENER_CACHE["fetched_at"] = datetime.now()
 
     return jsonify({
         "count": len(results), "eligible_count": len(eligible), "stocks": top,
@@ -1937,281 +969,29 @@ def get_stock_rank(symbol):
                      "atm_iv_pct": r.get("atm_iv_pct"), "iv_rank_pct": r.get("iv_rank_pct"),
                      "composite_score": r.get("composite_score"), "liquidity_ok": r.get("liquidity_ok"),
                      "fo_banned_today": r.get("fo_banned_today"),
-                     "screener_age_minutes": round((now_ist() - SCREENER_CACHE["fetched_at"]).total_seconds() / 60, 1)}
+                     "screener_age_minutes": round((datetime.now() - SCREENER_CACHE["fetched_at"]).total_seconds() / 60, 1)}
     return None
-
-@app.route("/api/ic-screener")
-def ic_screener():
-    """Fast, production-safe IC screener.
-
-    Screen 1 remains the full F&O stock ranking. Screen 2 deliberately uses Screen 1's ranked
-    universe as its shortlist and then batches ALL option instruments needed for that shortlist
-    into Kite's bulk /quote endpoint. This preserves actual four-leg Zerodha tradability without
-    turning one browser click into hundreds of sequential REST requests and a 504 timeout.
-    """
-    if not require_session():
-        return jsonify({"error":"not_logged_in"}), 401
-
-    limit=max(1,min(int(request.args.get("limit",25)),50))
-    force=request.args.get("force","false").lower()=="true"
-    include_news=request.args.get("news","false").lower()=="true"
-    target_delta=float(request.args.get("target_delta",DEFAULT_TARGET_DELTA))
-    min_dte=int(request.args.get("min_dte",IC_MIN_DTE))
-    max_dte=int(request.args.get("max_dte",IC_MAX_DTE))
-    max_symbols=max(10,min(int(request.args.get("max_symbols",30)),50))
-    max_expiries=max(1,min(int(request.args.get("max_expiries",2)),3))
-
-    if min_dte < 1 or max_dte < min_dte:
-        return jsonify({"error":"Invalid DTE range"}),400
-
-    nfo,nse=get_instruments(force=force)
-    today=now_ist().date()
-    opts_by_sym={}
-    for o in nfo:
-        if o.get("segment")=="NFO-OPT":
-            opts_by_sym.setdefault(o.get("name"),[]).append(o)
-
-    # Prefer Screen 1's already-computed ranking. This is both faster and economically cleaner:
-    # Screen 1 answers which stocks deserve attention; Screen 2 answers which actual IC structure
-    # among those stocks is best.
-    cached=SCREENER_CACHE.get("results") or []
-    ranked=[r for r in cached if r.get("rank") is not None and not r.get("fo_banned_today")]
-    ranked.sort(key=lambda x:x.get("composite_score",0), reverse=True)
-
-    if ranked:
-        shortlist=ranked[:max_symbols]
-        shortlist_source="Screen 1 ranked universe"
-    else:
-        # Safe fallback if the user has not run Screen 1 yet: use a small deterministic F&O
-        # shortlist rather than starting another 199-stock historical/IV scan inside this request.
-        universe=fo_stock_universe(force=force)
-        token_map={i["tradingsymbol"]:i["instrument_token"] for i in nse if i.get("exchange")=="NSE"}
-        shortlist=[]
-        for sym in universe:
-            if sym in token_map and opts_by_sym.get(sym):
-                shortlist.append({"symbol":sym,"ltp":None,"hv_annualized_pct":None,"atr_pct_of_price":None,
-                                  "atm_iv_pct":None,"iv_rank_pct":None,"composite_score":0,"rank":None,
-                                  "fo_banned_today":False})
-            if len(shortlist)>=max_symbols:
-                break
-        shortlist_source="fallback F&O shortlist — run Screen 1 first for ranked candidates"
-
-    seed=[]
-    for r in shortlist:
-        if r.get("ltp"):
-            seed.append({"symbol":r["symbol"],"ltp":r["ltp"]})
-    seed_spot_cache_from_prices(seed)
-
-    # Choose up to max_expiries per stock, prioritising the user's preferred 21–35 DTE window
-    # and then the closest remaining expiries to the midpoint. This gives meaningful expiry
-    # diversity while keeping the REST quote workload bounded.
-    selected=[]
-    option_keys=[]
-    selection_meta={}
-    for r in shortlist:
-        sym=r["symbol"]
-        spot_ref=float(r.get("ltp") or 0)
-        opts=opts_by_sym.get(sym,[])
-        exps=sorted({o["expiry"] for o in opts if min_dte <= (o["expiry"]-today).days <= max_dte})
-        if not exps:
-            continue
-        preferred=[e for e in exps if IC_PREFERRED_DTE_LOW <= (e-today).days <= IC_PREFERRED_DTE_HIGH]
-        preferred.sort(key=lambda e: abs((e-today).days-28))
-        remaining=[e for e in exps if e not in preferred]
-        remaining.sort(key=lambda e: abs((e-today).days-28))
-        chosen=(preferred+remaining)[:max_expiries]
-        for exp in chosen:
-            subset=[o for o in opts if o["expiry"]==exp and o.get("strike",0)>0 and
-                    (not spot_ref or abs(float(o["strike"])-spot_ref)/spot_ref <= IC_CHAIN_STRIKE_RANGE_PCT)]
-            if not subset:
-                continue
-            key=(sym,exp)
-            selected.append((r,exp,subset))
-            selection_meta[key]=r
-            option_keys.extend(f"NFO:{o['tradingsymbol']}" for o in subset)
-
-    # One/bounded set of bulk requests for the whole scan, instead of one request per expiry.
-    # Kite supports up to 500 instruments per /quote request; kite_quote_bulk enforces the
-    # account-wide 1 req/sec limit and caches results.
-    all_quotes=kite_quote_bulk(option_keys,chunk_size=500,retries=1)
-
-    evaluated=[]
-    evaluation_errors=[]
-    best_by_symbol={}
-    for r,exp,subset in selected:
-        sym=r["symbol"]
-        try:
-            spot=float(r.get("ltp") or 0)
-            data,err=fetch_chain_quotes_for_expiry(sym,exp,subset,spot_override=spot,quotes_override=all_quotes)
-            if err:
-                evaluation_errors.append({"symbol":sym,"expiry":str(exp),"error":err})
-                continue
-            if not data or len(data.get("chain",[]))<4:
-                evaluation_errors.append({"symbol":sym,"expiry":str(exp),"error":"Insufficient quoted option legs"})
-                continue
-            ic=build_ic_candidate_from_chain(sym,data["spot"],exp,data["chain"],target_delta=target_delta,lots=1)
-            if not ic:
-                continue
-            dte=(exp-today).days
-            candidate={**ic,"expiry":str(exp),"dte":dte,"lot_size":data["lot_size"]}
-            prev=best_by_symbol.get(sym)
-            if prev is None or candidate["selection_score"]>prev["selection_score"]:
-                best_by_symbol[sym]=(r,candidate)
-        except Exception as e:
-            evaluation_errors.append({"symbol":sym,"expiry":str(exp),"error":str(e)})
-            logger.exception("IC screener failed for %s %s",sym,exp)
-
-    for sym,(r,best) in best_by_symbol.items():
-        try:
-            sc,lc,sp,lp=[best[k] for k in ("sell_call","buy_call","sell_put","buy_put")]
-            short_legs=[sc,sp]; hedge_legs=[lc,lp]; all_legs=[sc,lc,sp,lp]
-            spreads=[x.get("spread_pct") for x in all_legs if x.get("spread_pct") is not None]
-            short_spreads=[x.get("spread_pct") for x in short_legs if x.get("spread_pct") is not None]
-            hedge_spreads=[x.get("spread_pct") for x in hedge_legs if x.get("spread_pct") is not None]
-            short_oi=[x.get("oi",0) for x in short_legs]
-            hedge_oi=[x.get("oi",0) for x in hedge_legs]
-            short_vol=[x.get("volume",0) for x in short_legs]
-            total_vol=sum(x.get("volume",0) for x in all_legs)
-            short_liq_ok=(min(short_oi)>=IC_MIN_SHORT_OI and
-                          (not short_spreads or max(short_spreads)<=IC_MAX_SHORT_SPREAD_PCT) and
-                          min(short_vol)>=IC_MIN_SHORT_VOLUME)
-            hedge_liq_ok=(min(hedge_oi)>=IC_MIN_LEG_OI and
-                          (not hedge_spreads or max(hedge_spreads)<=IC_MAX_LEG_SPREAD_PCT))
-            leg_liq_ok=short_liq_ok and hedge_liq_ok and total_vol>=IC_MIN_TOTAL_VOLUME
-
-            trend=get_trend_regime(sym)
-            trend_ok=not trend.get("error")
-            if trend_ok:
-                reg=trend.get("regime","")
-                range_score=95 if reg=="Range Bound" else 75 if reg in ("Transitioning","Volatile / Mixed") else 30
-                if trend.get("avoid_premium_selling"): range_score=15
-            else: range_score=50
-
-            iv_score=(r.get("iv_rank_pct") if r.get("iv_rank_pct") is not None else r.get("composite_score",50))
-            ivhv=(r.get("iv_hv") or {}).get("ratio")
-            if ivhv is not None:
-                iv_score=0.55*iv_score+0.45*min(100,max(0,(ivhv-0.8)/0.8*100))
-            cushion=min(best["ce_cushion"],best["pe_cushion"])
-            cushion_score=score_band(cushion,[(0.75,20),(0.90,35),(1.00,50),(1.15,70),(1.30,85),(1.50,95),(999,100)])
-            # Delta symmetry is a first-class IC criterion.  This is what prevents a
-            # richer 0.25-delta call from being presented as an ordinary 0.18-delta IC.
-            short_delta_gap=abs(abs(sc.get("delta",0))-abs(sp.get("delta",0)))
-            delta_score=float(best.get("delta_symmetry_score", max(0,100-(short_delta_gap/0.04)*100)))
-            credit_ratio=best["credit"]/best["max_loss"] if best["max_loss"] else 0
-            econ_score=score_band(credit_ratio,[(0.08,20),(0.10,30),(0.15,50),(0.20,65),(0.25,78),(0.35,92),(0.50,100),(999,100)])
-            def spread_score(vals,scale):
-                return sum(min(100,max(0,100-(v/scale)*100)) for v in vals)/len(vals) if vals else 60
-            short_spread_score=spread_score(short_spreads,IC_MAX_SHORT_SPREAD_PCT)
-            hedge_spread_score=spread_score(hedge_spreads,IC_MAX_LEG_SPREAD_PCT)
-            short_oi_score=sum(min(100,math.log10(max(x,1))/4*100) for x in short_oi)/len(short_oi)
-            hedge_oi_score=sum(min(100,math.log10(max(x,1))/4*100) for x in hedge_oi)/len(hedge_oi)
-            liquidity_score=0.55*(0.65*short_spread_score+0.35*short_oi_score)+0.45*(0.65*hedge_spread_score+0.35*hedge_oi_score)
-            if not short_liq_ok: liquidity_score=min(liquidity_score,45)
-            elif not hedge_liq_ok: liquidity_score=min(liquidity_score,65)
-            event_score,flags=ic_event_risk(sym,best["expiry"])
-            final=(IC_SCORE_WEIGHTS["iv"]*iv_score+IC_SCORE_WEIGHTS["range"]*range_score+
-                   IC_SCORE_WEIGHTS["cushion"]*cushion_score+IC_SCORE_WEIGHTS["liquidity"]*liquidity_score+
-                   IC_SCORE_WEIGHTS["economics"]*econ_score+IC_SCORE_WEIGHTS["delta"]*delta_score+
-                   IC_SCORE_WEIGHTS["event"]*event_score)
-            hard_reasons=[]
-            if not short_liq_ok: hard_reasons.append("short-leg liquidity failed")
-            if not hedge_liq_ok: hard_reasons.append("hedge-leg liquidity weak")
-            if total_vol<IC_MIN_TOTAL_VOLUME: hard_reasons.append("very low four-leg volume")
-            if credit_ratio<0.08: hard_reasons.append("very low credit/max-loss")
-            if cushion<0.75: hard_reasons.append("short strike inside 0.75x expected move")
-            if short_delta_gap>0.04: hard_reasons.append("short-call/put delta asymmetry exceeds 0.04")
-            if best.get("delta_target_error",0)>0.03: hard_reasons.append("short legs are too far from requested target delta")
-            if best["credit"]<=0 or best["max_loss"]<=0: hard_reasons.append("invalid risk/reward")
-            out=dict(r)
-            out.update({"ic_score":round(final,1),"ic_label":"Excellent" if final>=80 else "Good" if final>=65 else "Average" if final>=50 else "Watch",
-                        "ic_expiry":best["expiry"],"ic_dte":best["dte"],"ic_credit_per_share":round(best["credit"],2),
-                        "ic_max_loss_per_share":round(best["max_loss"],2),"ic_credit_max_loss_pct":round(credit_ratio*100,1),
-                        "ic_pop_pct":best["probability_of_profit"],"ic_ce_cushion_em":round(best["ce_cushion"],2),
-                        "ic_pe_cushion_em":round(best["pe_cushion"],2),
-                        "ic_sell_call_delta":round(float(sc.get("delta",0)),3),"ic_sell_put_delta":round(float(sp.get("delta",0)),3),
-                        "ic_buy_call_delta":round(float(lc.get("delta",0)),3),"ic_buy_put_delta":round(float(lp.get("delta",0)),3),
-                        "ic_delta_gap":round(short_delta_gap,3),"ic_delta_score":round(delta_score,1),
-                        "ic_target_delta":round(target_delta,3),
-                        "ic_risk_adjusted_economics_score":round(best.get("risk_adjusted_economics_score",econ_score),1),
-                        "ic_liquidity_score":round(liquidity_score,1),
-                        "ic_min_leg_oi":min(x.get("oi",0) for x in all_legs),"ic_min_short_oi":min(short_oi),
-                        "ic_min_hedge_oi":min(hedge_oi),"ic_total_leg_volume":total_vol,
-                        "ic_max_leg_spread_pct":round(max(spreads),2) if spreads else None,
-                        "ic_max_short_spread_pct":round(max(short_spreads),2) if short_spreads else None,
-                        "ic_max_hedge_spread_pct":round(max(hedge_spreads),2) if hedge_spreads else None,
-                        "ic_short_liquidity_ok":short_liq_ok,"ic_hedge_liquidity_ok":hedge_liq_ok,
-                        "trend_regime":trend.get("regime") if trend_ok else None,"trend_adx":trend.get("adx14") if trend_ok else None,
-                        "event_score":event_score,"event_flags":flags,"hard_reasons":hard_reasons,
-                        "ic_legs":{"sell_call":best["sell_call"]["strike"],"buy_call":best["buy_call"]["strike"],
-                                   "sell_put":best["sell_put"]["strike"],"buy_put":best["buy_put"]["strike"]}})
-            evaluated.append(out)
-        except Exception as e:
-            evaluation_errors.append({"symbol":sym,"error":str(e)})
-            logger.exception("IC scoring failed for %s",sym)
-
-    eligible=[r for r in evaluated if not r["hard_reasons"]]
-    eligible.sort(key=lambda x:x["ic_score"],reverse=True)
-    for i,r in enumerate(eligible,1):
-        r["rank"]=i; r["total"]=len(eligible)
-    excluded=[r for r in evaluated if r not in eligible]
-    for r in excluded:
-        r["rank"]=None; r["total"]=len(eligible)
-    top=eligible[:limit]
-    if include_news:
-        for r in top[:NEWS_FOR_TOP_N]:
-            r["headlines"],r["headlines_error"]=_get_headlines_best_effort(r["symbol"])
-            r["event_score"],r["event_flags"]=ic_event_risk(r["symbol"],r["ic_expiry"],r.get("headlines"))
-    for r in top:
-        r["iv_trend"]=get_iv_trend_from_history(r["symbol"],load_iv_history())
-
-    IC_SCREENER_CACHE["results"]=eligible+excluded
-    IC_SCREENER_CACHE["fetched_at"]=now_ist()
-    IC_SCREENER_CACHE["errors"]=evaluation_errors
-    return jsonify({"count":len(shortlist),"eligible_count":len(eligible),"stocks":top,
-                    "excluded_sample":excluded[:10],"deep_evaluated":len(shortlist),
-                    "evaluation_error_count":len(evaluation_errors),"evaluation_errors_sample":evaluation_errors[:10],
-                    "shortlist_source":shortlist_source,"option_quote_instruments":len(set(option_keys)),
-                    "config":{"target_delta":target_delta,"min_dte":min_dte,"max_dte":max_dte,
-                              "preferred_dte":[IC_PREFERRED_DTE_LOW,IC_PREFERRED_DTE_HIGH],"max_symbols":max_symbols,
-                              "max_expiries_per_symbol":max_expiries,"weights":IC_SCORE_WEIGHTS,
-                              "delta_tolerance":0.03,"max_short_delta_gap":0.04,
-                              "short_leg_min_oi":IC_MIN_SHORT_OI,"short_leg_max_spread_pct":IC_MAX_SHORT_SPREAD_PCT,
-                              "hedge_min_oi":IC_MIN_LEG_OI,"hedge_max_spread_pct":IC_MAX_LEG_SPREAD_PCT},
-                    "note":"Screen 1 ranks the F&O universe; this screen uses the top ranked stocks, then batches the required option-chain instruments into Kite quote requests. It evaluates up to two preferred expiries per stock by default, prioritising 21–35 DTE, to remain within Zerodha REST limits and avoid browser 504 timeouts. The result is an actual four-leg Zerodha-tradable IC heuristic. Normal mode keeps both short legs within +/-0.03 of the requested delta and rejects >0.04 CE/PE delta asymmetry; expected-move cushion risk-adjusts the premium/economics score. It is not a backtest or guarantee."})
-
-
-@app.route("/api/screener-health")
-def screener_health():
-    if not require_session():
-        return jsonify({"error":"not_logged_in"}), 401
-    now = time.monotonic()
-    return jsonify({"stock_screener_cache":bool(SCREENER_CACHE.get("results")),
-                    "ic_screener_cache":bool(IC_SCREENER_CACHE.get("results")),
-                    "ic_error_count":len(IC_SCREENER_CACHE.get("errors",[])),
-                    "quote_cache_size":len(_QUOTE_CACHE),
-                    "quote_cooldown_seconds":round(max(0.0, _QUOTE_COOLDOWN_UNTIL-now),2),
-                    "quote_min_interval":_QUOTE_MIN_INTERVAL,
-                    "quote_cache_ttl":_QUOTE_CACHE_TTL})
 
 
 # ---------------------------------------------------------------------------
 # Expiry list + option chain (supports stocks AND indices, any expiry you pick)
 # ---------------------------------------------------------------------------
 def get_spot_price(symbol):
-    """Returns (spot_price, error_dict_or_None). Uses the shared quote cache first and
-    only falls back to a rate-limited single Quote call when no cached value exists."""
+    """Returns (spot_price, error_dict_or_None). Handles both index symbols and F&O stocks."""
     symbol = symbol.upper()
-    key = INDEX_SYMBOLS.get(symbol) if symbol in INDEX_SYMBOLS else f"NSE:{symbol}"
-    cached = _quote_cache_get([key]).get(key)
-    if cached and cached.get("last_price") is not None:
-        return cached["last_price"], None
-    try:
-        quote = kite_quote_bulk([key], chunk_size=500, retries=1).get(key)
-        if quote and quote.get("last_price") is not None:
+    if symbol in INDEX_SYMBOLS:
+        key = INDEX_SYMBOLS[symbol]
+        try:
+            quote = kite.quote([key])[key]
             return quote["last_price"], None
-        return None, {"error": f"No live quote returned for {symbol}"}
-    except Exception as e:
-        return None, {"error": f"Could not fetch {symbol} quote: {e}"}
+        except Exception as e:
+            return None, {"error": f"Could not fetch {symbol} index quote: {e}"}
+    _, nse = get_instruments()
+    nse_match = [i for i in nse if i["exchange"] == "NSE" and i["tradingsymbol"] == symbol]
+    if not nse_match:
+        return None, {"error": f"{symbol} not found on NSE and not a recognized index (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY)"}
+    quote = kite.quote([f"NSE:{symbol}"])[f"NSE:{symbol}"]
+    return quote["last_price"], None
 
 
 @app.route("/api/expiries/<symbol>")
@@ -2223,7 +1003,7 @@ def expiries(symbol):
     opts = [i for i in nfo if i["name"] == symbol and i["segment"] == "NFO-OPT"]
     if not opts:
         return jsonify({"error": f"No options found for {symbol}"}), 404
-    today = now_ist().date()
+    today = datetime.now().date()
     exp_list = sorted({o["expiry"] for o in opts if (o["expiry"] - today).days >= 1})
     return jsonify({"symbol": symbol, "expiries": [str(e) for e in exp_list]})
 
@@ -2240,7 +1020,7 @@ def get_chain_for_symbol(symbol, expiry_str=None):
     if not opts:
         return None, {"error": f"No options found for {symbol}"}
 
-    today = now_ist().date()
+    today = datetime.now().date()
     all_expiries = sorted({o["expiry"] for o in opts})
 
     if expiry_str:
@@ -2262,54 +1042,22 @@ def get_chain_for_symbol(symbol, expiry_str=None):
     chain = [o for o in opts if o["expiry"] == expiry]
     lot_size = chain[0]["lot_size"]
     inst_keys = [f"NFO:{o['tradingsymbol']}" for o in chain]
-    quotes = kite_quote_bulk(inst_keys)
+    quotes = kite.quote(inst_keys)
 
     enriched = []
     for o in chain:
         key = f"NFO:{o['tradingsymbol']}"
         q = quotes.get(key)
-        st = quote_stats(q)
-        ltp = st["mid"] if st["mid"] is not None else extract_price(q)
+        ltp = extract_price(q)
         if ltp is None:
             continue
+        oi = q.get("oi", 0) if q else 0
         iv = implied_vol(ltp, spot, o["strike"], T, o["instrument_type"])
         delta = bs_delta(spot, o["strike"], T, RISK_FREE_RATE, iv, o["instrument_type"])
-        enriched.append({**o, "ltp": ltp, "bid": st["bid"], "ask": st["ask"], "mid": st["mid"],
-                         "spread_pct": round(st["spread_pct"],2) if st["spread_pct"] is not None else None,
-                         "volume": st["volume"], "oi": st["oi"], "iv": round(iv * 100, 1), "delta": round(delta, 3)})
+        enriched.append({**o, "ltp": ltp, "oi": oi, "iv": round(iv * 100, 1), "delta": round(delta, 3)})
 
     return {"spot": spot, "expiry": expiry, "T": T, "lot_size": lot_size, "chain": enriched,
             "all_expiries": [str(e) for e in all_expiries]}, None
-
-
-def compute_pcr_and_max_pain(chain):
-    """Put/Call Ratio (by OI) and Max Pain strike, computed across the FULL fetched chain
-    (not just the strikes shown in the UI's +/-25% window) so both are based on complete OI."""
-    calls = [o for o in chain if o["instrument_type"] == "CE"]
-    puts = [o for o in chain if o["instrument_type"] == "PE"]
-    total_call_oi = sum(o["oi"] for o in calls)
-    total_put_oi = sum(o["oi"] for o in puts)
-    pcr = round(total_put_oi / total_call_oi, 2) if total_call_oi else None
-
-    strikes = sorted({o["strike"] for o in chain})
-    max_pain_strike, min_pain = None, None
-    for k in strikes:
-        pain = 0.0
-        for o in calls:
-            if k > o["strike"]:
-                pain += (k - o["strike"]) * o["oi"]
-        for o in puts:
-            if k < o["strike"]:
-                pain += (o["strike"] - k) * o["oi"]
-        if min_pain is None or pain < min_pain:
-            min_pain, max_pain_strike = pain, k
-
-    return {"pcr": pcr, "total_call_oi": int(total_call_oi), "total_put_oi": int(total_put_oi),
-            "max_pain_strike": max_pain_strike,
-            "note": "PCR > 1 is traditionally read as bullish/support-building, < 1 as bearish — "
-                    "a rough sentiment gauge, not a price target. Max Pain is the strike where option "
-                    "writers' aggregate payout is lowest at expiry; a commonly-watched but unreliable-alone "
-                    "expiry-pinning heuristic."}
 
 
 @app.route("/api/optionchain/<symbol>")
@@ -2321,7 +1069,6 @@ def option_chain(symbol):
     if err:
         return jsonify(err), 404
 
-    oi_summary = compute_pcr_and_max_pain(data["chain"])
     spot = data["spot"]
     lo = spot * (1 - CHAIN_STRIKE_RANGE_PCT)
     hi = spot * (1 + CHAIN_STRIKE_RANGE_PCT)
@@ -2334,7 +1081,7 @@ def option_chain(symbol):
 
     return jsonify({
         "symbol": symbol.upper(), "spot": spot, "expiry": str(data["expiry"]), "lot_size": data["lot_size"],
-        "all_expiries": data["all_expiries"], "oi_summary": oi_summary,
+        "all_expiries": data["all_expiries"],
         "calls": [slim(o) for o in calls], "puts": [slim(o) for o in puts]
     })
 
@@ -2343,69 +1090,117 @@ def option_chain(symbol):
 # Strategy builder — Iron Condor or Naked Strangle, adjustable delta/wing/lots/expiry
 # ---------------------------------------------------------------------------
 def build_strategy(symbol, target_delta=DEFAULT_TARGET_DELTA, wing_width_pct=DEFAULT_WING_WIDTH_PCT,
-                    strategy_type="iron_condor", expiry_str=None, lots=1, put_delta=None, call_delta=None,
-                    wing_mode="auto"):
-    symbol=symbol.upper(); data,err=get_chain_for_symbol(symbol,expiry_str)
-    if err: return err
-    spot,expiry,T,lot_size,chain=data["spot"],data["expiry"],data["T"],data["lot_size"],data["chain"]
-    today=now_ist().date(); quantity=lot_size*max(1,int(lots))
-    calls=sorted([e for e in chain if e["instrument_type"]=="CE"],key=lambda x:x["strike"])
-    puts=sorted([e for e in chain if e["instrument_type"]=="PE"],key=lambda x:x["strike"])
-    def closest(options,target,sign): return min(options,key=lambda o:abs(o["delta"]-sign*target)) if options else None
-    cd=float(call_delta if call_delta is not None else target_delta); pd=float(put_delta if put_delta is not None else target_delta)
-    short_call=closest(calls,cd,1); short_put=closest(puts,pd,-1)
-    if not short_call or not short_put: return {"error":"Could not find suitable short strikes"}
-    def leg(o): return {"strike":o["strike"],"ltp":o["ltp"],"mid":o.get("mid",o["ltp"]),"bid":o.get("bid"),"ask":o.get("ask"),"delta":o["delta"],"iv":o.get("iv"),"oi":o.get("oi"),"volume":o.get("volume"),"spread_pct":o.get("spread_pct"),"tradingsymbol":o["tradingsymbol"]}
-    if strategy_type=="naked_strangle":
-        net_credit=short_call["mid"]+short_put["mid"]
-        result={"symbol":symbol,"spot":spot,"expiry":str(expiry),"days_to_expiry":(expiry-today).days,"lot_size":lot_size,"lots":lots,"quantity":quantity,
-                "strategy_type":"naked_strangle","legs":{"sell_call":leg(short_call),"sell_put":leg(short_put)},"net_credit_per_share":round(net_credit,2),
-                "max_profit":round(net_credit*quantity,2),"max_loss":None,"breakeven_upper":round(short_call["strike"]+net_credit,2),"breakeven_lower":round(short_put["strike"]-net_credit,2)}
+                    strategy_type="iron_condor", expiry_str=None, lots=1):
+    data, err = get_chain_for_symbol(symbol, expiry_str)
+    if err:
+        return err
+    spot, expiry, T, lot_size, chain = data["spot"], data["expiry"], data["T"], data["lot_size"], data["chain"]
+    today = datetime.now().date()
+    quantity = lot_size * max(1, int(lots))
+
+    calls = sorted([e for e in chain if e["instrument_type"] == "CE"], key=lambda x: x["strike"])
+    puts = sorted([e for e in chain if e["instrument_type"] == "PE"], key=lambda x: x["strike"])
+
+    def closest_by_delta(options, target, sign):
+        best, best_diff = None, None
+        for o in options:
+            diff = abs(o["delta"] - sign * target)
+            if best_diff is None or diff < best_diff:
+                best, best_diff = o, diff
+        return best
+
+    short_call = closest_by_delta(calls, target_delta, +1)
+    short_put = closest_by_delta(puts, target_delta, -1)
+    if not short_call or not short_put:
+        return {"error": "Could not find suitable strikes near target delta"}
+
+    def leg(o):
+        return {"strike": o["strike"], "ltp": o["ltp"], "delta": o["delta"], "tradingsymbol": o["tradingsymbol"]}
+
+    if strategy_type == "naked_strangle":
+        net_credit = short_call["ltp"] + short_put["ltp"]
+        result = {
+            "symbol": symbol.upper(), "spot": spot, "expiry": str(expiry),
+            "days_to_expiry": (expiry - today).days, "lot_size": lot_size, "lots": lots, "quantity": quantity,
+            "strategy_type": "naked_strangle",
+            "legs": {"sell_call": leg(short_call), "sell_put": leg(short_put)},
+            "net_credit_per_share": round(net_credit, 2),
+            "max_profit": round(net_credit * quantity, 2),
+            "max_loss": None,
+            "breakeven_upper": round(short_call["strike"] + net_credit, 2),
+            "breakeven_lower": round(short_put["strike"] - net_credit, 2),
+            "note": "NAKED STRANGLE: max loss is theoretically UNLIMITED on the call side and large "
+                    "(capped only by the stock going to zero) on the put side. Margin requirements are "
+                    "typically much higher than for an iron condor. Educational calculation only — not advice."
+        }
     else:
-        # Use the actual quoted chain and optimise wing width unless the user explicitly selected a fixed percentage.
-        width=float(wing_width_pct) if wing_mode=="fixed" else None
-        ic=build_ic_candidate_from_chain(symbol,spot,expiry,chain,target_delta=target_delta,wing_width_pct=width,lots=lots,call_delta=cd,put_delta=pd)
-        if not ic: return {"error":"Could not construct a positive-credit, liquid Iron Condor from the current chain"}
-        # Respect independently requested call/put deltas when supplied by selecting nearest valid strikes, then re-optimise wings around them.
-        sc,lc,sp,lp=ic["sell_call"],ic["buy_call"],ic["sell_put"],ic["buy_put"]
-        net_credit=ic["credit"]; max_loss=ic["max_loss"]
-        result={"symbol":symbol,"spot":spot,"expiry":str(expiry),"days_to_expiry":(expiry-today).days,"lot_size":lot_size,"lots":lots,"quantity":quantity,
-                "strategy_type":"iron_condor","legs":{"sell_call":leg(sc),"buy_call":leg(lc),"sell_put":leg(sp),"buy_put":leg(lp)},
-                "net_credit_per_share":round(net_credit,2),"max_profit":round(net_credit*quantity,2),"max_loss":round(max_loss*quantity,2),
-                "breakeven_upper":round(sc["strike"]+net_credit,2),"breakeven_lower":round(sp["strike"]-net_credit,2),
-                "call_wing":round(ic["call_wing"],2),"put_wing":round(ic["put_wing"],2),"wing_width_pct_used":wing_width_pct if width else None,
-                "ic_selection_score":round(ic["selection_score"],1)}
-    result["target_delta_used"]=target_delta; result["call_delta_used"]=cd; result["put_delta_used"]=pd; result["wing_mode"]=wing_mode
-    result["rank_info"]=get_stock_rank(symbol); result["all_expiries"]=data["all_expiries"]
-    legs_for_margin=[{"tradingsymbol":lg["tradingsymbol"],"transaction_type":"SELL" if k.startswith("sell") else "BUY"} for k,lg in result["legs"].items()]
-    result["margin_required"],result["margin_error"]=compute_margin(legs_for_margin,quantity)
-    result["entry_event_warning"]=get_entry_warning(); result["event_before_expiry"]=get_event_before_expiry(result["expiry"])
-    entry=[{"price":lg.get("mid",lg["ltp"]),"quantity":quantity,"transaction_type":"SELL" if k.startswith("sell") else "BUY"} for k,lg in result["legs"].items()]
-    result["estimated_entry_charges"]=estimate_charges(entry); result["net_profit_after_entry_charges"]=round(result["max_profit"]-result["estimated_entry_charges"]["total"],2) if result.get("max_profit") is not None else None
-    rank=result.get("rank_info") or {}; iv_hv=classify_iv_hv(rank.get("atm_iv_pct"),rank.get("hv_annualized_pct")); result["iv_hv"]=iv_hv
-    em=expected_move(spot,rank.get("atm_iv_pct"),result["days_to_expiry"]); result["expected_move"]=em
-    if em and strategy_type=="iron_condor":
-        result["ce_cushion_em"]=round((result["legs"]["sell_call"]["strike"]-spot)/em["expected_move"],2)
-        result["pe_cushion_em"]=round((spot-result["legs"]["sell_put"]["strike"])/em["expected_move"],2)
-        result["probability_of_profit_pct"]=model_expiry_probability_between(spot,result["breakeven_lower"],result["breakeven_upper"],rank.get("atm_iv_pct"),result["days_to_expiry"])
+        wing_call_strike_target = short_call["strike"] * (1 + wing_width_pct)
+        wing_put_strike_target = short_put["strike"] * (1 - wing_width_pct)
+        calls_above = [o for o in calls if o["strike"] > short_call["strike"]]
+        puts_below = [o for o in puts if o["strike"] < short_put["strike"]]
+
+        if not calls_above:
+            return {"error": f"No strike available above {short_call['strike']} to use as a call hedge"}
+        if not puts_below:
+            return {"error": f"No strike available below {short_put['strike']} to use as a put hedge"}
+
+        long_call = min(calls_above, key=lambda o: abs(o["strike"] - wing_call_strike_target))
+        long_put = min(puts_below, key=lambda o: abs(o["strike"] - wing_put_strike_target))
+
+        net_credit = (short_call["ltp"] + short_put["ltp"]) - (long_call["ltp"] + long_put["ltp"])
+        call_wing = long_call["strike"] - short_call["strike"]
+        put_wing = short_put["strike"] - long_put["strike"]
+        max_loss_per_share = max(call_wing, put_wing) - net_credit
+        max_profit_per_share = net_credit
+
+        available_call_strikes = sorted({o["strike"] for o in calls_above})[:6]
+        available_put_strikes = sorted({o["strike"] for o in puts_below}, reverse=True)[:6]
+
+        result = {
+            "symbol": symbol.upper(), "spot": spot, "expiry": str(expiry),
+            "days_to_expiry": (expiry - today).days, "lot_size": lot_size, "lots": lots, "quantity": quantity,
+            "strategy_type": "iron_condor",
+            "legs": {"sell_call": leg(short_call), "buy_call": leg(long_call),
+                     "sell_put": leg(short_put), "buy_put": leg(long_put)},
+            "net_credit_per_share": round(net_credit, 2),
+            "max_profit": round(max_profit_per_share * quantity, 2),
+            "max_loss": round(max_loss_per_share * quantity, 2),
+            "breakeven_upper": round(short_call["strike"] + net_credit, 2),
+            "breakeven_lower": round(short_put["strike"] - net_credit, 2),
+            "available_call_strikes_above_short": available_call_strikes,
+            "available_put_strikes_below_short": available_put_strikes,
+            "note": "Educational calculation only — not a trade recommendation. "
+                    "Verify prices, margin, and lot size on your broker terminal before placing any order. "
+                    "Also manually check: upcoming results date, F&O ban list, and news for this stock."
+        }
+
+    result["target_delta_used"] = target_delta
+    result["wing_width_pct_used"] = wing_width_pct if strategy_type == "iron_condor" else None
+    result["rank_info"] = get_stock_rank(symbol.upper())
+    result["all_expiries"] = data["all_expiries"]
+
+    legs_for_margin = [{"tradingsymbol": lg["tradingsymbol"],
+                         "transaction_type": "SELL" if k.startswith("sell") else "BUY"}
+                        for k, lg in result["legs"].items()]
+    margin_required, margin_error = compute_margin(legs_for_margin, quantity)
+    result["margin_required"] = margin_required
+    result["margin_error"] = margin_error
+    result["entry_event_warning"] = get_entry_warning()
+    result["event_before_expiry"] = get_event_before_expiry(result["expiry"])
+
+    entry_orders_for_charges = [{"price": lg["ltp"], "quantity": quantity,
+                                  "transaction_type": "SELL" if k.startswith("sell") else "BUY"}
+                                 for k, lg in result["legs"].items()]
+    entry_charges = estimate_charges(entry_orders_for_charges)
+    result["estimated_entry_charges"] = entry_charges
+    if result["max_profit"] is not None:
+        result["net_profit_after_entry_charges"] = round(result["max_profit"] - entry_charges["total"], 2)
     else:
-        result["probability_of_profit_pct"]=round(max(0,(1-abs(cd)-abs(pd))*100),1)
-    for k in ("sell_call","sell_put"):
-        if k in result["legs"]: result["legs"][k]["probability_of_touch_pct"]=probability_of_touch(result["legs"][k]["delta"])
-    trend=get_trend_regime(symbol); result["trend"]=None if trend.get("error") else trend
-    vix,vix_err=get_india_vix(); result["volatility_regime"]=classify_volatility_regime(vix,rank.get("iv_rank_pct"))
-    if strategy_type=="iron_condor":
-        liq=min([result["legs"][k].get("oi",0) for k in result["legs"]]) if result.get("legs") else 0
-        spreads=[result["legs"][k].get("spread_pct") for k in result["legs"] if result["legs"][k].get("spread_pct") is not None]
-        result["ic_liquidity_ok"]=liq>=IC_MIN_LEG_OI and (not spreads or max(spreads)<=IC_MAX_LEG_SPREAD_PCT)
-        result["ic_credit_max_loss_pct"]=round(result["net_credit_per_share"]/max(result["max_loss"]/quantity,1e-9)*100,1)
-        result["ic_event_score"],result["ic_event_flags"]=ic_event_risk(symbol,result["expiry"])
-        result["trade_quality_score"]=round((0.25*(rank.get("ic_score") or 50)+0.25*(iv_hv and min(100,max(0,(iv_hv["ratio"]-0.8)/0.8*100)) or 50)+
-                                             0.25*(min(result.get("ce_cushion_em",0),result.get("pe_cushion_em",0))/1.5*100)+0.25*(80 if result["ic_liquidity_ok"] else 30)),1)
-    else: result["trade_quality_score"]=rank.get("composite_score")
-    result["trade_quality_label"]="Excellent" if result["trade_quality_score"]>=80 else "Good" if result["trade_quality_score"]>=60 else "Average" if result["trade_quality_score"]>=40 else "Avoid"
-    result["suggested_strategy"]=suggest_strategy_family(rank.get("iv_rank_pct"),trend)
-    result["trade_quality_note"]="IC score is a transparent heuristic combining volatility richness, range behaviour, expected-move cushion, four-leg liquidity and trade economics. It is not backtested and is not a probability guarantee."
+        result["net_profit_after_entry_charges"] = None
+    result["charges_note"] = ("Entry-side charges only (opening the position). If you square off "
+                               "before expiry, exit-side charges apply too — see the Trade Section for "
+                               "the running round-trip estimate once tracked. Approximate; verify against "
+                               "your Kite contract note.")
     return result
 
 
@@ -2418,492 +1213,10 @@ def strategy(symbol):
     strategy_type = request.args.get("strategy_type", "iron_condor")
     expiry_str = request.args.get("expiry")
     lots = int(request.args.get("lots", 1))
-    put_delta = request.args.get("put_delta")
-    call_delta = request.args.get("call_delta")
-    wing_mode = request.args.get("wing_mode", "auto")
-    result = build_strategy(symbol, target_delta, wing_width_pct, strategy_type, expiry_str, lots,
-                            put_delta=float(put_delta) if put_delta not in (None, "") else None,
-                            call_delta=float(call_delta) if call_delta not in (None, "") else None,
-                            wing_mode=wing_mode)
+    result = build_strategy(symbol, target_delta, wing_width_pct, strategy_type, expiry_str, lots)
     if "error" in result:
         return jsonify(result), 404
     return jsonify(result)
-
-
-# ---------------------------------------------------------------------------
-# Strategy builder — Double Calendar Spread (sell near-term call+put, buy far-term
-# call+put at the same two strikes). Net debit, defined risk, long vega / positive theta.
-# ---------------------------------------------------------------------------
-def pick_calendar_expiries(all_expiries_str, near_expiry_str_override=None, far_expiry_str_override=None):
-    """Auto-picks a sensible near/far expiry pair from the full expiry list (strings 'YYYY-MM-DD').
-    Near = nearest expiry beyond MIN_DAYS_TO_EXPIRY (same rule as the other strategy builders).
-    Far = the available expiry whose gap from Near is closest to CALENDAR_TARGET_GAP_DAYS (and
-    strictly after Near) — this is what "automatically pick which expiries" means in practice:
-    typically the current/next-week expiry paired with the next monthly one or two out.
-    Returns (near_str, far_str) or (None, None, error_dict)."""
-    today = now_ist().date()
-    all_expiries = sorted(datetime.strptime(e, "%Y-%m-%d").date() for e in all_expiries_str)
-
-    if near_expiry_str_override:
-        try:
-            near = datetime.strptime(near_expiry_str_override, "%Y-%m-%d").date()
-        except ValueError:
-            return None, None, {"error": f"Invalid near_expiry format '{near_expiry_str_override}'"}
-        if near not in all_expiries:
-            return None, None, {"error": f"{near_expiry_str_override} is not a valid expiry for this symbol"}
-    else:
-        valid = [e for e in all_expiries if (e - today).days >= MIN_DAYS_TO_EXPIRY]
-        if not valid:
-            return None, None, {"error": "No near expiry beyond minimum days-to-expiry filter"}
-        near = valid[0]
-
-    later = [e for e in all_expiries if e > near]
-    if not later:
-        return None, None, {"error": f"No later expiry available beyond near expiry {near} to use as the far leg"}
-
-    if far_expiry_str_override:
-        try:
-            far = datetime.strptime(far_expiry_str_override, "%Y-%m-%d").date()
-        except ValueError:
-            return None, None, {"error": f"Invalid far_expiry format '{far_expiry_str_override}'"}
-        if far not in later:
-            return None, None, {"error": f"{far_expiry_str_override} must be a valid expiry strictly after {near}"}
-    else:
-        far = min(later, key=lambda e: abs((e - near).days - CALENDAR_TARGET_GAP_DAYS))
-
-    return str(near), str(far), None
-
-
-def build_double_calendar_strategy(symbol, strike_mode="otm_pct", otm_pct=DEFAULT_CALENDAR_OTM_PCT,
-                                    target_delta=DEFAULT_CALENDAR_TARGET_DELTA,
-                                    near_expiry_str=None, far_expiry_str=None, lots=1):
-    symbol = symbol.upper()
-    today = now_ist().date()
-
-    # Resolve which two expiries to use (auto-picked unless the user overrode one/both).
-    nfo, _ = get_instruments()
-    opts = [i for i in nfo if i["name"] == symbol and i["segment"] == "NFO-OPT"]
-    if not opts:
-        return {"error": f"No options found for {symbol}"}
-    all_expiries_str = [str(e) for e in sorted({o["expiry"] for o in opts})]
-    near_expiry_str, far_expiry_str, err = pick_calendar_expiries(all_expiries_str, near_expiry_str, far_expiry_str)
-    if err:
-        return err
-
-    near_data, err = get_chain_for_symbol(symbol, near_expiry_str)
-    if err:
-        return err
-    far_data, err = get_chain_for_symbol(symbol, far_expiry_str)
-    if err:
-        return err
-
-    spot = near_data["spot"]
-    lot_size = near_data["lot_size"]
-    quantity = lot_size * max(1, int(lots))
-    near_expiry = near_data["expiry"]
-    far_expiry = far_data["expiry"]
-    days_to_near = (near_expiry - today).days
-    days_between = (far_expiry - near_expiry).days
-    if days_between <= 0:
-        return {"error": "Far expiry must be strictly after near expiry"}
-
-    near_calls = sorted([o for o in near_data["chain"] if o["instrument_type"] == "CE"], key=lambda x: x["strike"])
-    near_puts = sorted([o for o in near_data["chain"] if o["instrument_type"] == "PE"], key=lambda x: x["strike"])
-    far_calls = sorted([o for o in far_data["chain"] if o["instrument_type"] == "CE"], key=lambda x: x["strike"])
-    far_puts = sorted([o for o in far_data["chain"] if o["instrument_type"] == "PE"], key=lambda x: x["strike"])
-    if not near_calls or not near_puts or not far_calls or not far_puts:
-        return {"error": "Could not load a complete call/put chain for both expiries"}
-
-    def closest_strike(options, target):
-        return min(options, key=lambda o: abs(o["strike"] - target))
-
-    def closest_by_delta(options, target, sign):
-        return min(options, key=lambda o: abs(o["delta"] - sign * target))
-
-    if strike_mode == "atm":
-        call_strike_target = put_strike_target = spot
-        near_call = closest_strike(near_calls, call_strike_target)
-        near_put = closest_strike(near_puts, put_strike_target)
-    elif strike_mode == "delta":
-        near_call = closest_by_delta(near_calls, target_delta, +1)
-        near_put = closest_by_delta(near_puts, target_delta, -1)
-    else:  # "otm_pct" (default)
-        near_call = closest_strike(near_calls, spot * (1 + otm_pct))
-        near_put = closest_strike(near_puts, spot * (1 - otm_pct))
-
-    # Match the SAME strikes on the far expiry (nearest available if strikes differ slightly).
-    far_call = closest_strike(far_calls, near_call["strike"])
-    far_put = closest_strike(far_puts, near_put["strike"])
-
-    def leg(o):
-        return {"strike": o["strike"], "ltp": o["ltp"], "delta": o["delta"], "iv_pct": o["iv"],
-                "tradingsymbol": o["tradingsymbol"]}
-
-    legs = {"sell_call_near": leg(near_call), "sell_put_near": leg(near_put),
-            "buy_call_far": leg(far_call), "buy_put_far": leg(far_put)}
-
-    net_debit_per_share = ((far_call["ltp"] + far_put["ltp"]) - (near_call["ltp"] + near_put["ltp"]))
-    max_loss_per_share = max(net_debit_per_share, 0.0)  # defined risk: worst case both near legs expire
-    # worthless and you simply own the far legs, having overpaid the debit — you lose at most the debit.
-
-    # --- Model-based P&L curve at NEAR expiry, across a range of assumed spot outcomes ---
-    # At near expiry: the short near-leg is worth its intrinsic value (you owe that to close it);
-    # the long far-leg still has (far_expiry - near_expiry) days left, valued via Black-Scholes at
-    # today's implied vol for that leg (assumes IV holds roughly steady — the standard simplifying
-    # assumption for calendar-spread payoff diagrams; real IV can/does change).
-    T_far_remaining = days_between / 365.0
-    call_iv = far_call["iv"] / 100.0
-    put_iv = far_put["iv"] / 100.0
-    call_strike, put_strike = near_call["strike"], near_put["strike"]
-
-    def pnl_at_spot(s_t):
-        near_call_intrinsic = max(s_t - call_strike, 0.0)
-        near_put_intrinsic = max(put_strike - s_t, 0.0)
-        far_call_value = bs_price(s_t, call_strike, T_far_remaining, RISK_FREE_RATE, call_iv, "CE")
-        far_put_value = bs_price(s_t, put_strike, T_far_remaining, RISK_FREE_RATE, put_iv, "PE")
-        position_value = (far_call_value - near_call_intrinsic) + (far_put_value - near_put_intrinsic)
-        return position_value - net_debit_per_share
-
-    lo = spot * (1 - CALENDAR_CURVE_RANGE_PCT)
-    hi = spot * (1 + CALENDAR_CURVE_RANGE_PCT)
-    step = (hi - lo) / (CALENDAR_CURVE_POINTS - 1)
-    curve = []
-    for i in range(CALENDAR_CURVE_POINTS):
-        s_t = lo + i * step
-        pnl_per_share = pnl_at_spot(s_t)
-        curve.append({"spot": round(s_t, 2), "pnl": round(pnl_per_share * quantity, 2)})
-
-    max_profit_point = max(curve, key=lambda pt: pt["pnl"])
-    max_profit_estimated = max_profit_point["pnl"]
-
-    # Breakevens: spot values where the curve crosses zero (linear interpolation between samples).
-    breakevens = []
-    for i in range(len(curve) - 1):
-        p1, p2 = curve[i], curve[i + 1]
-        if (p1["pnl"] <= 0 <= p2["pnl"]) or (p1["pnl"] >= 0 >= p2["pnl"]):
-            if p2["pnl"] != p1["pnl"]:
-                frac = -p1["pnl"] / (p2["pnl"] - p1["pnl"])
-                be_spot = p1["spot"] + frac * (p2["spot"] - p1["spot"])
-                breakevens.append(round(be_spot, 2))
-    # de-dupe near-identical crossings
-    dedup_breakevens = []
-    for b in breakevens:
-        if not any(abs(b - x) < 0.5 for x in dedup_breakevens):
-            dedup_breakevens.append(b)
-
-    result = {
-        "symbol": symbol, "spot": spot, "lot_size": lot_size, "lots": lots, "quantity": quantity,
-        "strategy_type": "double_calendar", "strike_mode": strike_mode,
-        "near_expiry": str(near_expiry), "far_expiry": str(far_expiry),
-        "days_to_near_expiry": days_to_near, "days_between_expiries": days_between,
-        "all_expiries": all_expiries_str,
-        "legs": legs,
-        "net_debit_per_share": round(net_debit_per_share, 2),
-        "max_loss": round(max_loss_per_share * quantity, 2),
-        "max_profit_estimated": round(max_profit_estimated, 2),
-        "breakevens": dedup_breakevens,
-        "sweet_spot_range": [near_put["strike"], near_call["strike"]],
-        "curve": curve,
-        "note": ("DOUBLE CALENDAR SPREAD: net-debit, defined-risk trade. Max loss is capped at the debit "
-                 "paid; max profit is a MODEL ESTIMATE (Black-Scholes value of the far leg at near expiry, "
-                 "assuming today's IV holds) — not guaranteed, since realized IV and the exact time of exit "
-                 "both move the actual P&L. Profit is maximized if spot sits between the two short strikes "
-                 "at near expiry; sharp moves in either direction erode it. Educational calculation only — "
-                 "not a trade recommendation. Verify prices, margin, and lot size on your broker terminal.")
-    }
-
-    legs_for_margin = [
-        {"tradingsymbol": legs["sell_call_near"]["tradingsymbol"], "transaction_type": "SELL"},
-        {"tradingsymbol": legs["sell_put_near"]["tradingsymbol"], "transaction_type": "SELL"},
-        {"tradingsymbol": legs["buy_call_far"]["tradingsymbol"], "transaction_type": "BUY"},
-        {"tradingsymbol": legs["buy_put_far"]["tradingsymbol"], "transaction_type": "BUY"},
-    ]
-    margin_required, margin_error = compute_margin(legs_for_margin, quantity)
-    result["margin_required"] = margin_required
-    result["margin_error"] = margin_error
-    result["entry_event_warning"] = get_entry_warning()
-    result["event_before_expiry"] = get_event_before_expiry(result["near_expiry"])
-
-    entry_orders_for_charges = [
-        {"price": legs["sell_call_near"]["ltp"], "quantity": quantity, "transaction_type": "SELL"},
-        {"price": legs["sell_put_near"]["ltp"], "quantity": quantity, "transaction_type": "SELL"},
-        {"price": legs["buy_call_far"]["ltp"], "quantity": quantity, "transaction_type": "BUY"},
-        {"price": legs["buy_put_far"]["ltp"], "quantity": quantity, "transaction_type": "BUY"},
-    ]
-    entry_charges = estimate_charges(entry_orders_for_charges)
-    result["estimated_entry_charges"] = entry_charges
-    result["charges_note"] = ("Entry-side charges only. If you square off before near expiry, exit-side "
-                               "charges apply too — see the Track Positions section for the running "
-                               "round-trip estimate once tracked.")
-
-    # --- Reuse the same trading-logic layer as the Iron Condor/Strangle builder ---
-    rank_info = get_stock_rank(symbol)
-    result["rank_info"] = rank_info
-    iv_hv = classify_iv_hv(rank_info.get("atm_iv_pct") if rank_info else None,
-                            rank_info.get("hv_annualized_pct") if rank_info else None)
-    result["iv_hv"] = iv_hv
-    if iv_hv is None:
-        result["iv_hv_note"] = "Run the Screener (section 1) first so IV/HV data is cached for this symbol."
-
-    em = expected_move(spot, rank_info.get("atm_iv_pct") if rank_info else None, days_to_near)
-    result["expected_move"] = em
-    if em:
-        outside_sweet_spot = em["upper"] > near_call["strike"] or em["lower"] < near_put["strike"]
-        result["expected_move_vs_sweet_spot"] = (
-            f"{days_to_near}-day expected move (±₹{em['expected_move']}, range {em['lower']}–{em['upper']}) "
-            + ("extends BEYOND the short strikes (" + f"{near_put['strike']}–{near_call['strike']}"
-               + ") — a normal move could already erode profit before near expiry."
-               if outside_sweet_spot else
-               "comfortably stays WITHIN the short strikes (" + f"{near_put['strike']}–{near_call['strike']}"
-               + ") — favorable for this trade."))
-
-    trend = get_trend_regime(symbol)
-    result["trend"] = None if trend.get("error") else trend
-    if trend.get("error"):
-        result["trend_note"] = trend["error"]
-    if trend and not trend.get("error") and trend.get("avoid_premium_selling"):
-        result["trend_warning"] = (f"{trend['regime']} detected — calendars do best in range-bound/low-trend "
-                                    f"conditions; a strong trend risks pushing spot outside the sweet spot.")
-
-    vix, vix_err = get_india_vix()
-    iv_rank_for_regime = rank_info.get("iv_rank_pct") if rank_info else None
-    result["volatility_regime"] = classify_volatility_regime(vix, iv_rank_for_regime)
-    if vix_err:
-        result["volatility_regime"]["note"] = f"India VIX fetch failed ({vix_err}); classification unavailable."
-    # Calendars are LONG vega (unlike condors/strangles which are short vega) — a rising-IV regime
-    # after entry helps this trade, so flip the usual "avoid high vol" framing into a note here.
-    result["vega_note"] = ("This trade is net LONG vega (benefits if IV rises after entry) and net SHORT "
-                            "gamma near-term — opposite of the Iron Condor/Strangle builder's exposure. "
-                            "A low-IV entry (cheap far-month vega) with room for IV to expand is typically "
-                            "more favorable than entering when IV is already elevated.")
-
-    score_components = []
-    if iv_hv:
-        # For a long-vega trade, a LOW iv/hv ratio (calm now, room to expand) scores better — inverse
-        # of the condor/strangle scoring, which wants rich IV to sell.
-        inv_label = {"avoid": 90, "fair": 70, "good": 55, "excellent": 35}.get(iv_hv["label"].lower(), 50)
-        score_components.append(inv_label)
-    if trend and not trend.get("error"):
-        score_components.append(25 if trend.get("avoid_premium_selling") else 80)
-    if result["volatility_regime"]["label"] != "Unknown":
-        vr_score = {"Low Volatility": 80, "Normal": 65, "High Volatility": 35, "Extreme": 15}.get(
-            result["volatility_regime"]["label"], 50)
-        score_components.append(vr_score)
-    if rank_info and rank_info.get("fo_banned_today"):
-        score_components.append(0)
-    trade_quality_score = round(sum(score_components) / len(score_components), 1) if score_components else None
-    result["trade_quality_score"] = trade_quality_score
-    if trade_quality_score is not None:
-        result["trade_quality_label"] = ("Excellent" if trade_quality_score >= 80 else
-                                          "Good" if trade_quality_score >= 60 else
-                                          "Average" if trade_quality_score >= 40 else "Avoid")
-    result["trade_quality_note"] = ("Heuristic score for a LONG-VEGA/theta trade: rewards calm current IV "
-                                     "with room to rise, range-bound trend, and low-to-normal volatility "
-                                     "regime — the inverse of the premium-selling score elsewhere in this "
-                                     "dashboard. Not a probability, not backtested — a rough triage aid only.")
-
-    return result
-
-
-@app.route("/api/calendar-strategy/<symbol>")
-def calendar_strategy(symbol):
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    strike_mode = request.args.get("strike_mode", "otm_pct")
-    otm_pct = float(request.args.get("otm_pct", DEFAULT_CALENDAR_OTM_PCT))
-    target_delta = float(request.args.get("target_delta", DEFAULT_CALENDAR_TARGET_DELTA))
-    near_expiry = request.args.get("near_expiry")
-    far_expiry = request.args.get("far_expiry")
-    lots = int(request.args.get("lots", 1))
-    result = build_double_calendar_strategy(symbol, strike_mode, otm_pct, target_delta,
-                                             near_expiry, far_expiry, lots)
-    if "error" in result:
-        return jsonify(result), 404
-    return jsonify(result)
-
-
-@app.route("/api/trend/<symbol>")
-def trend(symbol):
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    result = get_trend_regime(symbol)
-    if result.get("error"):
-        return jsonify(result), 404
-    return jsonify(result)
-
-
-@app.route("/api/position-sizing")
-def position_sizing():
-    """Dynamic position sizing (fixed-fractional): given total capital, risk-per-trade %, and
-    the max loss of ONE lot of the trade you're considering, returns how many lots keep you
-    within that risk budget."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    try:
-        capital = float(request.args.get("capital"))
-        risk_pct = float(request.args.get("risk_pct"))
-        max_loss_per_lot = float(request.args.get("max_loss_per_lot"))
-    except (TypeError, ValueError):
-        return jsonify({"error": "capital, risk_pct, and max_loss_per_lot are all required numeric params"}), 400
-    result = recommended_position_size(capital, risk_pct, max_loss_per_lot)
-    if result is None:
-        return jsonify({"error": "Invalid inputs — all values must be positive numbers"}), 400
-    result["note"] = ("recommended_lots = floor((capital x risk_pct%) / max_loss_per_lot). This caps your RISK "
-                       "budget only — it does not check margin availability. Always confirm actual margin "
-                       "required (shown in the Strategy Builder) is within your free cash too.")
-    return jsonify(result)
-
-
-def position_greeks(position):
-    """Per-position net Greeks via Black-Scholes at current quotes (Kite doesn't publish Greeks
-    itself). Gamma/Vega/Theta are estimated by bump-and-reprice off the same bs_price/bs_delta
-    helpers used everywhere else in this file. Handles double_calendar's two different expiries
-    (near legs use position['expiry'], far legs use position['far_expiry'])."""
-    strategy_type = position.get("strategy_type", "iron_condor")
-    leg_keys = leg_keys_for(position)
-    quantity = position.get("quantity", position["lot_size"])
-    spot, err = get_spot_price(position["symbol"])
-    if err:
-        return {"error": err["error"]}
-
-    today = now_ist().date()
-    near_expiry_date = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
-    days_left_near = max((near_expiry_date - today).days, 0)
-    far_expiry_date = None
-    days_left_far = None
-    if strategy_type == "double_calendar":
-        far_expiry_date = datetime.strptime(position["far_expiry"], "%Y-%m-%d").date()
-        days_left_far = max((far_expiry_date - today).days, 0)
-        if days_left_near <= 0 and days_left_far <= 0:
-            return {"error": "Position has expired"}
-    else:
-        if days_left_near <= 0:
-            return {"error": "Position has expired"}
-
-    inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
-    try:
-        quotes = kite_quote_bulk(inst_keys)
-    except Exception as e:
-        return {"error": str(e)}
-
-    net_delta = net_theta = net_vega = net_gamma = 0.0
-    for k in leg_keys:
-        strike = position["legs"][k]["strike"]
-        opt_type = "CE" if "call" in k else "PE"
-        # calendars: near legs (sell_*_near) decay against the near expiry; far legs (buy_*_far)
-        # against the far expiry. Everything else (iron_condor/strangle) has a single shared expiry.
-        T = (days_left_far if (strategy_type == "double_calendar" and k.endswith("_far"))
-             else days_left_near) / 365.0
-        if T <= 0:
-            continue
-        ltp = extract_price(quotes.get(f"NFO:{position['legs'][k]['tradingsymbol']}"))
-        if ltp is None:
-            return {"error": f"No usable price for {k}"}
-        iv = implied_vol(ltp, spot, strike, T, opt_type)
-        delta = bs_delta(spot, strike, T, RISK_FREE_RATE, iv, opt_type)
-        bump_s = spot * 0.01
-        delta_up = bs_delta(spot + bump_s, strike, T, RISK_FREE_RATE, iv, opt_type)
-        gamma = (delta_up - delta) / bump_s if bump_s else 0.0
-        vega = (bs_price(spot, strike, T, RISK_FREE_RATE, iv + 0.01, opt_type)
-                - bs_price(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
-        theta = -(bs_price(spot, strike, max(T - 1 / 365, 0), RISK_FREE_RATE, iv, opt_type)
-                  - bs_price(spot, strike, T, RISK_FREE_RATE, iv, opt_type))
-        sign = -1 if k.startswith("sell") else 1
-        net_delta += sign * delta * quantity
-        net_gamma += sign * gamma * quantity
-        net_vega += sign * vega * quantity
-        net_theta += sign * theta * quantity
-
-    return {"net_delta": round(net_delta, 2), "net_gamma": round(net_gamma, 4),
-            "net_vega": round(net_vega, 2), "net_theta": round(net_theta, 2)}
-
-
-
-@app.route("/api/portfolio-greeks")
-def portfolio_greeks():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    positions = load_positions()
-    total_delta = total_theta = total_vega = total_gamma = 0.0
-    details, errors = [], []
-    for p in positions:
-        g = position_greeks(p)
-        if g.get("error"):
-            errors.append({"id": p["id"], "symbol": p["symbol"], "error": g["error"]})
-            continue
-        total_delta += g["net_delta"]; total_gamma += g["net_gamma"]
-        total_vega += g["net_vega"]; total_theta += g["net_theta"]
-        details.append({"id": p["id"], "symbol": p["symbol"], **g})
-    return jsonify({
-        "net_delta": round(total_delta, 2), "net_gamma": round(total_gamma, 4),
-        "net_vega": round(total_vega, 2), "net_theta": round(total_theta, 2),
-        "positions": details, "errors": errors,
-        "note": "Estimated via Black-Scholes at current quotes/implied vol — an approximation, not "
-                "Kite's own Greeks (Kite doesn't publish them). Theta is per-day time decay; Vega is "
-                "per 1-point (1%) change in IV.",
-    })
-
-
-@app.route("/api/best-trade")
-def best_trade():
-    """Rule-based 'Today's Best Trade' — combines the current Screener ranking with the Strategy
-    Builder's enhanced output (IV/HV, expected move, trend, volatility regime) into one summary.
-    This is NOT a machine-learning prediction and is NOT validated by backtesting — it's a
-    transparent aggregation of the same signals shown elsewhere in this dashboard."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    if not SCREENER_CACHE["results"]:
-        return jsonify({"error": "Run the Screener (section 1) first."}), 400
-    eligible = [r for r in SCREENER_CACHE["results"] if r.get("rank")]
-    if not eligible:
-        return jsonify({"error": "No eligible stocks in the last screener run."}), 400
-    eligible.sort(key=lambda r: r["rank"])
-    top = eligible[0]
-    strategy_type = request.args.get("strategy_type", "iron_condor")
-
-    built = build_strategy(top["symbol"], strategy_type=strategy_type)
-    if "error" in built:
-        return jsonify({"error": f"Could not build a strategy for top pick {top['symbol']}: {built['error']}"}), 400
-
-    reasons = []
-    if built.get("iv_hv"):
-        reasons.append(f"IV/HV ratio {built['iv_hv']['ratio']} ({built['iv_hv']['label']}).")
-    if built.get("trend"):
-        reasons.append(f"Trend regime: {built['trend']['regime']}.")
-    if built.get("volatility_regime"):
-        reasons.append(f"Volatility regime: {built['volatility_regime']['label']} "
-                        f"(recommendation: {built['volatility_regime']['recommendation']}).")
-    if built.get("suggested_strategy", {}).get("reason"):
-        reasons.append(built["suggested_strategy"]["reason"])
-    if built.get("expected_move_warning"):
-        reasons.append(built["expected_move_warning"])
-
-    risks = []
-    if built.get("entry_event_warning"):
-        risks.append(built["entry_event_warning"])
-    if built.get("event_before_expiry"):
-        risks.append(f"{built['event_before_expiry']['label']} on {built['event_before_expiry']['date']} "
-                      f"falls before this expiry.")
-    if built["strategy_type"] == "naked_strangle":
-        risks.append("Naked strangle: unlimited risk on the call side.")
-
-    max_profit = built.get("max_profit")
-    return jsonify({
-        "symbol": built["symbol"], "screener_rank": top["rank"], "strategy": built,
-        "why_this_trade": reasons, "risks": risks,
-        "expected_return": built.get("net_profit_after_entry_charges"),
-        "probability_of_profit_pct": built.get("probability_of_profit_pct"),
-        "max_risk": built.get("max_loss"),
-        "suggested_exit_plan": [
-            f"Profit target: exit at 50% of max profit"
-            + (f" (₹{round(max_profit * 0.5, 2)})." if max_profit else "."),
-            f"Time exit: close 3 days before expiry ({built['expiry']}) if still open.",
-            f"Delta exit: exit a short leg if its delta rises to ≥{STOP_LOSS_DELTA_THRESHOLD}.",
-        ],
-        "note": "Rule-based triage using the current Screener + Strategy Builder output — NOT a "
-                "machine-learning prediction, NOT investment advice, and NOT validated by backtesting. "
-                "Verify everything before trading real money.",
-    })
 
 
 # ---------------------------------------------------------------------------
@@ -2925,7 +1238,7 @@ def watchlist_add():
     if "error" in built:
         return jsonify(built), 404
 
-    today_str = now_ist().date().isoformat()
+    today_str = datetime.now().date().isoformat()
     position = {
         "id": f"{symbol}_{int(time.time())}",
         "symbol": symbol,
@@ -2955,130 +1268,6 @@ def watchlist_add():
     return jsonify({"ok": True, "position": position})
 
 
-@app.route("/api/calendar-watchlist/add", methods=["POST"])
-def calendar_watchlist_add():
-    """Track-a-position counterpart of /api/watchlist/add, for Double Calendar Spreads. Kept as its
-    own endpoint (rather than overloading /api/watchlist/add) since the position shape is different
-    enough (two expiries, four legs with different leg-key names, debit instead of credit) to be
-    clearer as a separate, explicit flow — mirrors how this dashboard keeps the Calendar tab separate."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    symbol = body.get("symbol", "").upper()
-    strike_mode = body.get("strike_mode", "otm_pct")
-    otm_pct = float(body.get("otm_pct", DEFAULT_CALENDAR_OTM_PCT))
-    target_delta = float(body.get("target_delta", DEFAULT_CALENDAR_TARGET_DELTA))
-    near_expiry = body.get("near_expiry")
-    far_expiry = body.get("far_expiry")
-    lots = int(body.get("lots", 1))
-
-    built = build_double_calendar_strategy(symbol, strike_mode, otm_pct, target_delta,
-                                            near_expiry, far_expiry, lots)
-    if "error" in built:
-        return jsonify(built), 404
-
-    today_str = now_ist().date().isoformat()
-    position = {
-        "id": f"{symbol}_CAL_{int(time.time())}",
-        "symbol": symbol,
-        "added_on": today_str,
-        "entry_spot": built["spot"],
-        "strategy_type": "double_calendar",
-        "strike_mode": built["strike_mode"],
-        "expiry": built["near_expiry"],          # "expiry" = the near/critical management date
-        "far_expiry": built["far_expiry"],
-        "lot_size": built["lot_size"],
-        "lots": built["lots"],
-        "quantity": built["quantity"],
-        "legs": built["legs"],
-        "entry_net_debit_per_share": built["net_debit_per_share"],
-        "entry_max_loss": built["max_loss"],
-        "entry_max_profit_estimated": built["max_profit_estimated"],
-        "entry_margin_required": built.get("margin_required"),
-        "entry_margin_error": built.get("margin_error"),
-        "entry_estimated_charges": built.get("estimated_entry_charges", {}).get("total"),
-        "breakevens": built["breakevens"],
-        "sweet_spot_range": built["sweet_spot_range"],
-        "broker_orders": [],
-        "history": [{"date": today_str, "spot": built["spot"],
-                     "pnl": 0.0, "current_debit_per_share": built["net_debit_per_share"]}],
-    }
-    positions = load_positions()
-    positions.append(position)
-    save_positions(positions)
-    return jsonify({"ok": True, "position": position})
-
-
-@app.route("/api/calendar-watchlist/<pos_id>/curve")
-def calendar_watchlist_curve(pos_id):
-    """Regenerates a LIVE payoff curve for an already-tracked calendar position, using current spot
-    and current far-leg IV (rather than the IV at entry time) — lets the Track Positions tab show how
-    the expected max-profit/max-loss shape has shifted since entry, not just the frozen entry-day curve."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    position = find_position(pos_id)
-    if not position or position.get("strategy_type") != "double_calendar":
-        return jsonify({"error": "Calendar position not found"}), 404
-
-    spot, err = get_spot_price(position["symbol"])
-    if err:
-        return jsonify(err), 404
-
-    today = now_ist().date()
-    near_expiry = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
-    far_expiry = datetime.strptime(position["far_expiry"], "%Y-%m-%d").date()
-    days_to_near = max((near_expiry - today).days, 0)
-    days_between = max((far_expiry - near_expiry).days, 1)
-
-    call_strike = position["legs"]["sell_call_near"]["strike"]
-    put_strike = position["legs"]["sell_put_near"]["strike"]
-    quantity = position.get("quantity", position["lot_size"])
-
-    inst_keys = [f"NFO:{position['legs']['buy_call_far']['tradingsymbol']}",
-                 f"NFO:{position['legs']['buy_put_far']['tradingsymbol']}"]
-    try:
-        quotes = kite_quote_bulk(inst_keys)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-    T_near_remaining = days_to_near / 365.0
-    far_call_ltp = extract_price(quotes.get(inst_keys[0]))
-    far_put_ltp = extract_price(quotes.get(inst_keys[1]))
-    if far_call_ltp is None or far_put_ltp is None:
-        return jsonify({"error": "No usable live price for one or both far legs"}), 400
-    call_iv = implied_vol(far_call_ltp, spot, call_strike, T_near_remaining + days_between / 365.0, "CE")
-    put_iv = implied_vol(far_put_ltp, spot, put_strike, T_near_remaining + days_between / 365.0, "PE")
-
-    entry_debit = position["entry_net_debit_per_share"]
-    T_far_remaining = days_between / 365.0
-
-    def pnl_at_spot(s_t):
-        near_call_intrinsic = max(s_t - call_strike, 0.0)
-        near_put_intrinsic = max(put_strike - s_t, 0.0)
-        far_call_value = bs_price(s_t, call_strike, T_far_remaining, RISK_FREE_RATE, call_iv, "CE")
-        far_put_value = bs_price(s_t, put_strike, T_far_remaining, RISK_FREE_RATE, put_iv, "PE")
-        position_value = (far_call_value - near_call_intrinsic) + (far_put_value - near_put_intrinsic)
-        return position_value - entry_debit
-
-    lo = spot * (1 - CALENDAR_CURVE_RANGE_PCT)
-    hi = spot * (1 + CALENDAR_CURVE_RANGE_PCT)
-    step = (hi - lo) / (CALENDAR_CURVE_POINTS - 1)
-    curve = []
-    for i in range(CALENDAR_CURVE_POINTS):
-        s_t = lo + i * step
-        curve.append({"spot": round(s_t, 2), "pnl": round(pnl_at_spot(s_t) * quantity, 2)})
-
-    return jsonify({
-        "position_id": pos_id, "spot": spot, "days_to_near_expiry": days_to_near,
-        "curve": curve, "sweet_spot_range": [put_strike, call_strike],
-        "note": "Live re-estimate using current spot and today's implied vol on the far legs — the "
-                "curve shape will keep shifting daily as time passes and IV moves; treat it as a "
-                "current best-guess snapshot, not a fixed prediction."
-    })
-
-
-
-
 @app.route("/api/watchlist/<pos_id>", methods=["DELETE"])
 def watchlist_remove(pos_id):
     positions = load_positions()
@@ -3087,150 +1276,14 @@ def watchlist_remove(pos_id):
     return jsonify({"ok": True})
 
 
-def mark_to_market_calendar(position):
-    """Double Calendar equivalent of mark_to_market() below — kept separate because the P&L math,
-    zone logic, and exit rules are genuinely different for a debit calendar vs a credit condor/strangle
-    (two expiries, model-based re-valuation of the far leg instead of a simple credit/debit diff)."""
-    quantity = position.get("quantity", position["lot_size"])
-    leg_keys = ["sell_call_near", "sell_put_near", "buy_call_far", "buy_put_far"]
-
-    inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
-    quotes = kite_quote_bulk(inst_keys)
-
-    prices, missing_legs = {}, []
-    for k in leg_keys:
-        key = f"NFO:{position['legs'][k]['tradingsymbol']}"
-        price = extract_price(quotes.get(key))
-        prices[k] = price
-        if price is None:
-            missing_legs.append(f"{k} ({position['legs'][k]['tradingsymbol']})")
-    if missing_legs:
-        return {"__error__": "No usable price for: " + ", ".join(missing_legs) +
-                              ". Contract may be expired/delisted, or market closed with no resting orders."}
-
-    # Current cost to CLOSE this spread: sell the far longs at their ltp, buy back the near shorts
-    # at their ltp. Position value rising above the entry debit is what "profit" means here.
-    current_value_per_share = ((prices["buy_call_far"] - prices["sell_call_near"]) +
-                                (prices["buy_put_far"] - prices["sell_put_near"]))
-    entry_debit = position["entry_net_debit_per_share"]
-    pnl_per_share = current_value_per_share - entry_debit
-    pnl = round(pnl_per_share * quantity, 2)
-    current_position_value = round(current_value_per_share * quantity, 2)
-
-    spot, err = get_spot_price(position["symbol"])
-    if err:
-        return {"__error__": err["error"]}
-
-    today = now_ist().date()
-    near_expiry_date = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
-    far_expiry_date = datetime.strptime(position["far_expiry"], "%Y-%m-%d").date()
-    days_left = (near_expiry_date - today).days
-    T_near_remaining = max(days_left, 0) / 365.0
-
-    call_strike = position["legs"]["sell_call_near"]["strike"]
-    put_strike = position["legs"]["sell_put_near"]["strike"]
-    sweet_spot_lo, sweet_spot_hi = put_strike, call_strike
-
-    zone = "safe"
-    if spot > sweet_spot_hi or spot < sweet_spot_lo:
-        zone = "outside_sweet_spot"
-    if days_left <= CALENDAR_NEAR_EXPIRY_DAYS_WARNING:
-        zone = "near_expiry"
-
-    delta_call = delta_put = None
-    if days_left > 0:
-        iv_call = implied_vol(prices["sell_call_near"], spot, call_strike, T_near_remaining, "CE")
-        iv_put = implied_vol(prices["sell_put_near"], spot, put_strike, T_near_remaining, "PE")
-        delta_call = bs_delta(spot, call_strike, T_near_remaining, RISK_FREE_RATE, iv_call, "CE")
-        delta_put = bs_delta(spot, put_strike, T_near_remaining, RISK_FREE_RATE, iv_put, "PE")
-
-    # Probability spot is still WITHIN the sweet spot (between the two short strikes) at near expiry —
-    # lognormal approx using the same expected-move machinery used elsewhere in this file.
-    probability_in_sweet_spot = None
-    rank_info = get_stock_rank(position["symbol"])
-    atm_iv_pct = rank_info.get("atm_iv_pct") if rank_info else None
-    if atm_iv_pct and days_left > 0 and spot:
-        sigma = atm_iv_pct / 100.0
-        T = days_left / 365.0
-        if sigma > 0 and T > 0:
-            d_hi = (math.log(sweet_spot_hi / spot)) / (sigma * math.sqrt(T))
-            d_lo = (math.log(sweet_spot_lo / spot)) / (sigma * math.sqrt(T))
-            probability_in_sweet_spot = round((norm_cdf(d_hi) - norm_cdf(d_lo)) * 100, 1)
-    elif days_left <= 0:
-        probability_in_sweet_spot = 100.0 if zone == "safe" else 0.0
-
-    # --- Exit suggestion (informational only) ---
-    exit_suggested, exit_reasons = False, []
-    entry_debit_total = abs(entry_debit * quantity)
-    if entry_debit_total and pnl <= -CALENDAR_STOP_LOSS_DEBIT_MULTIPLE * entry_debit_total:
-        exit_suggested = True
-        exit_reasons.append(f"Loss (₹{abs(pnl)}) has reached {CALENDAR_STOP_LOSS_DEBIT_MULTIPLE}x the debit "
-                             f"paid (₹{round(entry_debit_total,2)}).")
-    if zone == "outside_sweet_spot":
-        exit_suggested = True
-        exit_reasons.append(f"Spot (₹{spot}) has moved outside the sweet spot range "
-                             f"({sweet_spot_lo}–{sweet_spot_hi}) — the near leg is losing its edge.")
-    if days_left <= CALENDAR_NEAR_EXPIRY_DAYS_WARNING and days_left >= 0:
-        exit_suggested = True
-        exit_reasons.append(f"Only {days_left} day(s) to near-leg expiry — consider closing or rolling "
-                             f"the near leg to manage gamma/assignment risk.")
-
-    event_flag = get_event_before_expiry(position["expiry"])
-
-    exit_orders_for_charges = [
-        {"price": prices["sell_call_near"], "quantity": quantity, "transaction_type": "BUY"},
-        {"price": prices["sell_put_near"], "quantity": quantity, "transaction_type": "BUY"},
-        {"price": prices["buy_call_far"], "quantity": quantity, "transaction_type": "SELL"},
-        {"price": prices["buy_put_far"], "quantity": quantity, "transaction_type": "SELL"},
-    ]
-    exit_charges = estimate_charges(exit_orders_for_charges)
-    entry_charges_total = position.get("entry_estimated_charges") or 0
-    round_trip_charges = round(entry_charges_total + exit_charges["total"], 2)
-    net_pnl_after_charges = round(pnl - round_trip_charges, 2)
-
-    leg_details = {}
-    for k in leg_keys:
-        entry_price = position["legs"][k]["ltp"]
-        current_price = prices[k]
-        is_sell = k.startswith("sell")
-        per_share = (entry_price - current_price) if is_sell else (current_price - entry_price)
-        leg_details[k] = {
-            "tradingsymbol": position["legs"][k]["tradingsymbol"],
-            "strike": position["legs"][k]["strike"],
-            "entry_price": entry_price, "current_price": round(current_price, 2),
-            "pnl": round(per_share * quantity, 2),
-        }
-        if k == "sell_call_near" and delta_call is not None:
-            leg_details[k]["current_delta"] = round(delta_call, 3)
-        if k == "sell_put_near" and delta_put is not None:
-            leg_details[k]["current_delta"] = round(delta_put, 3)
-
-    entry_max_profit = position.get("entry_max_profit_estimated")
-    return {
-        "spot": spot, "pnl": pnl, "current_debit_per_share": round(current_value_per_share, 2),
-        "current_position_value": current_position_value, "legs_current": leg_details,
-        "days_left": days_left, "zone": zone,
-        "probability_in_sweet_spot_pct": probability_in_sweet_spot,
-        "pct_of_max_profit": round((pnl / entry_max_profit * 100), 1) if entry_max_profit else None,
-        "exit_suggested": exit_suggested, "exit_reasons": exit_reasons,
-        "event_before_expiry": event_flag,
-        "entry_charges": entry_charges_total, "estimated_exit_charges": exit_charges["total"],
-        "estimated_round_trip_charges": round_trip_charges, "net_pnl_after_charges": net_pnl_after_charges,
-        "sweet_spot_range": [sweet_spot_lo, sweet_spot_hi],
-    }
-
-
 def mark_to_market(position):
-    if position.get("strategy_type") == "double_calendar":
-        return mark_to_market_calendar(position)
-
     strategy_type = position.get("strategy_type", "iron_condor")
     leg_keys = ["sell_call", "buy_call", "sell_put", "buy_put"] if strategy_type == "iron_condor" \
         else ["sell_call", "sell_put"]
     quantity = position.get("quantity", position["lot_size"])
 
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
-    quotes = kite_quote_bulk(inst_keys)
+    quotes = kite.quote(inst_keys)
 
     prices, missing_legs = {}, []
     for k in leg_keys:
@@ -3257,7 +1310,7 @@ def mark_to_market(position):
     if err:
         return {"__error__": err["error"]}
 
-    today = now_ist().date()
+    today = datetime.now().date()
     expiry_date = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
     days_left = (expiry_date - today).days
     T_remaining = max(days_left, 0) / 365.0
@@ -3331,10 +1384,8 @@ def mark_to_market(position):
         }
         if k == "sell_call" and delta_call is not None:
             leg_details[k]["current_delta"] = round(delta_call, 3)
-            leg_details[k]["probability_of_touch_pct"] = probability_of_touch(delta_call)
         if k == "sell_put" and delta_put is not None:
             leg_details[k]["current_delta"] = round(delta_put, 3)
-            leg_details[k]["probability_of_touch_pct"] = probability_of_touch(delta_put)
 
     return {
         "spot": spot, "pnl": pnl, "current_debit_per_share": round(current_debit_per_share, 2),
@@ -3353,7 +1404,7 @@ def watchlist():
     if not require_session():
         return jsonify({"error": "not_logged_in"}), 401
     positions = load_positions()
-    today_str = now_ist().date().isoformat()
+    today_str = datetime.now().date().isoformat()
     out, changed = [], False
     for p in positions:
         try:
@@ -3379,60 +1430,15 @@ def watchlist():
 # Order execution — preview (no side effects) then confirm (places real orders)
 # ---------------------------------------------------------------------------
 def leg_keys_for(position):
-    st = position.get("strategy_type")
-    if st == "iron_condor":
-        return ["sell_call", "buy_call", "sell_put", "buy_put"]
-    if st == "double_calendar":
-        return ["sell_call_near", "sell_put_near", "buy_call_far", "buy_put_far"]
-    return ["sell_call", "sell_put"]
+    return ["sell_call", "buy_call", "sell_put", "buy_put"] if position.get("strategy_type") == "iron_condor" \
+        else ["sell_call", "sell_put"]
 
 
-ORDER_TERMINAL_STATUSES = ("COMPLETE", "REJECTED", "CANCELLED")
-
-
-def wait_for_order_terminal(order_id, timeout_seconds=8, poll_interval=0.5):
-    """Polls Kite's order book for a specific order_id until it reaches a terminal state
-    (COMPLETE / REJECTED / CANCELLED) or the timeout elapses. Returns the last status seen, or
-    'TIMEOUT' if it was still open/pending when we stopped waiting (Kite market orders on NFO
-    normally resolve in well under a second, so the timeout is just a safety net against a hung
-    poll — it does not cancel the order)."""
-    deadline = time.time() + timeout_seconds
-    last_status = None
-    while time.time() < deadline:
-        try:
-            for o in kite.orders():
-                if o.get("order_id") == order_id:
-                    last_status = o.get("status")
-                    break
-        except Exception:
-            pass
-        if last_status in ORDER_TERMINAL_STATUSES:
-            return last_status
-        time.sleep(poll_interval)
-    return last_status or "TIMEOUT"
-
-
-def place_basket_orders(legs_to_place, product, order_type, sequence_for_margin=True):
+def place_basket_orders(legs_to_place, product, order_type):
     """Places each leg as a separate real order. Stops immediately on the first failure rather
-    than continuing — continuing could leave a partial, unintentionally unhedged position.
-
-    sequence_for_margin=True (the default for basket entry/close) sends every BUY leg first and
-    — for MARKET orders — waits for each BUY to actually reach a terminal state before sending any
-    SELL leg. Zerodha checks margin against your live positions at the moment each order hits the
-    exchange, so a SELL leg fired before its offsetting BUY leg has filled can get REJECTED for
-    insufficient margin even though the combo is fully hedged once both legs are in. Waiting for
-    the BUY fill first lets the freed-up/hedged margin actually register before the SELL leg goes.
-    Pass sequence_for_margin=False for one-off, independent leg placements/exits where there's no
-    basket-level margin ordering to respect (e.g. the per-leg 'Execute this leg' button, or exiting
-    an arbitrary set of live positions picked by the user)."""
-    ordered = legs_to_place
-    if sequence_for_margin:
-        buys = [item for item in legs_to_place if item["transaction_type"] == "BUY"]
-        sells = [item for item in legs_to_place if item["transaction_type"] != "BUY"]
-        ordered = buys + sells
-
+    than continuing — continuing could leave a partial, unintentionally unhedged position."""
     results = []
-    for item in ordered:
+    for item in legs_to_place:
         txn_type = kite.TRANSACTION_TYPE_SELL if item["transaction_type"] == "SELL" else kite.TRANSACTION_TYPE_BUY
         quantity = int(item.get("quantity") or 1)
         reference_price = item.get("price")
@@ -3444,45 +1450,12 @@ def place_basket_orders(legs_to_place, product, order_type, sequence_for_margin=
                 order_type=getattr(kite, f"ORDER_TYPE_{order_type}"),
                 validity=kite.VALIDITY_DAY,
             )
-            if item.get("tag"):
-                kwargs["tag"] = str(item["tag"])[:20]
-            if item.get("autoslice") is not None:
-                kwargs["autoslice"] = bool(item["autoslice"])
-            if item.get("market_protection") is not None and order_type in ("MARKET", "SL-M"):
-                kwargs["market_protection"] = item["market_protection"]
             if order_type == "LIMIT" and reference_price:
                 kwargs["price"] = float(reference_price)
-            if order_type in ("MARKET", "SL-M") and "market_protection" not in kwargs:
-                # -1 lets Zerodha apply its automatic market-protection band.
-                kwargs["market_protection"] = -1
-            try:
-                order_id = kite.place_order(**kwargs)
-            except TypeError as te:
-                if "market_protection" in str(te):
-                    # Installed kiteconnect SDK predates the market_protection parameter (a known
-                    # PyPI packaging gap -- see zerodha/pykiteconnect issue #225). Retry without it;
-                    # this will still work UNLESS your broker has already started enforcing the
-                    # exchange's market-protection requirement, in which case upgrade the SDK:
-                    #   pip install --upgrade kiteconnect
-                    kwargs.pop("market_protection", None)
-                    order_id = kite.place_order(**kwargs)
-                else:
-                    raise
-
-            fill_status = None
-            if sequence_for_margin and order_type == "MARKET":
-                fill_status = wait_for_order_terminal(order_id)
-                if fill_status == "REJECTED":
-                    results.append({"leg": item.get("leg", "?"), "tradingsymbol": item["tradingsymbol"],
-                                     "transaction_type": item["transaction_type"], "quantity": quantity,
-                                     "status": "failed", "order_id": order_id, "fill_status": fill_status,
-                                     "error": "Order was REJECTED by the exchange/broker.",
-                                     "reference_price": reference_price})
-                    break
-
+            order_id = kite.place_order(**kwargs)
             results.append({"leg": item.get("leg", "?"), "tradingsymbol": item["tradingsymbol"],
                              "transaction_type": item["transaction_type"], "quantity": quantity,
-                             "status": "placed", "order_id": order_id, "fill_status": fill_status,
+                             "status": "placed", "order_id": order_id,
                              "estimated_realized_pnl": 0,  # filled in by caller if this is a closing trade
                              "reference_price": reference_price})
         except Exception as e:
@@ -3501,60 +1474,39 @@ def execute_preview(pos_id):
     if not position:
         return jsonify({"error": "Position not found"}), 404
 
-    quantity = position.get("quantity", position["lot_size"])
-    orders = []
-    for k in leg_keys_for(position):
-        leg = position["legs"][k]
-        txn = "SELL" if k.startswith("sell") else "BUY"
-        orders.append({
-            "leg": k, "tradingsymbol": leg["tradingsymbol"], "transaction_type": txn,
-            "quantity": quantity, "reference_price": leg["ltp"],
-        })
+    try:
+        orders = refresh_execution_quotes(position)
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch live Bid/Ask: {e}"}), 502
+
     return jsonify({
-        "position_id": pos_id, "symbol": position["symbol"], "orders": orders,
-        "default_product": "NRML", "default_order_type": "MARKET",
-        "warning": "These orders are NOT yet placed. Review carefully — you can edit quantity/price or "
-                   "remove a leg entirely below — then confirm to send them to your live Zerodha account. "
-                   "Removing a hedge leg (a BUY order) from an Iron Condor leaves that side of the "
-                   "position with unlimited-style risk, same as a naked strangle. If you click "
-                   "'Yes, place these real orders', BUY legs are sent first and this tool waits for "
-                   "each to fill before sending SELL legs, so the SELL side doesn't get rejected for "
-                   "insufficient margin. You can also use 'Execute this leg' on any single row to fire "
-                   "legs yourself, one at a time, in whatever order you choose."
+        "position_id": pos_id,
+        "symbol": position["symbol"],
+        "orders": orders,
+        "default_product": "NRML",
+        "default_order_type": "LIMIT",
+        "warning": "LIMIT prices use best Ask for BUY legs and best Bid for SELL legs. "
+                   "Quotes can change before the order reaches the exchange."
     })
 
 
-@app.route("/api/execute/<pos_id>/leg", methods=["POST"])
-def execute_single_leg(pos_id):
-    """Places exactly ONE leg right now — used by the per-leg 'Execute this leg' button in the
-    review screen so you can manually sequence a multi-leg entry yourself (e.g. fire the BUY hedge,
-    watch it fill in your Zerodha app, then come back and fire the SELL leg once margin is freed).
-    This does NOT apply the automatic BUY-before-SELL basket sequencing — you're placing one leg,
-    on purpose, right now."""
+@app.route("/api/execute/<pos_id>/refresh-quotes")
+def execute_refresh_quotes(pos_id):
     if not require_session():
         return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    if not body.get("confirmed"):
-        return jsonify({"error": "Confirmation flag not set — nothing was placed."}), 400
-    order = body.get("order")
-    if not order or not order.get("tradingsymbol"):
-        return jsonify({"error": "No leg order provided."}), 400
-
     position = find_position(pos_id)
     if not position:
         return jsonify({"error": "Position not found"}), 404
-
-    product = body.get("product", "NRML")
-    order_type = body.get("order_type", "MARKET")
-    results = place_basket_orders([order], product, order_type, sequence_for_margin=False)
-
-    positions = load_positions()
-    for p in positions:
-        if p["id"] == pos_id:
-            p["broker_orders"] = p.get("broker_orders", []) + results
-    save_positions(positions)
-
-    return jsonify({"results": results})
+    try:
+        orders = refresh_execution_quotes(position)
+        return jsonify({
+            "position_id": pos_id,
+            "symbol": position["symbol"],
+            "orders": orders,
+            "refreshed_at": datetime.now().strftime("%H:%M:%S")
+        })
+    except Exception as e:
+        return jsonify({"error": f"Could not refresh live Bid/Ask: {e}"}), 502
 
 
 @app.route("/api/execute/<pos_id>/confirm", methods=["POST"])
@@ -3588,6 +1540,22 @@ def execute_confirm(pos_id):
 
     if not legs_to_place:
         return jsonify({"error": "No legs left to place — every leg was removed in the review screen."}), 400
+
+    if order_type == "LIMIT":
+        # Last-second server refresh for rows still marked AUTO.
+        try:
+            fresh = {o["leg"]: o for o in refresh_execution_quotes(position)}
+            refreshed = []
+            for item in legs_to_place:
+                item = dict(item)
+                if item.get("price_source") == "AUTO":
+                    fq = fresh.get(item.get("leg"))
+                    if fq and fq.get("recommended_limit_price") is not None:
+                        item["price"] = fq["recommended_limit_price"]
+                refreshed.append(item)
+            legs_to_place = refreshed
+        except Exception as e:
+            return jsonify({"error": f"Could not refresh live Bid/Ask before placement: {e}"}), 502
 
     results = place_basket_orders(legs_to_place, product, order_type)
 
@@ -3623,7 +1591,7 @@ def build_close_orders(position):
     quantity = position.get("quantity", position["lot_size"])
     leg_keys = leg_keys_for(position)
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
-    quotes = kite_quote_bulk(inst_keys)
+    quotes = kite.quote(inst_keys)
 
     orders = []
     for k in leg_keys:
@@ -3654,36 +1622,6 @@ def close_preview(pos_id):
                    "you bought, at current market prices. Review carefully, then confirm to send these real "
                    "orders to your Zerodha account."
     })
-
-
-@app.route("/api/execute/<pos_id>/close/leg", methods=["POST"])
-def close_single_leg(pos_id):
-    """Places exactly ONE closing leg right now — the close-flow counterpart of
-    /api/execute/<pos_id>/leg, for manually sequencing a square-off leg by leg."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    if not body.get("confirmed"):
-        return jsonify({"error": "Confirmation flag not set — nothing was placed."}), 400
-    order = body.get("order")
-    if not order or not order.get("tradingsymbol"):
-        return jsonify({"error": "No leg order provided."}), 400
-
-    position = find_position(pos_id)
-    if not position:
-        return jsonify({"error": "Position not found"}), 404
-
-    product = body.get("product", "NRML")
-    order_type = body.get("order_type", "MARKET")
-    results = place_basket_orders([order], product, order_type, sequence_for_margin=False)
-
-    positions = load_positions()
-    for p in positions:
-        if p["id"] == pos_id:
-            p["broker_orders"] = p.get("broker_orders", []) + results
-    save_positions(positions)
-
-    return jsonify({"results": results})
 
 
 @app.route("/api/execute/<pos_id>/close/confirm", methods=["POST"])
@@ -3750,162 +1688,6 @@ def close_confirm(pos_id):
     save_positions(positions)
     return jsonify({"results": results, "fully_closed": fully_closed, "note": note})
 
-
-@app.route("/api/broker-positions")
-def broker_positions():
-    """Live F&O positions straight from your Zerodha account (Kite's net positions() call) —
-    independent of this tool's own tracked Iron Condor / Strangle baskets in positions.json, and
-    independent of which strategy or basket a leg originally came from. For each open NFO leg this
-    returns the entry (average) price, live LTP, and running P&L reported by Kite itself, so the
-    Order Management tab can show exactly what your account currently holds and let you price and
-    fire an exit — for one leg or several at once — straight from here."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    try:
-        pos = kite.positions()
-        net = pos.get("net", [])
-        rows = []
-        for p in net:
-            if p.get("exchange") != "NFO":
-                continue
-            qty = int(p.get("quantity") or 0)
-            if qty == 0:
-                continue  # already flat — nothing open on this tradingsymbol
-            rows.append({
-                "tradingsymbol": p.get("tradingsymbol"),
-                "product": p.get("product"),
-                "quantity": qty,
-                "side": "LONG" if qty > 0 else "SHORT",
-                "average_price": p.get("average_price"),
-                "last_price": p.get("last_price"),
-                "pnl": p.get("pnl"),
-                "close_price": p.get("close_price"),
-            })
-        return jsonify({"positions": rows})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.route("/api/broker-positions/exit", methods=["POST"])
-def broker_positions_exit():
-    """Squares off one or more live Zerodha F&O positions directly by tradingsymbol — backs the
-    Order Management tab's per-row 'Exit' button and the 'Exit Selected' multi-select action.
-    Independent of this tool's own tracked baskets; works on whatever legs you pick, in whatever
-    combination. A LONG position is squared off with a SELL, a SHORT position with a BUY. Each leg
-    can optionally carry its own exit price (LIMIT) — legs left blank use MARKET. These legs are NOT
-    run through the BUY-before-SELL basket sequencing (see place_basket_orders) since they're
-    independent square-offs you chose yourself, not a hedged multi-leg entry."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    if not body.get("confirmed"):
-        return jsonify({"error": "Confirmation flag not set — nothing was placed."}), 400
-    legs = body.get("legs")
-    if not legs:
-        return jsonify({"error": "No legs provided."}), 400
-
-    product = body.get("product", "NRML")
-
-    legs_to_place = []
-    any_priced = False
-    for lg in legs:
-        if not lg.get("tradingsymbol"):
-            continue
-        qty = abs(int(lg.get("quantity") or 0))
-        if qty <= 0:
-            continue
-        close_txn = "SELL" if str(lg.get("side", "LONG")).upper() == "LONG" else "BUY"
-        price = lg.get("price")
-        if price not in (None, ""):
-            any_priced = True
-        legs_to_place.append({
-            "leg": lg["tradingsymbol"], "tradingsymbol": lg["tradingsymbol"],
-            "transaction_type": close_txn, "quantity": qty,
-            "price": float(price) if price not in (None, "") else None,
-        })
-
-    if not legs_to_place:
-        return jsonify({"error": "No valid legs to place."}), 400
-
-    # If ANY leg in this batch was given a specific price, place the whole batch as LIMIT orders
-    # (legs without a price fall back to their live reference price computed per-leg below);
-    # otherwise place everything MARKET.
-    if any_priced:
-        inst_keys = [f"NFO:{lg['tradingsymbol']}" for lg in legs_to_place]
-        try:
-            quotes = kite_quote_bulk(inst_keys)
-        except Exception:
-            quotes = {}
-        for lg in legs_to_place:
-            if lg["price"] is None:
-                lg["price"] = extract_price(quotes.get(f"NFO:{lg['tradingsymbol']}"))
-        order_type = "LIMIT"
-    else:
-        order_type = "MARKET"
-
-    results = place_basket_orders(legs_to_place, product, order_type, sequence_for_margin=False)
-    return jsonify({"results": results})
-
-
-@app.route("/api/broker/account")
-def broker_account():
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    out={}
-    try: out["profile"]=kite.profile()
-    except Exception as e: out["profile_error"]=str(e)
-    try: out["margins"]=kite.margins()
-    except Exception as e: out["margins_error"]=str(e)
-    try: out["holdings"]=kite.holdings()
-    except Exception as e: out["holdings_error"]=str(e)
-    try: out["positions"]=kite.positions()
-    except Exception as e: out["positions_error"]=str(e)
-    return jsonify(out)
-
-@app.route("/api/quote/<path:instrument>")
-def broker_quote(instrument):
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    try:
-        key=instrument if ":" in instrument else f"NSE:{instrument.upper()}"
-        return jsonify({"quote":kite_quote_bulk([key]).get(key)})
-    except Exception as e: return jsonify({"error":str(e)}),400
-
-@app.route("/api/trades")
-def broker_trades():
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    try: return jsonify({"trades":kite.trades()})
-    except Exception as e: return jsonify({"error":str(e)}),400
-
-@app.route("/api/charges/orders", methods=["POST"])
-def broker_charges_orders():
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    body=request.json or {}; orders=body.get("orders") or []
-    if not orders: return jsonify({"error":"orders required"}),400
-    try:
-        if hasattr(kite,"order_charges"):
-            return jsonify({"charges":kite.order_charges(orders)})
-        return jsonify({"charges":None,"note":"Installed kiteconnect SDK does not expose order_charges; use estimate_charges locally."})
-    except Exception as e: return jsonify({"error":str(e)}),400
-
-@app.route("/api/gtt")
-def gtt_list():
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    try: return jsonify({"triggers":kite.get_gtts()})
-    except Exception as e: return jsonify({"error":str(e)}),400
-
-@app.route("/api/gtt", methods=["POST"])
-def gtt_create():
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    body=request.json or {}
-    try: return jsonify({"trigger_id":kite.place_gtt(body["trigger_type"],body["condition"],body["orders"])})
-    except Exception as e: return jsonify({"error":str(e)}),400
-
-@app.route("/api/gtt/<int:trigger_id>", methods=["PUT","DELETE"])
-def gtt_manage(trigger_id):
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    try:
-        if request.method=="DELETE": return jsonify({"ok":kite.delete_gtt(trigger_id)})
-        body=request.json or {}; return jsonify({"ok":kite.modify_gtt(trigger_id,body.get("condition"),body.get("orders"))})
-    except Exception as e: return jsonify({"error":str(e)}),400
 
 @app.route("/api/orders")
 def list_orders():
@@ -3987,23 +1769,9 @@ def chart(symbol):
     days = min(requested_days, max_days)
     clamped = requested_days > max_days
 
-    to_date = now_ist()
-    from_date = to_date - timedelta(days=days + (15 if interval == "day" else 5))
+    to_date = datetime.now()
+    from_date = to_date - timedelta(days=days + (15 if interval == "day" else 3))
     candles = kite.historical_data(token, from_date, to_date, interval)
-
-    if interval != "day":
-        # The window above is padded (weekends/holidays could otherwise leave fewer trading
-        # sessions than requested), so it can return MORE trading days than `days` asked for.
-        # Trim down to exactly the most recent `days` trading days so a short lookback (e.g. 1
-        # day) doesn't silently keep showing extra earlier sessions -- which is what made the
-        # chart look like it "wasn't updating" when you changed the lookback control.
-        by_day = {}
-        for c in candles:
-            d = c["date"]
-            key = d.date() if hasattr(d, "date") else str(d)[:10]
-            by_day.setdefault(key, []).append(c)
-        wanted_days = sorted(by_day.keys())[-days:]
-        candles = [c for day_key in wanted_days for c in by_day[day_key]]
 
     def fmt_date(c):
         d = c["date"]
@@ -4097,1748 +1865,6 @@ def news(symbol):
                      "environment variable before running backend.py.")
     return jsonify({"symbol": symbol, "headlines": [],
                      "error": "Could not fetch news from any source. " + (error or "") + guidance})
-
-
-# ---------------------------------------------------------------------------
-# AUTO TRADE MODE — rule-based intraday breakout scanner + option buyer
-# ---------------------------------------------------------------------------
-# What this actually is, in plain terms:
-#   - It is NOT an AI making trading judgements. It is a simple, fully-visible technical rule:
-#     price breaks above/below its recent N-candle range (a Donchian-channel breakout), with a
-#     minimum move size in ATR units and (best-effort) volume confirmation.
-#   - On a qualifying breakout it buys the ATM option in the breakout direction (CE for an
-#     upside break, PE for a downside break) using MIS (intraday) product, sized off a rupee
-#     budget you set, then manages that ONE position with a premium-based stop-loss, a
-#     premium-based target, and a trailing stop once it's in profit — until SL/target/trailing
-#     stop hits, or the end-of-day square-off time, whichever comes first.
-#   - MANUAL mode: it scans continuously and shows you the ranked signal — nothing is ever sent
-#     to your broker until you click "Execute this signal".
-#   - AUTO mode: after you click OK on the confirmation dialog, it places that entry order the
-#     moment a qualifying signal appears, with no per-trade click. This is real money, unattended.
-#     Hard safety rails below (daily trade cap, daily loss cap, single-position-at-a-time, kill
-#     switch) exist specifically because of that — they are not optional and cannot be disabled
-#     from the UI.
-#   - Universe: either a hand-picked list, OR "scan_all_fo" mode, which rotates through the ENTIRE
-#     live F&O stock list (indices always included) a batch at a time, staying under Kite's
-#     historical-data rate limit -- see _effective_scan_universe().
-#   - Signal model: Donchian-channel breakout scored with THREE confirmation layers -- EMA9/21
-#     trend agreement, RSI(14) momentum, and continuous relative volume -- combined into one
-#     composite score. Still fully rules-based and transparent (see _detect_breakout()); it is
-#     NOT a proven or guaranteed-profitable strategy, and false breakouts remain one of the most
-#     common ways to lose money in intraday trading. Past behavior of this logic on any symbol
-#     says nothing about future results. Only ever risk capital you can afford to lose, and watch
-#     your Zerodha app while Auto mode is armed.
-# ---------------------------------------------------------------------------
-AUTOTRADE_FILE = os.path.join(os.path.dirname(__file__), "autotrade_state.json")
-AUTOTRADE_TRADES_FILE = os.path.join(os.path.dirname(__file__), "autotrade_trades.json")
-_autotrade_lock = threading.Lock()
-
-AUTOTRADE_MARKET_OPEN = "09:20"   # a few minutes after the 9:15 open, letting the opening range settle
-
-AUTOTRADE_DEFAULTS = {
-    "enabled": False,                 # is the scan/execute loop armed at all
-    "mode": "manual",                 # "manual" (show signal, wait for click) or "auto" (self-execute)
-    # --- Order execution: Track (paper) vs Live (real orders) ---
-    # Orthogonal to `mode` above -- applies to BOTH Manual and Auto scanning.
-    #   "track" (DEFAULT): NO real orders are ever sent to your broker. Entries and exits are
-    #             simulated fills at the same real, live LTP a live trade would have used, so P&L,
-    #             SL/target/trailing, and the auto-detected exit logic all run exactly as they would
-    #             live -- just with paper money. Safe to leave scanning/armed indefinitely.
-    #   "live"  : real orders are placed on your live Zerodha account, same as before this setting
-    #             existed. Can only be turned on via /api/autotrade/set-execution-mode with an
-    #             explicit ack -- NOT changeable through the bulk /api/autotrade/config save, so a
-    #             stray "Save settings" click can never silently flip you into real-money trading.
-    # Each trade snapshots which mode it was opened under (trade["execution_mode"]), so switching
-    # this setting never changes how an already-open position behaves.
-    "execution_mode": "track",
-    "universe": ["NIFTY", "BANKNIFTY", "FINNIFTY"],   # fallback list used only if scan_all_fo is OFF
-    "scan_all_fo": True,              # DEFAULT: scan the ENTIRE live F&O stock universe (every
-                                       # NFO-OPT name, indices included) instead of a hand-picked list
-                                       # -- see _effective_scan_universe() for how this is rate-limited.
-                                       # Untick in Settings to fall back to the manual `universe` list.
-    "_fo_scan_cursor": 0,             # internal: rotation position through the full F&O list
-    "candle_interval": "5minute",
-    "breakout_lookback": 20,          # candles in the Donchian channel
-    "poll_seconds": 20,
-    "max_trades_per_day": 3,
-    "max_concurrent_positions": 1,    # how many auto-trade positions can be open AT ONCE
-    "capital_per_trade": 15000,       # approx premium budget (Rs) used to size lots
-    "max_daily_loss": 5000,           # Rs; auto-disarms Auto mode the instant realized loss hits this
-    # --- Exit logic: choose how open auto-trades get closed ---
-    # "auto"      (DEFAULT): system auto-detected exit -- the position is closed the moment the
-    #             underlying's own trend/momentum invalidates the breakout thesis that opened it
-    #             (EMA9/21 flips + RSI disagrees), OR a trailing-stop gives back too much of the
-    #             peak profit reached, OR the hard safety-stop floor is hit, OR EOD square-off.
-    #             There is no fixed profit cap in this mode -- winners are allowed to run as long as
-    #             the trend holds. A hard percentage safety floor (hard_stop_pct) is ALWAYS active
-    #             underneath this, regardless of what the reversal/trailing logic is doing.
-    # "target_sl" : fixed, user-defined Target % / Stop-loss % (+ trailing) exactly as configured
-    #             below -- the position exits purely on those numbers, no trend re-evaluation.
-    "exit_mode": "auto",
-    "hard_stop_pct": 50,               # Auto exit mode ONLY: catastrophic-loss floor, % of premium
-                                        # paid -- exits immediately no matter what the reversal/
-                                        # trailing logic says. This is a safety net, not the primary
-                                        # exit trigger in Auto mode.
-    "sl_mode": "pct",                 # "pct" (of entry premium) or "points" (flat rupees off premium)
-    "sl_pct_of_premium": 30,          # stop-loss = premium paid minus this %   } used when
-    "sl_points": 5.0,                 # stop-loss = premium paid minus this many rupees (sl_mode=points)  } exit_mode
-    "target_mode": "pct",             # "pct" (of entry premium) or "points" (flat rupees over premium)  } ==
-    "target_pct_of_premium": 60,      # target = premium paid plus this %      } "target_sl"
-    "target_points": 10.0,            # target = premium paid plus this many rupees (if target_mode=points)
-    "trail_after_pct": 30,            # once profit reaches this %, switch to trailing-stop mode
-                                       # (used by BOTH exit modes -- peak-profit tracking is shared)
-    "trail_giveback_pct": 15,         # trailing stop = peak-profit% minus this many percentage points
-    "min_breakout_score": 0.5,        # minimum breakout size, in ATR multiples, to qualify as a signal
-    "strict_breakout_filters": True,  # DEFAULT ON: extra false-breakout confirmation layers -- see
-                                       # _detect_breakout() (strong-close filter, consolidation/
-                                       # tightness check, minimum ATR floor, whipsaw/failed-breakout
-                                       # penalty, higher volume bar). Untick to fall back to the
-                                       # looser original breakout+3-confirmation model.
-    "square_off_time": "15:15",       # force-exit any open auto-trade by this time regardless of SL/target
-    "trades_today": 0,
-    "realized_pnl_today": 0.0,
-    "day": None,
-    "last_scan_at": None,
-    "last_scan_candidates": [],
-    "last_error": None,
-    "disarm_reason": None,
-}
-
-CONFIGURABLE_AUTOTRADE_KEYS = (
-    "universe", "scan_all_fo", "candle_interval", "breakout_lookback", "poll_seconds",
-    "max_trades_per_day", "max_concurrent_positions", "capital_per_trade", "max_daily_loss",
-    "exit_mode", "hard_stop_pct",
-    "sl_mode", "sl_pct_of_premium", "sl_points", "target_mode", "target_pct_of_premium", "target_points",
-    "trail_after_pct", "trail_giveback_pct", "min_breakout_score", "strict_breakout_filters",
-    "square_off_time",
-)
-
-# --- "Scan all F&O stocks" mode ---
-# Kite's historical-data endpoint is rate-limited to roughly 3 requests/second. The live F&O stock
-# list is typically ~180-220 names, so scanning all of them in one go takes well over a minute and
-# would blow through that limit if it were retried every `poll_seconds`. Instead of scanning
-# everything every cycle, the loop rotates through the full list a chunk at a time (covering it all
-# every few minutes) and calls to Kite are staggered. The background loop also has a floor on how
-# often it's allowed to run while this mode is on.
-FO_SCAN_CHUNK_SIZE = 40            # symbols scanned per background poll cycle when scan_all_fo is on
-FO_SCAN_MIN_POLL_SECONDS = 45      # floor on poll_seconds while scan_all_fo is on
-HISTORICAL_CALL_STAGGER_SECONDS = 0.35   # ~2.8 req/sec between historical-data calls, under Kite's cap
-
-
-def _effective_scan_universe(state):
-    """Returns the symbols to scan THIS cycle. If scan_all_fo is off, that's just the configured
-    `universe`. If it's on, rotates through the full live F&O stock list (indices always included)
-    in FO_SCAN_CHUNK_SIZE-sized slices, advancing the cursor stored in state each call, so the
-    entire universe gets covered progressively across consecutive cycles rather than all at once."""
-    if not state.get("scan_all_fo"):
-        return state.get("universe") or list(AUTOTRADE_DEFAULTS["universe"])
-    try:
-        full = list(INDEX_SYMBOLS.keys()) + fo_stock_universe()
-    except Exception:
-        return state.get("universe") or list(AUTOTRADE_DEFAULTS["universe"])
-    if not full:
-        return state.get("universe") or list(AUTOTRADE_DEFAULTS["universe"])
-    cursor = state.get("_fo_scan_cursor", 0) % len(full)
-    rotated = full[cursor:] + full[:cursor]
-    chunk = rotated[:FO_SCAN_CHUNK_SIZE]
-    state["_fo_scan_cursor"] = (cursor + FO_SCAN_CHUNK_SIZE) % len(full)
-    return chunk
-
-
-def load_autotrade_state():
-    state = dict(AUTOTRADE_DEFAULTS)
-    if os.path.exists(AUTOTRADE_FILE):
-        try:
-            with open(AUTOTRADE_FILE, "r") as f:
-                state.update(json.load(f))
-        except Exception:
-            pass
-    return state
-
-
-def save_autotrade_state(state):
-    with _autotrade_lock:
-        with open(AUTOTRADE_FILE, "w") as f:
-            json.dump(state, f, indent=2, default=str)
-
-
-def load_autotrade_trades():
-    if not os.path.exists(AUTOTRADE_TRADES_FILE):
-        return []
-    try:
-        with open(AUTOTRADE_TRADES_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-
-def save_autotrade_trades(trades):
-    with _autotrade_lock:
-        with open(AUTOTRADE_TRADES_FILE, "w") as f:
-            json.dump(trades, f, indent=2, default=str)
-
-
-def _autotrade_roll_day_if_needed(state):
-    """Resets the daily trade counter / P&L exactly once per calendar day. Does NOT touch any
-    currently-open trade -- that's handled by the end-of-day square-off check in the monitor loop."""
-    today_str = now_ist().strftime("%Y-%m-%d")
-    if state.get("day") != today_str:
-        state["day"] = today_str
-        state["trades_today"] = 0
-        state["realized_pnl_today"] = 0.0
-        state["disarm_reason"] = None
-    return state
-
-
-def _fetch_recent_intraday(symbol, interval, lookback):
-    token, err = resolve_token_for_symbol(symbol)
-    if err:
-        return None, err
-    to_date = now_ist()
-    from_date = to_date - timedelta(days=7)  # a bit more history so EMA21/RSI14 have enough bars
-    try:
-        candles = kite.historical_data(token, from_date, to_date, interval)
-    except Exception as e:
-        return None, str(e)
-    min_needed = max(lookback + 5, 30)
-    if len(candles) < min_needed:
-        return None, "Not enough intraday candles yet today for a reliable channel"
-    return candles, None
-
-
-def _ema(values, period):
-    """Simple exponential moving average over `values` (oldest-first), seeded with the first value."""
-    if len(values) < period:
-        return None
-    alpha = 2.0 / (period + 1)
-    ema = float(values[0])
-    for v in values[1:]:
-        ema = alpha * float(v) + (1 - alpha) * ema
-    return ema
-
-
-def _rsi(closes, period=14):
-    """Wilder-style RSI (simple-average variant) over the trailing `period` bars."""
-    closes = np.asarray(closes, dtype=float)
-    if len(closes) < period + 1:
-        return None
-    deltas = np.diff(closes[-(period + 1):])
-    gains = np.where(deltas > 0, deltas, 0.0)
-    losses = np.where(deltas < 0, -deltas, 0.0)
-    avg_gain, avg_loss = float(np.mean(gains)), float(np.mean(losses))
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1 + rs))
-
-
-# --- False-breakout guards (active whenever strict=True, i.e. state["strict_breakout_filters"]) ---
-# Intraday breakouts fail (whipsaw back into the range) very often; these thresholds exist
-# specifically to filter out the weakest, least-reliable-looking ones before they ever become a
-# candidate -- on top of the existing trend/momentum/volume confirmation layers.
-MIN_BREAKOUT_ATR_FLOOR = 0.15        # raw move beyond the level, in ATR, below which it's just noise
-CHANNEL_TIGHTNESS_MAX_RATIO = 6.0    # if the pre-breakout range is already wider than this many ATRs,
-                                      # there's no real consolidation to break OUT of -- more likely
-                                      # an already-choppy/trending stock than a clean range break
-STRONG_CLOSE_MIN_RATIO = 0.6         # the breakout candle must close in the outer 40% of its own
-                                      # high-low range, in the breakout direction -- a close near the
-                                      # middle (or worse, back toward the opposite end) is the classic
-                                      # tell of a wick-and-reject false breakout
-VOLUME_CONFIRM_MULTIPLE = 1.5        # raised from a looser 1.2x -- demands real participation behind
-                                      # the move, not just "any" above-average print
-WHIPSAW_LOOKBACK_EXTRA_BARS = 10     # how many extra bars (beyond the channel itself) to scan for
-                                      # recent failed pokes at this same level
-WHIPSAW_PENALTY_PER_FAILURE = 0.25   # composite score is knocked down this fraction per recent
-                                      # failed breakout found at the same level (capped, see below)
-
-
-def _detect_breakout(candles, lookback, strict=True):
-    """Donchian-channel breakout PLUS confirmation layers, combined into one transparent composite
-    score (still fully rules-based -- every input is echoed in `reasoning`, no black box):
-
-      1. Breakout size    -- how far the close is outside the prior `lookback`-candle range, in ATR.
-      2. Trend alignment  -- EMA9 vs EMA21: does the breakout agree with the prevailing short-term
-                             trend, or is it a counter-trend poke that's more likely to fail?
-      3. Momentum         -- RSI(14): is momentum actually pushing the same direction as the break?
-      4. Relative volume  -- today's bar's volume vs the recent average, scaled continuously instead
-                             of a blunt above/below-average flag.
-
-    When `strict` is True (the default -- state["strict_breakout_filters"]), four extra false-
-    breakout guards are applied BEFORE anything is even scored:
-      5. Minimum breakout size floor (MIN_BREAKOUT_ATR_FLOOR) -- rejects marginal, noise-level pokes.
-      6. Consolidation/tightness check (CHANNEL_TIGHTNESS_MAX_RATIO) -- rejects "breakouts" out of a
-         range that was never actually tight to begin with (already trending/choppy).
-      7. Strong-close filter (STRONG_CLOSE_MIN_RATIO) -- rejects a breakout candle that closed back
-         near the middle of its own range (weak, indecisive, wick-heavy -- a classic failed-breakout
-         candle shape).
-      8. Whipsaw/failed-breakout penalty -- discounts the score if this same level has already been
-         poked through and rejected recently today.
-    Volume confirmation is also raised to a stricter multiple (VOLUME_CONFIRM_MULTIPLE) under strict
-    mode. Returns None if there's no qualifying breakout at all.
-    """
-    highs = np.array([c["high"] for c in candles], dtype=float)
-    lows = np.array([c["low"] for c in candles], dtype=float)
-    closes = np.array([c["close"] for c in candles], dtype=float)
-    opens = np.array([c.get("open", c["close"]) for c in candles], dtype=float)
-    volumes = np.array([c.get("volume", 0) or 0 for c in candles], dtype=float)
-
-    window_highs = highs[-(lookback + 1):-1]
-    window_lows = lows[-(lookback + 1):-1]
-    channel_high = float(np.max(window_highs))
-    channel_low = float(np.min(window_lows))
-    last_close = float(closes[-1])
-    last_high = float(highs[-1])
-    last_low = float(lows[-1])
-
-    tr = np.maximum(highs[1:] - lows[1:],
-                     np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
-    atr = float(np.mean(tr[-lookback:])) if len(tr) >= lookback else (float(np.mean(tr)) if len(tr) else 0.0)
-    if atr <= 0:
-        return None
-
-    # Consolidation/tightness guard -- skip breakouts out of a range that was already too wide to be
-    # a real base (this is checked before we even know direction, since it's a property of the range).
-    channel_width = channel_high - channel_low
-    if strict and channel_width / atr > CHANNEL_TIGHTNESS_MAX_RATIO:
-        return None
-
-    prior_vol = volumes[-(lookback + 1):-1]
-    avg_vol = float(np.mean(prior_vol)) if prior_vol.size else 0.0
-    last_vol = float(volumes[-1])
-    rel_volume = round(last_vol / avg_vol, 2) if avg_vol > 0 else None
-    vol_multiple = VOLUME_CONFIRM_MULTIPLE if strict else 1.2
-    vol_confirmed = (avg_vol == 0) or (last_vol >= avg_vol * vol_multiple)
-
-    direction, breakout_level = None, None
-    if last_close > channel_high:
-        direction, breakout_level = "CE", channel_high
-    elif last_close < channel_low:
-        direction, breakout_level = "PE", channel_low
-    if not direction:
-        return None
-
-    breakout_size_score = abs(last_close - breakout_level) / atr
-    if strict and breakout_size_score < MIN_BREAKOUT_ATR_FLOOR:
-        return None  # the move beyond the level is still within noise -- not a real breakout yet
-
-    # Strong-close filter: reject a breakout candle that closed back toward the middle/wrong end of
-    # its own high-low range -- a common false-breakout / stop-hunt wick signature.
-    candle_range = max(last_high - last_low, 1e-9)
-    if direction == "CE":
-        close_position = (last_close - last_low) / candle_range
-    else:
-        close_position = (last_high - last_close) / candle_range
-    strong_close = close_position >= STRONG_CLOSE_MIN_RATIO
-    if strict and not strong_close:
-        return None
-
-    # Whipsaw guard: count recent bars (just before this one) that already poked through this same
-    # level and then closed back inside it -- a level that's failed repeatedly today is less trustworthy.
-    scan_from = -(lookback + 1 + WHIPSAW_LOOKBACK_EXTRA_BARS)
-    recent_highs = highs[scan_from:-1]
-    recent_lows = lows[scan_from:-1]
-    recent_closes = closes[scan_from:-1]
-    failed_breakouts = 0
-    for h, l, c in zip(recent_highs, recent_lows, recent_closes):
-        if direction == "CE" and h > channel_high and c <= channel_high:
-            failed_breakouts += 1
-        elif direction == "PE" and l < channel_low and c >= channel_low:
-            failed_breakouts += 1
-
-    ema_fast = _ema(closes[-min(len(closes), 60):], 9)
-    ema_slow = _ema(closes[-min(len(closes), 60):], 21)
-    trend_aligned = None
-    if ema_fast is not None and ema_slow is not None:
-        trend_aligned = (ema_fast > ema_slow) if direction == "CE" else (ema_fast < ema_slow)
-
-    rsi = _rsi(closes, 14)
-    momentum_aligned = None
-    if rsi is not None:
-        momentum_aligned = (rsi > 55) if direction == "CE" else (rsi < 45)
-
-    # Composite: breakout size is the base signal; trend agreement and momentum each scale it up,
-    # a counter-trend breakout gets heavily discounted (those fail far more often intraday), relative
-    # volume scales it continuously, a strong close gets a small bonus, and any recent failed
-    # breakouts at this same level knock the score down (capped so it never goes negative).
-    composite = breakout_size_score
-    if trend_aligned is True:
-        composite *= 1.25
-    elif trend_aligned is False:
-        composite *= 0.6
-    if momentum_aligned is True:
-        composite *= 1.15
-    if rel_volume is not None:
-        composite *= min(max(rel_volume, 0.5), 2.5) / 1.2
-    if strict and strong_close:
-        composite *= 1.1
-    if strict and failed_breakouts:
-        composite *= max(0.25, 1 - WHIPSAW_PENALTY_PER_FAILURE * failed_breakouts)
-
-    score = round(composite, 2)
-
-    return {
-        "direction": direction, "score": score, "breakout_size_atr": round(breakout_size_score, 2),
-        "breakout_level": round(breakout_level, 2), "last_close": round(last_close, 2),
-        "atr": round(atr, 2), "volume_confirmed": bool(vol_confirmed), "rel_volume": rel_volume,
-        "trend_aligned": trend_aligned, "momentum_aligned": momentum_aligned,
-        "rsi": round(rsi, 1) if rsi is not None else None,
-        "channel_high": round(channel_high, 2), "channel_low": round(channel_low, 2),
-        "strong_close": bool(strong_close), "close_position": round(close_position, 2),
-        "failed_breakouts_recent": failed_breakouts,
-    }
-
-
-def _annotate_candidate(result, symbol, lookback):
-    """Fills in symbol, timestamp, confidence bucket, and the plain-English reasoning string for a
-    raw _detect_breakout() result. Shared by scan_breakouts (full scan) and the single-symbol
-    rescan-one route (checking one candidate's CURRENT score on demand)."""
-    result["symbol"] = symbol
-    result["detected_at"] = now_ist().isoformat()
-    # Plain-English confidence bucket from the composite score -- NOT a probability-of-profit
-    # guarantee, just a rough ranking of "how many confirmations lined up" (used to decide what
-    # Auto mode is allowed to touch -- see the auto-mode qualification in the loop below).
-    result["confidence"] = "High" if result["score"] >= 3 else "Medium" if result["score"] >= 1.5 else "Low"
-    direction_word = "broke above" if result["direction"] == "CE" else "broke below"
-    trend_note = ("EMA9/21 trend agrees" if result["trend_aligned"] is True else
-                   "EMA9/21 trend disagrees (counter-trend, discounted)" if result["trend_aligned"] is False
-                   else "trend unavailable")
-    momentum_note = (f"RSI {result['rsi']} agrees" if result["momentum_aligned"] is True else
-                      f"RSI {result['rsi']} disagrees" if result["momentum_aligned"] is False
-                      else "RSI unavailable")
-    vol_note = (f"relative volume {result['rel_volume']}x average" if result["rel_volume"] is not None
-                else "no average-volume baseline yet")
-    close_note = (f"strong close ({int(result['close_position']*100)}% of candle range)"
-                  if result.get("strong_close") else "weak/indecisive close")
-    whipsaw = result.get("failed_breakouts_recent", 0)
-    whipsaw_note = f"; {whipsaw} failed breakout(s) at this level recently (discounted)" if whipsaw else ""
-    result["reasoning"] = (
-        f"{symbol}: price {direction_word} its {lookback}-candle range ({result['breakout_level']}), "
-        f"now at {result['last_close']} -- {result['breakout_size_atr']}x ATR raw move, {close_note}; "
-        f"{trend_note}; {momentum_note}; {vol_note}{whipsaw_note}. Composite score {result['score']}."
-    )
-    return result
-
-
-def scan_breakouts(universe, interval, lookback, strict=True):
-    """Ranked, fully-transparent list of breakout candidates across the given universe. Every
-    candidate carries a plain-English `reasoning` string -- this IS the "why" shown in the UI, there
-    is no hidden model behind it. Calls are staggered to stay under Kite's historical-data rate
-    limit when scanning long lists (e.g. the full F&O universe). `strict` toggles the extra false-
-    breakout guards in _detect_breakout() -- see state["strict_breakout_filters"]."""
-    candidates, errors = [], []
-    for idx, symbol in enumerate(universe):
-        if idx > 0:
-            time.sleep(HISTORICAL_CALL_STAGGER_SECONDS)
-        candles, err = _fetch_recent_intraday(symbol, interval, lookback)
-        if err:
-            errors.append(f"{symbol}: {err}")
-            continue
-        result = _detect_breakout(candles, lookback, strict=strict)
-        if not result:
-            continue
-        candidates.append(_annotate_candidate(result, symbol, lookback))
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    return candidates, errors
-
-
-def _breakout_still_valid(direction, breakout_level, current_spot):
-    """Has price stayed beyond the breakout level since it was detected, or has it already
-    reverted back inside the range? Returns None if either input is missing (can't tell)."""
-    if breakout_level is None or current_spot is None:
-        return None
-    return (current_spot > breakout_level) if direction == "CE" else (current_spot < breakout_level)
-
-
-def _build_autotrade_order(candidate_symbol, direction, capital_per_trade):
-    return _build_autotrade_order_impl(candidate_symbol, direction, capital_per_trade)
-
-
-def _build_autotrade_order_impl(symbol, direction, capital_per_trade):
-    data, err = get_chain_for_symbol(symbol)
-    if err:
-        return None, err.get("error", str(err))
-    chain, lot_size, spot = data["chain"], data["lot_size"], data["spot"]
-    opts = [o for o in chain if o["instrument_type"] == direction]
-    if not opts:
-        return None, f"No {direction} contracts found for {symbol}"
-    atm = min(opts, key=lambda o: abs(o["strike"] - spot))
-    if not atm.get("ltp") or atm["ltp"] <= 0:
-        return None, "Could not get a valid live price for the ATM option"
-    premium = atm["ltp"]
-    lots = max(1, int(capital_per_trade // (premium * lot_size)))
-    return {
-        "symbol": symbol, "direction": direction, "tradingsymbol": atm["tradingsymbol"],
-        "strike": atm["strike"], "expiry": str(data["expiry"]), "lot_size": lot_size,
-        "lots": lots, "quantity": lots * lot_size, "premium": premium, "spot": spot,
-    }, None
-
-
-def _execute_autotrade_entry(candidate, state):
-    order_info, err = _build_autotrade_order(candidate["symbol"], candidate["direction"], state["capital_per_trade"])
-    if err:
-        return None, err
-
-    execution_mode = state.get("execution_mode", "track")
-    if execution_mode == "live":
-        leg = {"leg": "auto_entry", "tradingsymbol": order_info["tradingsymbol"],
-               "transaction_type": "BUY", "quantity": order_info["quantity"]}
-        # MIS (intraday) product on purpose for auto-trades: it carries the broker's OWN automatic
-        # end-of-day square-off as a second, independent safety net on top of ours.
-        results = place_basket_orders([leg], product="MIS", order_type="MARKET", sequence_for_margin=False)
-        result = results[0] if results else {"status": "failed", "error": "No result returned"}
-        if result["status"] != "placed":
-            return None, result.get("error", "Order failed")
-        order_id = result.get("order_id")
-    else:
-        # TRACK MODE: nothing is sent to the broker. order_info["premium"] already came from a real,
-        # live quote (the same one a live entry would have used to size and price itself), so the
-        # simulated fill below tracks real market movement exactly -- only the order placement itself
-        # is skipped.
-        order_id = f"TRACK-{int(time.time() * 1000)}"
-
-    premium = order_info["premium"]
-    if state.get("sl_mode") == "points":
-        sl_price = round(max(premium - state.get("sl_points", 5.0), 0.05), 2)
-    else:
-        sl_price = round(premium * (1 - state["sl_pct_of_premium"] / 100.0), 2)
-    if state.get("target_mode") == "points":
-        target_price = round(premium + state.get("target_points", 10.0), 2)
-    else:
-        target_price = round(premium * (1 + state["target_pct_of_premium"] / 100.0), 2)
-    hard_stop_price = round(premium * (1 - abs(state.get("hard_stop_pct", 50)) / 100.0), 2)
-    trade = {
-        "id": f"AT{int(time.time() * 1000)}", "symbol": order_info["symbol"], "direction": order_info["direction"],
-        "tradingsymbol": order_info["tradingsymbol"], "strike": order_info["strike"], "expiry": order_info["expiry"],
-        "quantity": order_info["quantity"], "lot_size": order_info["lot_size"], "entry_price": premium,
-        "sl_price": sl_price, "target_price": target_price, "trail_active": False,
-        # Exit-mode settings are snapshotted at ENTRY time -- if you change Settings while this trade
-        # is open, this specific position keeps behaving the way it was opened under, rather than
-        # switching exit logic underneath you mid-trade.
-        "exit_mode": state.get("exit_mode", "auto"), "hard_stop_price": hard_stop_price,
-        "peak_pnl_pct": 0.0, "_last_reversal_check_ts": 0,
-        "execution_mode": execution_mode,
-        "breakout_level": candidate["breakout_level"], "reasoning": candidate["reasoning"],
-        "confidence": candidate.get("confidence"), "detected_at": candidate.get("detected_at"),
-        "order_id": order_id, "status": "open", "opened_at": now_ist().isoformat(),
-        "closed_at": None, "exit_reason": None, "exit_price": None, "realized_pnl": None,
-        "last_ltp": premium, "mode": state["mode"],
-    }
-    return trade, None
-
-
-def _execute_autotrade_exit(trade, reason):
-    # Legacy trades opened before execution_mode existed have no "execution_mode" key -- treat those
-    # as "live" (that was the only behavior that existed then), never silently as "track".
-    execution_mode = trade.get("execution_mode", "live")
-    if execution_mode == "live":
-        leg = {"leg": "auto_exit", "tradingsymbol": trade["tradingsymbol"],
-               "transaction_type": "SELL", "quantity": trade["quantity"]}
-        results = place_basket_orders([leg], product="MIS", order_type="MARKET", sequence_for_margin=False)
-        result = results[0] if results else {"status": "failed", "error": "No result returned"}
-        exit_status = result["status"]
-        trade["status"] = "closed"
-        trade["closed_at"] = now_ist().isoformat()
-        trade["exit_order_status"] = exit_status
-        if exit_status != "placed":
-            trade["exit_reason"] = reason + " -- EXIT ORDER FAILED, check your Zerodha app IMMEDIATELY"
-            trade["exit_price"], trade["realized_pnl"] = None, None
-            return trade
-    else:
-        # TRACK MODE: no order sent -- simulate an immediate fill at the last known live LTP, same
-        # price a real market exit order would have been chasing.
-        trade["status"] = "closed"
-        trade["closed_at"] = now_ist().isoformat()
-        trade["exit_order_status"] = "placed"
-
-    exit_price = trade.get("last_ltp", trade["entry_price"])
-    trade["exit_reason"] = reason
-    trade["exit_price"] = exit_price
-    trade["realized_pnl"] = round((exit_price - trade["entry_price"]) * trade["quantity"], 2)
-    return trade
-
-
-def _reconcile_broker_positions(trades):
-    """If a position was closed manually in Kite (or anywhere outside this tool), the local trade
-    record would otherwise sit "open" forever and this tool would try to square it off again at
-    EOD. Cross-checks every locally-open LIVE trade against the broker's ACTUAL net position for
-    that tradingsymbol and marks it closed here (no order placed, nothing re-sent) if the broker
-    already shows it flat. TRACK-mode trades are skipped entirely -- they never had a real broker
-    position to reconcile against."""
-    open_trades = [t for t in trades if t["status"] == "open" and t.get("execution_mode", "live") == "live"]
-    if not open_trades:
-        return False
-    try:
-        positions = kite.positions().get("net", [])
-    except Exception as e:
-        logger.warning(f"Could not fetch broker positions for reconciliation: {e}")
-        return False
-    net_qty = {}
-    for p in positions:
-        if p.get("exchange") == "NFO":
-            net_qty[p["tradingsymbol"]] = net_qty.get(p["tradingsymbol"], 0) + p.get("quantity", 0)
-    changed = False
-    for trade in open_trades:
-        if net_qty.get(trade["tradingsymbol"], 0) == 0:
-            trade["status"] = "closed"
-            trade["closed_at"] = now_ist().isoformat()
-            trade["exit_reason"] = "Closed outside this tool (e.g. manually in Kite) -- detected by checking your broker positions"
-            trade["exit_price"] = trade.get("last_ltp")
-            trade["realized_pnl"] = None  # actual fill price wasn't ours to see -- can't compute this reliably
-            changed = True
-    return changed
-
-
-AUTO_EXIT_REVERSAL_MIN_INTERVAL_SECONDS = 60  # don't re-fetch underlying candles more than once a
-                                               # minute per open trade -- keeps this well under Kite's
-                                               # historical-data rate limit alongside the scanner
-
-
-def _check_auto_exit_signal(trade, state):
-    """System auto-detected exit signal, used when exit_mode == 'auto'. Re-checks the UNDERLYING's
-    own trend/momentum (not the option premium) using the SAME EMA9/21 + RSI(14) confirmations that
-    were used to take the trade -- the moment they flip against the position, the original breakout
-    thesis is considered invalidated and the position is closed. This is what lets Auto exit mode let
-    a winner run while the trend holds, instead of capping every trade at a fixed target. Rate-
-    limited per trade via AUTO_EXIT_REVERSAL_MIN_INTERVAL_SECONDS. Returns a reason string, or None."""
-    last_check = trade.get("_last_reversal_check_ts", 0)
-    now_ts = time.time()
-    if now_ts - last_check < AUTO_EXIT_REVERSAL_MIN_INTERVAL_SECONDS:
-        return None
-    trade["_last_reversal_check_ts"] = now_ts
-    candles, err = _fetch_recent_intraday(trade["symbol"], state.get("candle_interval", "5minute"),
-                                           state.get("breakout_lookback", 20))
-    if err or not candles:
-        return None
-    closes = np.array([c["close"] for c in candles], dtype=float)
-    ema_fast = _ema(closes[-min(len(closes), 60):], 9)
-    ema_slow = _ema(closes[-min(len(closes), 60):], 21)
-    rsi = _rsi(closes, 14)
-    if ema_fast is None or ema_slow is None or rsi is None:
-        return None
-    if trade["direction"] == "CE":
-        trend_flipped, momentum_flipped = ema_fast < ema_slow, rsi < 45
-    else:
-        trend_flipped, momentum_flipped = ema_fast > ema_slow, rsi > 55
-    if trend_flipped and momentum_flipped:
-        return f"Auto-exit: underlying trend reversed (EMA9/21 flipped, RSI {round(rsi, 1)}) -- breakout thesis invalidated"
-    return None
-
-
-def _monitor_autotrade_positions(state, trades):
-    """Checks every open auto-trade and exits it immediately (real market order) the instant its
-    exit condition trips. Two exit modes, chosen per-trade at entry (trade["exit_mode"]):
-
-      "auto"      -- system auto-detected exit: trend-reversal check (_check_auto_exit_signal),
-                     trailing-stop off the peak profit reached, and a hard safety-loss floor, in
-                     that priority. No fixed target cap -- winners run as long as the trend holds.
-      "target_sl" -- fixed Target % / Stop-loss % (+ optional trailing once trail_after_pct is
-                     reached), exactly as configured in Settings.
-
-    EOD square-off and the hard safety floor apply either way."""
-    changed = _reconcile_broker_positions(trades)
-    for trade in trades:
-        if trade["status"] != "open":
-            continue
-        try:
-            q = kite_quote_bulk([f"NFO:{trade['tradingsymbol']}"]).get(f"NFO:{trade['tradingsymbol']}")
-            ltp = extract_price(q)
-        except Exception as e:
-            state["last_error"] = f"Quote fetch failed for {trade['tradingsymbol']}: {e}"
-            continue
-        if not ltp:
-            continue
-        trade["last_ltp"] = ltp
-        pnl_pct = (ltp / trade["entry_price"] - 1) * 100.0
-        trade["peak_pnl_pct"] = max(trade.get("peak_pnl_pct", 0.0), pnl_pct)
-        now_str = now_ist().strftime("%H:%M")
-        exit_mode = trade.get("exit_mode", "auto")
-        reason = None
-
-        if exit_mode == "auto":
-            hard_stop_price = trade.get("hard_stop_price") or round(
-                trade["entry_price"] * (1 - abs(state.get("hard_stop_pct", 50)) / 100.0), 2)
-            peak = trade["peak_pnl_pct"]
-            if ltp <= hard_stop_price:
-                reason = "Hard safety stop hit"
-            elif peak >= state.get("trail_after_pct", 30) and pnl_pct <= peak - state.get("trail_giveback_pct", 15):
-                reason = "Auto-exit: trailing stop from peak profit"
-                trade["trail_active"] = True
-            if not reason:
-                reason = _check_auto_exit_signal(trade, state)
-            if not reason and now_str >= state.get("square_off_time", "15:15"):
-                reason = "End-of-day square-off"
-        else:  # "target_sl" -- fixed target/stop-loss (+ trailing), as configured
-            if pnl_pct >= state["trail_after_pct"]:
-                new_sl = trade["entry_price"] * (1 + (pnl_pct - state["trail_giveback_pct"]) / 100.0)
-                if new_sl > trade["sl_price"]:
-                    trade["sl_price"] = round(new_sl, 2)
-                    trade["trail_active"] = True
-            if ltp <= trade["sl_price"]:
-                reason = "Trailing stop hit" if trade["trail_active"] else "Stop loss hit"
-            elif ltp >= trade["target_price"] and not trade["trail_active"]:
-                reason = "Target hit"
-            elif now_str >= state.get("square_off_time", "15:15"):
-                reason = "End-of-day square-off"
-
-        if reason:
-            _execute_autotrade_exit(trade, reason)
-            state["realized_pnl_today"] = round(state.get("realized_pnl_today", 0.0) + (trade["realized_pnl"] or 0.0), 2)
-            changed = True
-    return changed
-
-
-def _autotrade_loop():
-    """Background daemon thread -- always running as long as you're logged in. Stop-loss/target/
-    trailing-stop monitoring and auto-close (_monitor_autotrade_positions below) apply to EVERY open
-    position regardless of how it was opened -- a manual "Execute" click from the breakout list gets
-    exactly the same automatic SL/target management as an Auto-mode entry, and it keeps running even
-    if you click "Stop scanning" (that only stops NEW entries; it does not touch a position already
-    open). Only scanning for new signals and self-executing new entries require state['enabled'].
-    Sleeps state['poll_seconds'] between iterations."""
-    while True:
-        sleep_for = AUTOTRADE_DEFAULTS["poll_seconds"]
-        try:
-            if SESSION.get("access_token"):
-                state = load_autotrade_state()
-                state = _autotrade_roll_day_if_needed(state)
-                trades = load_autotrade_trades()
-                changed = _monitor_autotrade_positions(state, trades)
-
-                if state.get("realized_pnl_today", 0.0) <= -abs(state.get("max_daily_loss", 5000)) and state["enabled"]:
-                    state["enabled"] = False
-                    state["disarm_reason"] = (f"Daily loss limit of Rs {state['max_daily_loss']} reached "
-                                               f"(realized P&L today: Rs {state['realized_pnl_today']}). Auto mode disarmed.")
-                    changed = True
-
-                open_count = sum(1 for t in trades if t["status"] == "open")
-                max_positions = max(1, int(state.get("max_concurrent_positions", 1)))
-                now_str = now_ist().strftime("%H:%M")
-                within_hours = AUTOTRADE_MARKET_OPEN <= now_str <= state.get("square_off_time", "15:15")
-
-                if (state["enabled"] and open_count < max_positions and within_hours
-                        and state.get("trades_today", 0) < state.get("max_trades_per_day", 3)):
-                    scan_universe = _effective_scan_universe(state)
-                    candidates, errors = scan_breakouts(scan_universe, state["candle_interval"],
-                                                         state["breakout_lookback"],
-                                                         strict=state.get("strict_breakout_filters", True))
-                    state["last_scan_at"] = now_ist().isoformat()
-                    state["last_scan_candidates"] = candidates[:10]
-                    state["last_scan_universe_size"] = len(scan_universe)
-                    state["last_error"] = "; ".join(errors[:3]) if errors else None
-                    changed = True
-
-                    if state["mode"] == "auto":
-                        # Auto mode gets a materially higher bar than Manual: only "High" confidence
-                        # (composite score >= 3), with trend AND momentum both agreeing AND volume
-                        # confirmed -- not just whichever candidate first clears min_breakout_score.
-                        # Manual mode still shows every candidate that clears min_breakout_score and
-                        # lets the person decide, including lower-confidence ones.
-                        auto_qualified = [c for c in candidates
-                                           if c.get("confidence") == "High"
-                                           and c["score"] >= max(state.get("min_breakout_score", 0.5), 3)
-                                           and c.get("trend_aligned") is True
-                                           and c.get("momentum_aligned") is True
-                                           and c["volume_confirmed"]]
-                        best = None
-                        for c in auto_qualified:
-                            # Re-verify right now, not just at scan time -- price can revert in the
-                            # gap between a scan and actually committing capital.
-                            fresh_order, ferr = _build_autotrade_order(c["symbol"], c["direction"], state["capital_per_trade"])
-                            if ferr:
-                                continue
-                            if _breakout_still_valid(c["direction"], c["breakout_level"], fresh_order["spot"]) is False:
-                                continue
-                            best = c
-                            break
-                        if best:
-                            trade, err = _execute_autotrade_entry(best, state)
-                            if trade:
-                                trades.append(trade)
-                                state["trades_today"] = state.get("trades_today", 0) + 1
-                            else:
-                                state["last_error"] = f"Auto-entry failed for {best['symbol']}: {err}"
-
-                if changed:
-                    save_autotrade_state(state)
-                    save_autotrade_trades(trades)
-                sleep_for = state.get("poll_seconds", 20)
-                if state.get("scan_all_fo"):
-                    sleep_for = max(sleep_for, FO_SCAN_MIN_POLL_SECONDS)
-        except Exception as e:
-            logger.exception("autotrade loop error")
-            try:
-                err_state = load_autotrade_state()
-                err_state["last_error"] = f"Loop error: {e}"
-                save_autotrade_state(err_state)
-            except Exception:
-                pass
-        time.sleep(max(5, sleep_for))
-
-
-@app.route("/api/autotrade/state")
-def autotrade_state_route():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    state = _autotrade_roll_day_if_needed(load_autotrade_state())
-    save_autotrade_state(state)
-    trades = load_autotrade_trades()
-    open_trades = [t for t in trades if t["status"] == "open"]
-    recent_trades = sorted(trades, key=lambda t: t["opened_at"], reverse=True)[:25]
-    return jsonify({"state": state, "open_trades": open_trades, "recent_trades": recent_trades})
-
-
-@app.route("/api/autotrade/config", methods=["POST"])
-def autotrade_config():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    state = load_autotrade_state()
-    for key in CONFIGURABLE_AUTOTRADE_KEYS:
-        if key in body:
-            state[key] = body[key]
-    save_autotrade_state(state)
-    return jsonify({"ok": True, "state": state})
-
-
-@app.route("/api/autotrade/set-execution-mode", methods=["POST"])
-def autotrade_set_execution_mode():
-    """Switches between Track (paper, default) and Live (real orders) execution. Deliberately kept
-    OUT of CONFIGURABLE_AUTOTRADE_KEYS / the bulk /api/autotrade/config route -- a stray "Save
-    settings" click should never be able to silently flip a paper setup into placing real orders.
-    Switching to Live requires the same explicit ack pattern as arming Auto mode. This only affects
-    FUTURE entries -- any already-open trade keeps behaving under the execution_mode it was opened
-    with (see trade["execution_mode"])."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    mode = body.get("mode")
-    if mode not in ("live", "track"):
-        return jsonify({"error": "mode must be 'live' or 'track'"}), 400
-    if mode == "live" and body.get("ack") is not True:
-        return jsonify({"error": "Switching to Live mode requires explicit confirmation (ack: true) "
-                                  "that future auto-trade entries and exits will place REAL orders on "
-                                  "your live Zerodha account."}), 400
-    state = load_autotrade_state()
-    state["execution_mode"] = mode
-    save_autotrade_state(state)
-    return jsonify({"ok": True, "state": state})
-
-
-@app.route("/api/autotrade/arm", methods=["POST"])
-def autotrade_arm():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    mode = body.get("mode", "manual")
-    if mode not in ("manual", "auto"):
-        return jsonify({"error": "mode must be 'manual' or 'auto'"}), 400
-    state = load_autotrade_state()
-    if mode == "auto" and state.get("execution_mode", "track") == "live" and body.get("ack") is not True:
-        return jsonify({"error": "Auto-execute mode in LIVE execution requires explicit confirmation "
-                                  "(ack: true) that this places real orders automatically. (Track mode "
-                                  "does not require this -- it never places real orders.)"}), 400
-    state = _autotrade_roll_day_if_needed(state)
-    state["mode"], state["enabled"], state["disarm_reason"] = mode, True, None
-    save_autotrade_state(state)
-    return jsonify({"ok": True, "state": state})
-
-
-@app.route("/api/autotrade/disarm", methods=["POST"])
-def autotrade_disarm():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    state = load_autotrade_state()
-    state["enabled"] = False
-    state["disarm_reason"] = "Manually stopped by user."
-    save_autotrade_state(state)
-    return jsonify({"ok": True, "state": state})
-
-
-@app.route("/api/autotrade/close-all", methods=["POST"])
-def autotrade_close_all():
-    """Kill switch for POSITIONS (separate from /disarm, which only stops new entries): force-exits
-    any currently open auto-trade at market, right now."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    trades = load_autotrade_trades()
-    state = load_autotrade_state()
-    closed_any = False
-    for trade in trades:
-        if trade["status"] == "open":
-            try:
-                q = kite_quote_bulk([f"NFO:{trade['tradingsymbol']}"]).get(f"NFO:{trade['tradingsymbol']}")
-                trade["last_ltp"] = extract_price(q) or trade["last_ltp"]
-            except Exception:
-                pass
-            _execute_autotrade_exit(trade, "Manual kill-switch close-all")
-            state["realized_pnl_today"] = round(state.get("realized_pnl_today", 0.0) + (trade["realized_pnl"] or 0.0), 2)
-            closed_any = True
-    save_autotrade_trades(trades)
-    save_autotrade_state(state)
-    return jsonify({"ok": True, "closed_any": closed_any, "trades": trades})
-
-
-@app.route("/api/autotrade/rescan-one", methods=["POST"])
-def autotrade_rescan_one():
-    """Re-checks ONE symbol right now and returns its CURRENT breakout score -- for when a
-    candidate has been sitting in the list since an earlier scan and you want to know whether it's
-    still breaking out (and how strongly) before deciding to trade it, without waiting for or
-    triggering a full universe rescan."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    symbol = body.get("symbol")
-    if not symbol:
-        return jsonify({"error": "symbol required"}), 400
-    state = load_autotrade_state()
-    candles, err = _fetch_recent_intraday(symbol, state["candle_interval"], state["breakout_lookback"])
-    if err:
-        return jsonify({"error": err}), 400
-    result = _detect_breakout(candles, state["breakout_lookback"], strict=state.get("strict_breakout_filters", True))
-    if not result:
-        return jsonify({"candidate": None,
-                         "message": f"{symbol} is no longer breaking out -- price has moved back inside its range."})
-    return jsonify({"candidate": _annotate_candidate(result, symbol, state["breakout_lookback"])})
-
-
-@app.route("/api/autotrade/scan")
-def autotrade_scan():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    state = load_autotrade_state()
-    if state.get("scan_all_fo"):
-        # Explicit, on-demand "Scan now" click -- OK to scan the whole live F&O list in one go
-        # (unlike the background loop, this isn't repeated every poll_seconds); calls are still
-        # staggered inside scan_breakouts() to respect Kite's rate limit, so this can take up to
-        # roughly a minute for the full universe.
-        try:
-            universe = list(INDEX_SYMBOLS.keys()) + fo_stock_universe()
-        except Exception as e:
-            return jsonify({"error": f"Could not load full F&O universe: {e}"}), 500
-    else:
-        universe = state["universe"]
-    candidates, errors = scan_breakouts(universe, state["candle_interval"], state["breakout_lookback"],
-                                         strict=state.get("strict_breakout_filters", True))
-    return jsonify({"candidates": candidates, "errors": errors, "universe_size": len(universe)})
-
-
-@app.route("/api/autotrade/preview-signal", methods=["POST"])
-def autotrade_preview_signal():
-    """Read-only: resolves the EXACT contract (ATM strike, expiry, live premium, lot size, quantity)
-    that Execute would buy for this candidate, WITHOUT placing anything. Lets the UI show something
-    concrete -- e.g. "BSE 25AUG 9500 CE, qty 1200 (~4 lots) @ ~₹18.40, ~₹22,080 total" -- before the
-    user commits, instead of them finding out what was bought only after the fact."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    symbol, direction = body.get("symbol"), body.get("direction")
-    if not symbol or direction not in ("CE", "PE"):
-        return jsonify({"error": "symbol and direction (CE/PE) required"}), 400
-    state = load_autotrade_state()
-    order_info, err = _build_autotrade_order(symbol, direction, body.get("capital_per_trade", state["capital_per_trade"]))
-    if err:
-        return jsonify({"error": err}), 400
-    order_info["still_valid"] = _breakout_still_valid(direction, body.get("breakout_level"), order_info["spot"])
-    return jsonify({"order_info": order_info})
-
-
-@app.route("/api/autotrade/execute-signal", methods=["POST"])
-def autotrade_execute_signal():
-    """Manual-mode execution: places the ONE entry order for a candidate the user reviewed and
-    explicitly clicked 'Execute' on."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    if not body.get("confirmed"):
-        return jsonify({"error": "Confirmation flag not set -- nothing was placed."}), 400
-    candidate = body.get("candidate")
-    if not candidate or not candidate.get("symbol") or not candidate.get("direction"):
-        return jsonify({"error": "candidate with symbol/direction required"}), 400
-    state = _autotrade_roll_day_if_needed(load_autotrade_state())
-    trades = load_autotrade_trades()
-    open_count = sum(1 for t in trades if t["status"] == "open")
-    max_positions = max(1, int(state.get("max_concurrent_positions", 1)))
-    if open_count >= max_positions:
-        return jsonify({"error": f"Max concurrent positions ({max_positions}) already open. Raise "
-                                  f"'Max concurrent positions' in Settings, or close one first."}), 400
-    trade, err = _execute_autotrade_entry(candidate, state)
-    if err:
-        return jsonify({"error": err}), 400
-    trades.append(trade)
-    state["trades_today"] = state.get("trades_today", 0) + 1
-    save_autotrade_trades(trades)
-    save_autotrade_state(state)
-    return jsonify({"ok": True, "trade": trade})
-
-
-# =============================================================================
-# Dynamic Delta-Neutral Adjustment Engine — ADD-ON to the existing Iron Condor / Hedged Short
-# Strangle strategy above. Never touches how a position is opened (build_strategy, execute_confirm
-# are untouched); it only watches already-open positions you explicitly attach to it and proposes/
-# executes adjustments once net delta drifts too far. See greeks.py / risk_management.py /
-# adjustment_engine.py / execution.py / delta_neutral_logging.py / backtesting.py /
-# delta_neutral_state.py for the individual modules this wires together.
-# =============================================================================
-DELTA_POSITIONS_FILE = os.path.join(os.path.dirname(__file__), "delta_engine_positions.json")
-DELTA_LOG_FILE = os.path.join(os.path.dirname(__file__), "delta_engine_log.jsonl")
-_delta_positions_lock = threading.Lock()
-
-_delta_greeks_engine = PortfolioGreeksEngine(risk_free_rate=RISK_FREE_RATE)
-_delta_logger = AdjustmentLogger(DELTA_LOG_FILE)
-
-# Tick-level spot cache: refreshed by a dedicated 1-second-cadence thread per configured symbol so
-# the "monitor spot every tick" requirement doesn't depend on the heavier option-chain refresh rate.
-# A true broker websocket (KiteTicker) tick feed is a straightforward future upgrade of just this
-# cache's refresh mechanism -- everything downstream reads from this dict, not from the network call
-# directly, so swapping REST polling for a websocket callback later doesn't touch any other module.
-_delta_spot_cache = {}
-_delta_spot_cache_lock = threading.Lock()
-
-SPOT_INDEX_TRADINGSYMBOL = {
-    "NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK",
-    "FINNIFTY": "NSE:NIFTY FIN SERVICE", "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
-}
-
-
-def load_delta_positions():
-    if not os.path.exists(DELTA_POSITIONS_FILE):
-        return []
-    try:
-        with open(DELTA_POSITIONS_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-
-def save_delta_positions(positions):
-    with _delta_positions_lock:
-        with open(DELTA_POSITIONS_FILE, "w") as f:
-            json.dump(positions, f, indent=2, default=str)
-
-
-def _delta_spot_poll_loop():
-    """Refreshes _delta_spot_cache at dn_state's spot_poll_seconds cadence (default 1s) for every
-    symbol currently being monitored -- this is the tick-level spot watch. Cheap: one LTP call per
-    symbol, not the full option chain."""
-    while True:
-        try:
-            state = dn_load_state()
-            if state.get("enabled"):
-                monitored_symbols = {p["symbol"] for p in load_delta_positions() if p["status"] == "monitoring"}
-                for sym in monitored_symbols:
-                    inst = SPOT_INDEX_TRADINGSYMBOL.get(sym)
-                    if not inst:
-                        continue
-                    try:
-                        ltp_data = kite.ltp([inst])
-                        price = ltp_data.get(inst, {}).get("last_price")
-                        if price:
-                            with _delta_spot_cache_lock:
-                                _delta_spot_cache[sym] = price
-                    except Exception:
-                        pass
-            time.sleep(max(state.get("spot_poll_seconds", 1), 1))
-        except Exception:
-            time.sleep(2)
-
-
-def _make_delta_candidate_fetcher(position, chain_data, state):
-    """Returns a candidate_fetcher closure bound to one already-fetched live option chain snapshot
-    (avoids re-hitting the API once per candidate). Builds real, tradable roll/hedge candidates —
-    see adjustment_engine.py's module docstring for the up/down scenario -> threatened-side mapping."""
-    calls = sorted([o for o in chain_data["chain"] if o["instrument_type"] == "CE"], key=lambda x: x["strike"])
-    puts = sorted([o for o in chain_data["chain"] if o["instrument_type"] == "PE"], key=lambda x: x["strike"])
-    legs = position["legs"]
-    qty = position["quantity"]
-    low, high = state.get("delta_range_low", 0.15), state.get("delta_range_high", 0.20)
-    mid_target = (low + high) / 2
-    hedge_pct = state.get("hedge_distance_pct", 2.5) / 100.0
-    min_premium = state.get("min_premium_for_adjustment", 8.0)
-
-    def find_by_delta(options, target, sign):
-        return min(options, key=lambda o: abs(o["delta"] - sign * target)) if options else None
-
-    def leg_dict(o, role):
-        return {"tradingsymbol": o["tradingsymbol"], "strike": o["strike"], "role": role,
-                "quantity": -qty if role.startswith("sell") else qty, "ltp": o["ltp"], "delta": o["delta"]}
-
-    def close_leg(role):
-        return {"tradingsymbol": legs[role]["tradingsymbol"], "role": role, "quantity": -qty}
-
-    def fetcher(scenario, pos, portfolio_greeks):
-        candidates = []
-        if scenario == "up":
-            # Priority 1: roll the short PUT upward -- collects more premium AND adds offsetting
-            # positive delta (see adjustment_engine.py docstring for why this offsets negative net delta).
-            cur_put_k = legs["sell_put"]["strike"]
-            pool = [o for o in puts if o["strike"] > cur_put_k]
-            new_put = find_by_delta(pool, mid_target, -1)
-            if new_put and new_put["ltp"] >= min_premium:
-                delta_gain = abs(new_put["delta"] - legs["sell_put"]["delta"]) * qty
-                candidates.append(dict(
-                    action="roll_put_up",
-                    description=f"Roll short put {cur_put_k} -> {new_put['strike']} (more premium, offsetting positive delta)",
-                    legs_to_close=[close_leg("sell_put")], legs_to_open=[leg_dict(new_put, "sell_put")],
-                    expected_delta_after=portfolio_greeks.net_delta + delta_gain,
-                    additional_premium=(new_put["ltp"] - legs["sell_put"]["ltp"]) * qty,
-                    margin_impact=0.0, risk_reduction_score=min(1.0, delta_gain / max(state.get("delta_threshold", 10.0), 1)),
-                    probability_of_profit=0.60, expected_drawdown=abs(new_put["strike"] - cur_put_k) * qty * 0.3,
-                ))
-            # Priority 2: roll the short CALL further OTM -- directly cuts the threatened leg's delta.
-            cur_call_k = legs["sell_call"]["strike"]
-            pool = [o for o in calls if o["strike"] > cur_call_k]
-            new_call = find_by_delta(pool, mid_target, +1)
-            if new_call:
-                delta_gain = abs(new_call["delta"] - legs["sell_call"]["delta"]) * qty
-                candidates.append(dict(
-                    action="roll_call_further_otm",
-                    description=f"Roll short call {cur_call_k} -> {new_call['strike']} further OTM (cuts delta exposure directly)",
-                    legs_to_close=[close_leg("sell_call")], legs_to_open=[leg_dict(new_call, "sell_call")],
-                    expected_delta_after=portfolio_greeks.net_delta + delta_gain,
-                    additional_premium=(new_call["ltp"] - legs["sell_call"]["ltp"]) * qty,
-                    margin_impact=0.0, risk_reduction_score=min(1.0, delta_gain / max(state.get("delta_threshold", 10.0), 1)),
-                    probability_of_profit=0.55, expected_drawdown=abs(new_call["strike"] - cur_call_k) * qty * 0.3,
-                ))
-        else:  # "down" -- mirror image, put side under stress
-            cur_call_k = legs["sell_call"]["strike"]
-            pool = [o for o in calls if o["strike"] < cur_call_k]
-            new_call = find_by_delta(pool, mid_target, +1)
-            if new_call and new_call["ltp"] >= min_premium:
-                delta_gain = abs(new_call["delta"] - legs["sell_call"]["delta"]) * qty
-                candidates.append(dict(
-                    action="roll_call_down",
-                    description=f"Roll short call {cur_call_k} -> {new_call['strike']} (more premium, offsetting negative delta)",
-                    legs_to_close=[close_leg("sell_call")], legs_to_open=[leg_dict(new_call, "sell_call")],
-                    expected_delta_after=portfolio_greeks.net_delta - delta_gain,
-                    additional_premium=(new_call["ltp"] - legs["sell_call"]["ltp"]) * qty,
-                    margin_impact=0.0, risk_reduction_score=min(1.0, delta_gain / max(state.get("delta_threshold", 10.0), 1)),
-                    probability_of_profit=0.60, expected_drawdown=abs(new_call["strike"] - cur_call_k) * qty * 0.3,
-                ))
-            cur_put_k = legs["sell_put"]["strike"]
-            pool = [o for o in puts if o["strike"] < cur_put_k]
-            new_put = find_by_delta(pool, mid_target, -1)
-            if new_put:
-                delta_gain = abs(new_put["delta"] - legs["sell_put"]["delta"]) * qty
-                candidates.append(dict(
-                    action="roll_put_further_otm",
-                    description=f"Roll short put {cur_put_k} -> {new_put['strike']} further OTM (cuts delta exposure directly)",
-                    legs_to_close=[close_leg("sell_put")], legs_to_open=[leg_dict(new_put, "sell_put")],
-                    expected_delta_after=portfolio_greeks.net_delta - delta_gain,
-                    additional_premium=(new_put["ltp"] - legs["sell_put"]["ltp"]) * qty,
-                    margin_impact=0.0, risk_reduction_score=min(1.0, delta_gain / max(state.get("delta_threshold", 10.0), 1)),
-                    probability_of_profit=0.55, expected_drawdown=abs(new_put["strike"] - cur_put_k) * qty * 0.3,
-                ))
-
-        # Convert to Iron Fly: only meaningful for an existing iron_condor (hedges already in place) --
-        # rolls BOTH short strikes to ATM for extra premium in exchange for a much tighter profit zone.
-        if position.get("strategy_type") == "iron_condor" and calls and puts:
-            atm_call = min(calls, key=lambda o: abs(o["strike"] - portfolio_greeks.spot))
-            atm_put = min(puts, key=lambda o: abs(o["strike"] - portfolio_greeks.spot))
-            added_premium = ((atm_call["ltp"] - legs["sell_call"]["ltp"]) + (atm_put["ltp"] - legs["sell_put"]["ltp"])) * qty
-            candidates.append(dict(
-                action="convert_iron_fly",
-                description=f"Convert to Iron Fly: roll both shorts to ATM ({atm_call['strike']}/{atm_put['strike']}) for extra premium, tighter body",
-                legs_to_close=[close_leg("sell_call"), close_leg("sell_put")],
-                legs_to_open=[leg_dict(atm_call, "sell_call"), leg_dict(atm_put, "sell_put")],
-                expected_delta_after=(atm_call["delta"] + atm_put["delta"]) * qty,
-                additional_premium=added_premium, margin_impact=2000.0, risk_reduction_score=0.9,
-                probability_of_profit=0.45,   # tighter body -> lower POP even though delta-neutral
-                expected_drawdown=abs(portfolio_greeks.spot - legs["sell_call"]["strike"]) * qty * 0.2,
-            ))
-
-        # Add-hedge fallback: only meaningful for a naked strangle (an iron condor already carries
-        # hedges) -- buys a protective option on the threatened side to hard-cap runaway delta/risk.
-        if position.get("strategy_type") == "naked_strangle":
-            if scenario == "up" and calls:
-                target_k = legs["sell_call"]["strike"] * (1 + hedge_pct)
-                hedge_opt = min(calls, key=lambda o: abs(o["strike"] - target_k))
-                candidates.append(dict(
-                    action="add_hedge",
-                    description=f"Buy protective call {hedge_opt['strike']} ({hedge_pct*100:.1f}% OTM of short call) to cap runaway risk",
-                    legs_to_close=[], legs_to_open=[leg_dict(hedge_opt, "buy_call")],
-                    expected_delta_after=portfolio_greeks.net_delta + abs(hedge_opt["delta"]) * qty,
-                    additional_premium=-hedge_opt["ltp"] * qty, margin_impact=-5000.0,
-                    risk_reduction_score=0.8, probability_of_profit=0.5, expected_drawdown=hedge_opt["ltp"] * qty,
-                ))
-            elif scenario == "down" and puts:
-                target_k = legs["sell_put"]["strike"] * (1 - hedge_pct)
-                hedge_opt = min(puts, key=lambda o: abs(o["strike"] - target_k))
-                candidates.append(dict(
-                    action="add_hedge",
-                    description=f"Buy protective put {hedge_opt['strike']} ({hedge_pct*100:.1f}% OTM of short put) to cap runaway risk",
-                    legs_to_close=[], legs_to_open=[leg_dict(hedge_opt, "buy_put")],
-                    expected_delta_after=portfolio_greeks.net_delta - abs(hedge_opt["delta"]) * qty,
-                    additional_premium=-hedge_opt["ltp"] * qty, margin_impact=-5000.0,
-                    risk_reduction_score=0.8, probability_of_profit=0.5, expected_drawdown=hedge_opt["ltp"] * qty,
-                ))
-        return candidates
-    return fetcher
-
-
-def _delta_position_portfolio_greeks(position, chain_data, spot):
-    """Builds a PortfolioGreeks snapshot for one monitored position from a fresh chain fetch."""
-    chain_by_symbol = {o["tradingsymbol"]: o for o in chain_data["chain"]}
-    T = chain_data["T"]
-    qty = position["quantity"]
-    leg_inputs = []
-    for role, leg in position["legs"].items():
-        live = chain_by_symbol.get(leg["tradingsymbol"])
-        ltp = live["ltp"] if live else leg["ltp"]
-        iv = (live["iv"] / 100.0) if live else 0.15
-        opt_type = "CE" if "call" in role else "PE"
-        leg_inputs.append({
-            "opt_type": opt_type, "strike": leg["strike"], "spot": spot, "T": T, "iv": iv, "ltp": ltp,
-            "quantity": -qty if role.startswith("sell") else qty, "role": role,
-            "tradingsymbol": leg["tradingsymbol"], "entry_premium": leg["ltp"],
-        })
-    return _delta_greeks_engine.portfolio_greeks(position["symbol"], spot, leg_inputs)
-
-
-def _execute_delta_adjustment(position, candidate, trigger_reason, all_candidate_actions=None):
-    """Executes ONE specific adjustment candidate against one position -- shared by the manual
-    /api/delta-engine/suggestions/<id>/execute route (the only normal path now) and reusable for any
-    future automation. Risk gates are re-checked fresh here regardless of what was true when the
-    suggestion was first generated, so a stale approval can never bypass current limits."""
-    state = dn_load_state()
-    symbol = position["symbol"]
-    adj_by_symbol = state.get("adjustments_today_by_symbol", {})
-    mtm_by_symbol = state.get("daily_mtm_by_symbol", {})
-    paused_symbols = set(state.get("paused_symbols_today", []))
-    if symbol in paused_symbols:
-        return False, f"{symbol} is paused for today (its own daily-loss limit tripped) -- adjustment blocked"
-
-    risk_mgr = RiskManager(RiskLimits(
-        max_adjustments_per_day=state.get("max_adjustments_per_day", 6),
-        max_loss_per_position=state.get("max_loss_per_position", 15000.0),
-        max_daily_mtm_loss=state.get("max_daily_mtm_loss", 25000.0),
-        min_premium_for_adjustment=state.get("min_premium_for_adjustment", 8.0),
-        profit_targets_pct=tuple(state.get("profit_targets_pct", [25, 50, 70, 90])),
-        stop_loss_pct=state.get("stop_loss_pct", 200.0),
-    ))
-    position_mtm = (position.get("last_greeks") or {}).get("mtm", 0.0)
-    proposed_premium = abs(candidate.legs_to_open[0]["ltp"]) if candidate.legs_to_open else None
-    allowed, gate_reason = risk_mgr.can_adjust(
-        adjustments_today=adj_by_symbol.get(symbol, 0), position_mtm=position_mtm,
-        daily_mtm=mtm_by_symbol.get(symbol, 0.0), proposed_leg_premium=proposed_premium)
-    if not allowed:
-        return False, gate_reason
-
-    executor = AdjustmentExecutor(place_basket_orders, product="NRML")
-    result = executor.execute(candidate, execution_mode=state.get("execution_mode", "track"))
-    if not result.ok:
-        return False, f"Execution failed: {result.error}"
-
-    for opened in candidate.legs_to_open:
-        position["legs"][opened["role"]] = {
-            "strike": opened["strike"], "ltp": opened["ltp"], "tradingsymbol": opened["tradingsymbol"],
-        }
-    position["pending_suggestion"] = None
-    adj_by_symbol[symbol] = adj_by_symbol.get(symbol, 0) + 1
-    state["adjustments_today_by_symbol"] = adj_by_symbol
-    dn_save_state(state)
-    _delta_logger.log_adjustment(
-        ts=now_ist().isoformat(), symbol=symbol, spot=position.get("last_greeks", {}).get("spot"),
-        delta_before=position.get("last_greeks", {}).get("net_delta", 0.0),
-        delta_after=candidate.expected_delta_after, action=candidate.action,
-        premium_collected=candidate.additional_premium, reason=trigger_reason,
-        execution_mode=state.get("execution_mode", "track"),
-        candidates_considered=all_candidate_actions or [candidate.action])
-    return True, "Executed"
-
-
-def _close_delta_position_legs(position, roles, reason):
-    """Closes some or all legs of a monitored position on demand -- independent of the automatic
-    profit-target/stop-loss logic, so you can act on your own judgment any time, in Track or Live."""
-    state = dn_load_state()
-    legs = position["legs"]
-    roles = roles or list(legs.keys())
-    close_legs = []
-    for role in roles:
-        if role not in legs:
-            continue
-        close_legs.append({"tradingsymbol": legs[role]["tradingsymbol"], "role": role,
-                            "quantity": -position["quantity"] if role.startswith("sell") else position["quantity"]})
-    if not close_legs:
-        return False, "No matching open legs found to close"
-    candidate = AdjustmentCandidate(action="manual_close", description=reason, legs_to_close=close_legs)
-    executor = AdjustmentExecutor(place_basket_orders, product="NRML")
-    result = executor.execute(candidate, execution_mode=state.get("execution_mode", "track"))
-    if not result.ok:
-        return False, f"Close failed: {result.error}"
-    for role in roles:
-        legs.pop(role, None)
-    pnl_closed = (position.get("last_greeks") or {}).get("mtm", 0.0) if not legs else None
-    if not legs:
-        position["status"] = "closed"
-        position["closed_at"] = now_ist().isoformat()
-        position["exit_reason"] = reason
-        position["realized_pnl"] = pnl_closed
-        position["pending_suggestion"] = None
-    _delta_logger.log_adjustment(
-        ts=now_ist().isoformat(), symbol=position["symbol"], spot=(position.get("last_greeks") or {}).get("spot"),
-        delta_before=(position.get("last_greeks") or {}).get("net_delta", 0.0), delta_after=0.0,
-        action="manual_close", premium_collected=0.0, reason=reason,
-        execution_mode=state.get("execution_mode", "track"), candidates_considered=[])
-    return True, "Closed"
-
-
-def _delta_engine_loop():
-    """Background monitor loop for the Delta Neutral Adjustment Engine -- disarmed by default, only
-    watches/acts on positions you've explicitly attached (via the Condor/Strangle builder's Position
-    ID, or directly from your live broker positions). Recomputes portfolio Greeks and evaluates the
-    adjustment threshold at greeks_poll_seconds cadence (default 5s); the underlying spot itself is
-    refreshed far more often by _delta_spot_poll_loop (default 1s).
-
-    IMPORTANT: this loop only ever ANALYZES and SUGGESTS. When a delta breach is detected it scores
-    every candidate adjustment (probability of profit, risk reduction, expected extra premium, etc.)
-    and stores them as position["pending_suggestion"] -- it does NOT execute anything automatically.
-    You review the suggestion in the dashboard and choose whether/which one to execute, in Track or
-    Live, via /api/delta-engine/suggestions/<id>/execute. The one thing that DOES still happen
-    automatically is closing a position on a configured profit target or stop loss being hit -- that
-    is risk protection, not a trading decision, so it isn't gated behind manual approval.
-
-    Every symbol is analyzed and decided on INDEPENDENTLY: its own Greeks, its own delta-threshold
-    check, its own adjustments-per-day / daily-loss budget. A breach on one symbol only pauses NEW
-    adjustments for that specific symbol for the rest of the day; profit-target/stop-loss exits keep
-    working per-position regardless of pause state."""
-    while True:
-        try:
-            state = dn_load_state()
-            today_str = now_ist().strftime("%Y-%m-%d")
-            if state.get("day") != today_str:
-                state["day"] = today_str
-                state["adjustments_today_by_symbol"] = {}
-                state["daily_mtm_by_symbol"] = {}
-                state["paused_symbols_today"] = []
-                dn_save_state(state)
-
-            if not state.get("enabled"):
-                time.sleep(2)
-                continue
-
-            adj_by_symbol = state.get("adjustments_today_by_symbol", {})
-            mtm_by_symbol = state.get("daily_mtm_by_symbol", {})
-            paused_symbols = set(state.get("paused_symbols_today", []))
-
-            risk_mgr = RiskManager(RiskLimits(
-                max_adjustments_per_day=state.get("max_adjustments_per_day", 6),
-                max_loss_per_position=state.get("max_loss_per_position", 15000.0),
-                max_daily_mtm_loss=state.get("max_daily_mtm_loss", 25000.0),
-                min_premium_for_adjustment=state.get("min_premium_for_adjustment", 8.0),
-                profit_targets_pct=tuple(state.get("profit_targets_pct", [25, 50, 70, 90])),
-                stop_loss_pct=state.get("stop_loss_pct", 200.0),
-            ))
-            engine = AdjustmentEngine(delta_threshold=state.get("delta_threshold", 10.0),
-                                       gamma_threshold=state.get("gamma_threshold"))
-            executor = AdjustmentExecutor(place_basket_orders, product="NRML")
-
-            positions = load_delta_positions()
-            for position in positions:
-                if position["status"] != "monitoring":
-                    continue
-                symbol = position["symbol"]
-                try:
-                    chain_data, err = get_chain_for_symbol(symbol)
-                    if err:
-                        state["last_error"] = f"{symbol}: {err.get('error')}"
-                        continue
-                    with _delta_spot_cache_lock:
-                        spot = _delta_spot_cache.get(symbol, chain_data["spot"])
-                    pg = _delta_position_portfolio_greeks(position, chain_data, spot)
-                    position["last_greeks"] = pg.as_dict()
-                    # Accumulate THIS symbol's daily MTM only -- separate bucket per symbol, never
-                    # pooled with any other symbol's positions.
-                    mtm_by_symbol[symbol] = round(mtm_by_symbol.get(symbol, 0.0) + pg.mtm, 2)
-
-                    # Profit target / stop loss -- the ONE thing that stays automatic (risk
-                    # protection, not a discretionary trading decision). Exit all legs immediately.
-                    hit_target = risk_mgr.profit_target_hit(position.get("entry_credit", 0.0), pg.mtm)
-                    hit_sl = risk_mgr.stop_loss_hit(position.get("entry_credit", 0.0), pg.mtm)
-                    if hit_target or hit_sl:
-                        reason = f"Profit target {hit_target}% reached" if hit_target else f"Stop loss ({state.get('stop_loss_pct')}%) hit"
-                        close_legs = [{"tradingsymbol": leg["tradingsymbol"], "role": role,
-                                       "quantity": -position["quantity"] if role.startswith("sell") else position["quantity"]}
-                                      for role, leg in position["legs"].items()]
-                        close_candidate = AdjustmentCandidate(action="close_all", description=reason,
-                                                               legs_to_close=close_legs)
-                        executor.execute(close_candidate, execution_mode=state.get("execution_mode", "track"))
-                        position["status"] = "closed"
-                        position["closed_at"] = now_ist().isoformat()
-                        position["exit_reason"] = reason
-                        position["realized_pnl"] = pg.mtm
-                        position["pending_suggestion"] = None
-                        _delta_logger.log_adjustment(ts=now_ist().isoformat(), symbol=symbol,
-                            spot=spot, delta_before=pg.net_delta, delta_after=0.0, action="close_all",
-                            premium_collected=pg.mtm, reason=reason, execution_mode=state.get("execution_mode", "track"))
-                        continue
-
-                    # This symbol's OWN daily-loss budget -- checked independently of every other symbol.
-                    if risk_mgr.breached_daily_loss(mtm_by_symbol[symbol]) and symbol not in paused_symbols:
-                        paused_symbols.add(symbol)
-                        state["last_error"] = f"{symbol}: daily MTM loss (Rs {mtm_by_symbol[symbol]:.0f}) breached its own limit -- new adjustments paused for {symbol} only for the rest of today"
-
-                    recommended, all_candidates, trigger_reason = engine.recommend(
-                        position, pg, _make_delta_candidate_fetcher(position, chain_data, state))
-                    state["last_recommendation"] = {
-                        "symbol": symbol, "trigger_reason": trigger_reason,
-                        "recommended": vars(recommended) if recommended else None,
-                        "at": now_ist().isoformat(),
-                    }
-                    if recommended is None or recommended.action == "no_action":
-                        position["pending_suggestion"] = None
-                        continue
-
-                    # Annotate each candidate with whether it's currently executable, so the
-                    # dashboard can show "blocked: <reason>" without you having to click Execute
-                    # to find out -- but the ACTUAL gate is always re-checked fresh at execute time.
-                    annotated = []
-                    for c in all_candidates:
-                        proposed_premium = abs(c.legs_to_open[0]["ltp"]) if c.legs_to_open else None
-                        ok, reason_txt = risk_mgr.can_adjust(
-                            adjustments_today=adj_by_symbol.get(symbol, 0), position_mtm=pg.mtm,
-                            daily_mtm=mtm_by_symbol[symbol], proposed_leg_premium=proposed_premium)
-                        if symbol in paused_symbols:
-                            ok, reason_txt = False, f"{symbol} paused today (daily-loss limit)"
-                        cd = vars(c)
-                        cd["executable"] = ok
-                        cd["block_reason"] = None if ok else reason_txt
-                        annotated.append(cd)
-
-                    position["pending_suggestion"] = {
-                        "trigger_reason": trigger_reason, "detected_at": now_ist().isoformat(),
-                        "candidates": annotated,
-                    }
-                except Exception as e:
-                    state["last_error"] = f"{symbol}: {e}"
-
-            state["adjustments_today_by_symbol"] = adj_by_symbol
-            state["daily_mtm_by_symbol"] = mtm_by_symbol
-            state["paused_symbols_today"] = sorted(paused_symbols)
-            state["last_scan_at"] = now_ist().isoformat()
-
-            save_delta_positions(positions)
-            dn_save_state(state)
-        except Exception as e:
-            try:
-                state = dn_load_state()
-                state["last_error"] = str(e)
-                dn_save_state(state)
-            except Exception:
-                pass
-        time.sleep(max(dn_load_state().get("greeks_poll_seconds", 5), 2))
-
-
-# --- Delta Neutral Engine API routes ---
-@app.route("/api/delta-engine/state")
-def delta_engine_state():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    return jsonify(dn_load_state())
-
-
-@app.route("/api/delta-engine/config", methods=["POST"])
-def delta_engine_config():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    state = dn_load_state()
-    for key in DELTA_ENGINE_CONFIGURABLE_KEYS:
-        if key in body:
-            state[key] = body[key]
-    dn_save_state(state)
-    return jsonify({"ok": True, "state": state})
-
-
-@app.route("/api/delta-engine/set-execution-mode", methods=["POST"])
-def delta_engine_set_execution_mode():
-    """Same ack-gated pattern as /api/autotrade/set-execution-mode -- kept OUT of the bulk config
-    route so a stray Settings save can never silently switch this to placing real orders."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    mode = body.get("mode")
-    if mode not in ("live", "track"):
-        return jsonify({"error": "mode must be 'live' or 'track'"}), 400
-    if mode == "live" and body.get("ack") is not True:
-        return jsonify({"error": "Switching to Live mode requires explicit confirmation (ack: true) "
-                                  "that future adjustments will place REAL orders on your live Zerodha account."}), 400
-    state = dn_load_state()
-    state["execution_mode"] = mode
-    dn_save_state(state)
-    return jsonify({"ok": True, "state": state})
-
-
-@app.route("/api/delta-engine/arm", methods=["POST"])
-def delta_engine_arm():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    state = dn_load_state()
-    state["enabled"], state["disarm_reason"] = True, None
-    dn_save_state(state)
-    return jsonify({"ok": True, "state": state})
-
-
-@app.route("/api/delta-engine/disarm", methods=["POST"])
-def delta_engine_disarm():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    state = dn_load_state()
-    state["enabled"] = False
-    dn_save_state(state)
-    return jsonify({"ok": True, "state": state})
-
-
-@app.route("/api/delta-engine/track/<pos_id>", methods=["POST"])
-def delta_engine_track(pos_id):
-    """Attaches an already-built Iron Condor / Strangle position (from positions.json, built via the
-    existing /api/strategy endpoint) to the Delta Neutral Engine for monitoring. Does not place any
-    order itself -- the position must already be a real (or, in execution_mode="track", intended)
-    open position."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    position = find_position(pos_id)
-    if not position:
-        return jsonify({"error": "Position not found"}), 404
-    if position.get("strategy_type") not in ("iron_condor", "naked_strangle"):
-        return jsonify({"error": "Only Iron Condor / Naked Strangle positions are supported by the Delta Neutral Engine"}), 400
-    legs = position["legs"]
-    credit_per_share = sum(v["ltp"] for k, v in legs.items() if k.startswith("sell")) \
-        - sum(v["ltp"] for k, v in legs.items() if k.startswith("buy"))
-    tracked = {
-        "id": pos_id, "symbol": position["symbol"], "strategy_type": position["strategy_type"],
-        "legs": {k: {"strike": v["strike"], "ltp": v["ltp"], "tradingsymbol": v["tradingsymbol"]} for k, v in legs.items()},
-        "quantity": position.get("quantity", position["lot_size"]), "lot_size": position["lot_size"],
-        "entry_credit": round(credit_per_share * position.get("quantity", position["lot_size"]), 2),
-        "status": "monitoring", "added_at": now_ist().isoformat(), "closed_at": None,
-        "exit_reason": None, "realized_pnl": None, "last_greeks": None, "pending_suggestion": None,
-    }
-    positions = load_delta_positions()
-    positions = [p for p in positions if p["id"] != pos_id]
-    positions.append(tracked)
-    save_delta_positions(positions)
-    return jsonify({"ok": True, "tracked": tracked})
-
-
-def _classify_broker_legs_for_symbol(symbol):
-    """Finds every open NFO option leg under a given underlying (e.g. "SBIN") straight from your
-    live Zerodha positions (the same data as the "Open F&O positions" table), and classifies each
-    one as sell_call / buy_call / sell_put / buy_put using Kite's own authoritative instrument dump
-    (strike/instrument_type per tradingsymbol) rather than guessing from the tradingsymbol text.
-    This is what lets you attach a position you opened directly in Zerodha (or anywhere else) --
-    no positions.json entry from this app's own Condor/Strangle builder is required."""
-    symbol = symbol.upper()
-    nfo, _ = get_instruments()
-    meta_by_symbol = {i["tradingsymbol"]: i for i in nfo if i.get("name") == symbol and i.get("segment") == "NFO-OPT"}
-    pos = kite.positions()
-    net = pos.get("net", [])
-    legs_by_role = {}
-    quantity = None
-    lot_size = None
-    for p in net:
-        ts = p.get("tradingsymbol")
-        if p.get("exchange") != "NFO" or ts not in meta_by_symbol:
-            continue
-        qty = int(p.get("quantity") or 0)
-        if qty == 0:
-            continue
-        meta = meta_by_symbol[ts]
-        opt_type = meta.get("instrument_type")
-        role = ("sell_" if qty < 0 else "buy_") + ("call" if opt_type == "CE" else "put")
-        if role in legs_by_role:
-            return None, (f"Found more than one open {role.replace('_', ' ')} leg on {symbol} -- "
-                           f"this engine expects one clean 4-leg (or 2-leg) condor/strangle shape per "
-                           f"symbol. Close/simplify down to one leg per role before attaching.")
-        legs_by_role[role] = {
-            "strike": meta.get("strike"), "tradingsymbol": ts,
-            "ltp": p.get("last_price"), "entry_price": p.get("average_price"),
-        }
-        quantity = abs(qty)
-        lot_size = meta.get("lot_size")
-    if not legs_by_role or "sell_call" not in legs_by_role or "sell_put" not in legs_by_role:
-        return None, (f"No open short call + short put pair found for {symbol} in your live Zerodha "
-                       f"positions. This engine needs at least both short legs of the condor/strangle "
-                       f"to be open right now.")
-    strategy_type = "iron_condor" if {"buy_call", "buy_put"} <= legs_by_role.keys() else "naked_strangle"
-    return {"symbol": symbol, "strategy_type": strategy_type, "legs": legs_by_role,
-            "quantity": quantity, "lot_size": lot_size}, None
-
-
-@app.route("/api/delta-engine/broker-legs/<symbol>")
-def delta_engine_broker_legs(symbol):
-    """Preview what would be attached for a symbol before committing -- lets the UI show the
-    detected legs/strikes so you can confirm it matched the right position."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    result, err = _classify_broker_legs_for_symbol(symbol)
-    if err:
-        return jsonify({"error": err}), 400
-    return jsonify(result)
-
-
-@app.route("/api/delta-engine/attach-broker", methods=["POST"])
-def delta_engine_attach_broker():
-    """Attaches a position for monitoring straight from your LIVE Zerodha broker positions -- for
-    a condor/strangle you opened outside this tool's own Condor/Strangle builder tab (e.g. placed
-    directly in Kite), so there's no positions.json Position ID to type in. Just give the underlying
-    symbol (e.g. "SBIN") and this finds and classifies the open legs itself."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    symbol = (body.get("symbol") or "").strip().upper()
-    if not symbol:
-        return jsonify({"error": "symbol is required"}), 400
-    result, err = _classify_broker_legs_for_symbol(symbol)
-    if err:
-        return jsonify({"error": err}), 400
-    legs = result["legs"]
-    credit_per_share = (sum(v["entry_price"] for k, v in legs.items() if k.startswith("sell"))
-                         - sum(v["entry_price"] for k, v in legs.items() if k.startswith("buy")))
-    pos_id = f"BROKER-{symbol}-{int(time.time())}"
-    tracked = {
-        "id": pos_id, "symbol": symbol, "strategy_type": result["strategy_type"],
-        "legs": {k: {"strike": v["strike"], "ltp": v["entry_price"], "tradingsymbol": v["tradingsymbol"]}
-                 for k, v in legs.items()},
-        "quantity": result["quantity"], "lot_size": result["lot_size"],
-        "entry_credit": round(credit_per_share * result["quantity"], 2),
-        "source": "broker", "status": "monitoring", "added_at": now_ist().isoformat(),
-        "closed_at": None, "exit_reason": None, "realized_pnl": None, "last_greeks": None,
-        "pending_suggestion": None,
-    }
-    positions = load_delta_positions()
-    positions.append(tracked)
-    save_delta_positions(positions)
-    return jsonify({"ok": True, "tracked": tracked})
-
-
-@app.route("/api/delta-engine/resume/<symbol>", methods=["POST"])
-def delta_engine_resume_symbol(symbol):
-    """Manually un-pauses a symbol whose own daily-loss limit tripped earlier today, if you've
-    reviewed it and want the engine to resume proposing/executing adjustments for it (profit-target
-    and stop-loss exits keep working for a paused symbol regardless -- this only affects new
-    adjustments)."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    symbol = symbol.upper()
-    state = dn_load_state()
-    paused = [s for s in state.get("paused_symbols_today", []) if s != symbol]
-    state["paused_symbols_today"] = paused
-    dn_save_state(state)
-    return jsonify({"ok": True, "state": state})
-
-
-@app.route("/api/delta-engine/positions")
-def delta_engine_positions():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    return jsonify({"positions": load_delta_positions()})
-
-
-@app.route("/api/delta-engine/positions/<pos_id>/untrack", methods=["POST"])
-def delta_engine_untrack(pos_id):
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    positions = load_delta_positions()
-    for p in positions:
-        if p["id"] == pos_id:
-            p["status"] = "closed"
-            p["closed_at"] = now_ist().isoformat()
-            p["exit_reason"] = "Manually untracked"
-    save_delta_positions(positions)
-    return jsonify({"ok": True})
-
-
-@app.route("/api/delta-engine/suggestions")
-def delta_engine_suggestions():
-    """Every pending adjustment suggestion, one per monitored position that currently has a delta
-    breach -- each candidate carries its probability of profit, risk-reduction score, expected extra
-    premium, and whether it's currently executable given today's risk budget. Nothing here has been
-    or will be executed automatically; you choose what (if anything) to act on."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    positions = load_delta_positions()
-    out = []
-    for p in positions:
-        if p["status"] == "monitoring" and p.get("pending_suggestion"):
-            out.append({"position_id": p["id"], "symbol": p["symbol"], **p["pending_suggestion"]})
-    return jsonify({"suggestions": out})
-
-
-@app.route("/api/delta-engine/suggestions/<pos_id>/execute", methods=["POST"])
-def delta_engine_execute_suggestion(pos_id):
-    """Executes ONE specific candidate from a position's current pending suggestion -- the only way
-    an adjustment is ever placed. Runs in whichever execution_mode (Track/Live) is currently set."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    action = body.get("action")
-    if not action:
-        return jsonify({"error": "action is required (the candidate's action name to execute)"}), 400
-    positions = load_delta_positions()
-    position = next((p for p in positions if p["id"] == pos_id), None)
-    if not position:
-        return jsonify({"error": "Position not found"}), 404
-    suggestion = position.get("pending_suggestion")
-    if not suggestion:
-        return jsonify({"error": "No pending suggestion for this position -- it may have already been acted on or cleared"}), 400
-    candidate_dict = next((c for c in suggestion["candidates"] if c["action"] == action), None)
-    if not candidate_dict:
-        return jsonify({"error": f"No candidate with action '{action}' in the current suggestion"}), 400
-    candidate = AdjustmentCandidate(**{k: v for k, v in candidate_dict.items() if k in AdjustmentCandidate.__dataclass_fields__})
-    ok, message = _execute_delta_adjustment(position, candidate, suggestion["trigger_reason"],
-                                             all_candidate_actions=[c["action"] for c in suggestion["candidates"]])
-    save_delta_positions(positions)
-    if not ok:
-        return jsonify({"error": message}), 400
-    return jsonify({"ok": True, "message": message, "position": position})
-
-
-@app.route("/api/delta-engine/suggestions/<pos_id>/dismiss", methods=["POST"])
-def delta_engine_dismiss_suggestion(pos_id):
-    """Clears the current pending suggestion without executing anything -- the next monitoring cycle
-    will re-evaluate and generate a fresh one if the breach is still there."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    positions = load_delta_positions()
-    for p in positions:
-        if p["id"] == pos_id:
-            p["pending_suggestion"] = None
-    save_delta_positions(positions)
-    return jsonify({"ok": True})
-
-
-@app.route("/api/delta-engine/positions/<pos_id>/close-legs", methods=["POST"])
-def delta_engine_close_legs(pos_id):
-    """Manually closes some or all legs of a monitored position, in Track or Live (whichever
-    execution_mode is currently set), independent of the automatic profit-target/stop-loss logic --
-    for when you'd rather act on your own judgment. Body: {"roles": ["sell_call", ...]} -- omit or
-    pass an empty list to close every open leg."""
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    body = request.json or {}
-    roles = body.get("roles") or []
-    positions = load_delta_positions()
-    position = next((p for p in positions if p["id"] == pos_id), None)
-    if not position:
-        return jsonify({"error": "Position not found"}), 404
-    reason = body.get("reason") or ("Manual close (all legs)" if not roles else f"Manual close: {', '.join(roles)}")
-    ok, message = _close_delta_position_legs(position, roles, reason)
-    save_delta_positions(positions)
-    if not ok:
-        return jsonify({"error": message}), 400
-    return jsonify({"ok": True, "message": message, "position": position})
-
-
-@app.route("/api/delta-engine/logs")
-def delta_engine_logs():
-    if not require_session():
-        return jsonify({"error": "not_logged_in"}), 401
-    limit = int(request.args.get("limit", 200))
-    return jsonify({"logs": _delta_logger.read_recent(limit)})
-
-
-threading.Thread(target=_autotrade_loop, daemon=True).start()
-threading.Thread(target=_delta_engine_loop, daemon=True).start()
-threading.Thread(target=_delta_spot_poll_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
