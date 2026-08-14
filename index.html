@@ -1825,7 +1825,10 @@ function renderExecOrderLines() {
         <input type="number" step="0.05" value="${o.price ?? ""}" style="width:85px;"
           onchange="execOrders[${idx}].price=this.value; execOrders[${idx}].price_source='MANUAL'" />
       </td>
-      <td><button class="secondary small-btn" onclick="removeExecLeg(${idx})">Remove</button></td>`;
+      <td>
+        <button class="secondary small-btn" onclick="removeExecLeg(${idx})">Remove</button>
+        <button class="small-btn" onclick="executeSingleEntryLeg(${idx})">Execute this leg</button>
+      </td>`;
     tbody.appendChild(tr);
   });
 
@@ -1835,6 +1838,32 @@ function renderExecOrderLines() {
 }
 
 document.getElementById("refreshExecPricesBtn").onclick = refreshExecutionPrices;
+
+async function executeSingleEntryLeg(idx) {
+  const leg = execOrders[idx];
+  if (!leg || !currentExecPositionId) return;
+  const product = document.getElementById("execProduct").value;
+  const orderType = document.getElementById("execOrderType").value;
+  const basis = leg.transaction_type === "BUY" ? "ASK" : "BID";
+  if (!confirm(`Place ONLY this entry leg now?\n${leg.transaction_type} ${leg.tradingsymbol} x${leg.quantity}\nOrder type: ${orderType}${orderType === "LIMIT" ? `\nLimit price: ₹${leg.price} (${basis})` : ""}\n\nReal order, real money.`)) return;
+  const resultBox = document.getElementById("execResultBox");
+  resultBox.innerHTML += `<div class="loading">Placing ${leg.tradingsymbol}...</div>`;
+  try {
+    const r = await apiFetch(`/api/execute/${currentExecPositionId}/leg`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({confirmed: true, product, order_type: orderType, order: {...leg, price_source: leg.price_source || "AUTO"}})
+    });
+    const d = await r.json();
+    if (d.error) { resultBox.innerHTML += `<div style="color:var(--red);">${d.error}</div>`; return; }
+    (d.results || []).forEach(res => {
+      const color = res.status === "placed" ? "var(--green)" : "var(--red)";
+      resultBox.innerHTML += `<div style="color:${color}; font-size:13px;">${res.leg}: ${res.tradingsymbol} — ${res.status}${res.order_id ? " (order " + res.order_id + ")" : ""}${res.error ? " — " + res.error : ""}</div>`;
+    });
+    if ((d.results || []).some(res => res.status === "placed")) { execOrders.splice(idx, 1); renderExecOrderLines(); }
+    loadOrders();
+    if (typeof loadBrokerPositions === "function") loadBrokerPositions();
+  } catch (e) { resultBox.innerHTML += `<div style="color:var(--red);">Request failed: ${e}</div>`; }
+}
 
 function removeExecLeg(idx) {
   const leg = execOrders[idx];
