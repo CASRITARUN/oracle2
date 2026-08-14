@@ -62,7 +62,6 @@ from typing import List, Optional, Callable, Dict, Any, Tuple
 API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
 API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
 REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
-
 # If your network does TLS interception (common on office/government networks — you'll see
 # "self-signed certificate in certificate chain" errors), set this env var to allow the news
 # feature specifically to fall back to an unverified request. This does NOT affect Kite API calls
@@ -3589,6 +3588,45 @@ def execute_refresh_quotes(pos_id):
         })
     except Exception as e:
         return jsonify({"error": f"Could not refresh live Bid/Ask: {e}"}), 502
+
+
+@app.route("/api/execute/<pos_id>/leg", methods=["POST"])
+def execute_single_leg(pos_id):
+    """Place exactly one entry leg chosen by the user from the execution review."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    if not body.get("confirmed"):
+        return jsonify({"error": "Confirmation flag not set — nothing was placed."}), 400
+    position = find_position(pos_id)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+    order = body.get("order")
+    if not order or not order.get("tradingsymbol") or not order.get("transaction_type"):
+        return jsonify({"error": "No valid entry leg order provided."}), 400
+    product = body.get("product", "NRML")
+    order_type = body.get("order_type", "LIMIT")
+    order = dict(order)
+    if order_type == "LIMIT" and order.get("price_source") == "AUTO":
+        try:
+            fresh = {o["leg"]: o for o in refresh_execution_quotes(position)}
+            fq = fresh.get(order.get("leg"))
+            if fq and fq.get("recommended_limit_price") is not None:
+                order["price"] = fq["recommended_limit_price"]
+                order["ltp"] = fq.get("ltp")
+                order["bid"] = fq.get("bid")
+                order["ask"] = fq.get("ask")
+        except Exception as e:
+            return jsonify({"error": f"Could not refresh live Bid/Ask before placement: {e}"}), 502
+    if order_type == "LIMIT" and not order.get("price"):
+        return jsonify({"error": "A LIMIT price is required. Refresh prices or enter a price manually."}), 400
+    results = place_basket_orders([order], product, order_type, sequence_for_margin=False)
+    positions = load_positions()
+    for p in positions:
+        if p["id"] == pos_id:
+            p["broker_orders"] = p.get("broker_orders", []) + results
+    save_positions(positions)
+    return jsonify({"results": results, "position_id": pos_id, "order": order})
 
 
 @app.route("/api/execute/<pos_id>/confirm", methods=["POST"])
