@@ -592,8 +592,8 @@
     <h2>⚡ Auto Trade Mode — status</h2>
     <div class="warn-box" style="margin-top:0;">
       This is a rule-based intraday <b>market-mood breakout scanner + option buyer with risk-based sizing</b> — not a guaranteed-profit
-      system. It watches your configured symbols for a price breakout above/below their recent
-      trading range, buys the ATM option in that direction, and manages stop-loss/target/trailing-stop
+      system. It watches your configured symbols for a breakout above/below their recent trading range, then waits for a
+      retest and confirmation before buying the ATM option in that direction, and manages stop-loss/target/trailing-stop
       itself. In <b>Manual</b> mode nothing is ever sent to your broker until you click "Execute".
       In <b>Auto</b> mode it places that entry the moment a signal qualifies — real money, no click.
       Only arm Auto mode with capital you can afford to lose, and keep an eye on your Zerodha app.
@@ -778,6 +778,24 @@
         </div>
       </div>
     </div>
+    <div class="row" style="margin-top:10px; align-items:flex-start;">
+      <div>
+        <label class="inline" style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="autoRetestEnabled" checked />
+          Require Breakout → Retest → Confirmation before entry
+        </label>
+        <div class="legend" style="margin-top:4px; max-width:760px;">
+          Breakout alone is not chased. The broken level must be retested and held, followed by a
+          confirmation candle. Backtest entry = next candle OPEN; live mode rechecks the current spot
+          before sending an order.
+        </div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px;">
+      <label class="inline">Retest wait bars <input type="number" id="autoRetestWait" value="2" min="1" max="4" step="1" /></label>
+      <label class="inline">Retest tolerance (ATR) <input type="number" id="autoRetestTol" value="0.20" min="0" max="1" step="0.05" /></label>
+      <label class="inline"><input type="checkbox" id="autoRetestConfirm" checked /> Require confirmation candle</label>
+    </div>
     <div class="row" style="margin-top:10px;">
       <label class="inline">Min breakout size (x ATR) <input type="number" id="autoMinScore" value="0.5" min="0.1" max="5" step="0.1" /></label>
       <label class="inline">Square-off time (24h) <input type="text" id="autoSquareOff" value="15:15" style="width:70px;" /></label>
@@ -792,13 +810,16 @@
       <label class="inline">Interval <select id="autoBtInterval"><option value="5minute">5 min</option><option value="15minute">15 min</option><option value="60minute">60 min</option></select></label>
       <label class="inline">Days <input type="number" id="autoBtDays" value="20" min="2" max="60" style="width:60px;" /></label>
       <label class="inline">Lookback <input type="number" id="autoBtLookback" value="20" min="5" max="100" style="width:65px;" /></label>
+      <label class="inline"><input type="checkbox" id="autoBtRetest" checked /> Retest entry</label>
+      <label class="inline">Wait <input type="number" id="autoBtWait" value="2" min="1" max="4" style="width:48px;" /></label>
+      <label class="inline">Tol ATR <input type="number" id="autoBtTol" value="0.20" min="0" max="1" step="0.05" style="width:58px;" /></label>
       <button class="secondary small-btn" onclick="runAutoBacktest()">Run backtest</button>
       <span class="loading" id="autoBtStatus"></span>
     </div>
     <div id="autoBtSummary" class="row" style="margin-top:12px; gap:12px;"></div>
     <div id="autoBtBreakdown" class="legend" style="margin-top:8px;"></div>
-    <div id="autoBtNote" class="legend" style="margin-top:8px;">Uses the same breakout + candle + mood filters. Results are underlying points, not fabricated option-premium P&amp;L.</div>
-    <table id="autoBtTable" style="display:none; margin-top:12px;"><thead><tr><th>Entry</th><th>Side</th><th>Entry</th><th>Exit</th><th>Points</th><th>Exit reason</th><th>Candles</th><th>Mood</th></tr></thead><tbody id="autoBtBody"></tbody></table>
+    <div id="autoBtNote" class="legend" style="margin-top:8px;">Breakout → retest → confirmation. Signal is confirmed on a completed candle; entry is next candle OPEN; stop/target use intrabar HIGH/LOW. Results are underlying points, not option-premium P&amp;L.</div>
+    <table id="autoBtTable" style="display:none; margin-top:12px;"><thead><tr><th>Signal/Entry time</th><th>Side</th><th>Entry</th><th>Exit</th><th>Points</th><th>Exit reason</th><th>Setup</th><th>Candles</th><th>Mood</th></tr></thead><tbody id="autoBtBody"></tbody></table>
     <div class="panel" style="margin-top:14px; background:rgba(91,141,239,.04);">
       <h3 style="margin-top:0;">🔬 Walk-forward validation</h3>
       <div class="legend">Parameters are selected on earlier data and tested only on the next unseen period. This is the preferred validation before Live mode.</div>
@@ -840,7 +861,7 @@
   </div>
 
   <div class="panel">
-    <h2>Breakout scanner — signals</h2>
+    <h2>Breakout → Retest → Confirmation scanner — signals</h2>
     <div class="row">
       <button class="secondary small-btn" onclick="scanAutoTradeNow()">Scan now</button>
       <span class="loading" id="autoScanStatus"></span>
@@ -848,10 +869,10 @@
       <span class="legend">Scores update every scan cycle — use "Recheck" on a row for its score right now, or "Dismiss" to hide a stale row until the next scan.</span>
     </div>
     <table id="autoScanTable" style="margin-top:12px; display:none;">
-      <thead><tr><th>Symbol</th><th>Direction</th><th>Detected</th><th>Confidence</th><th>Score</th><th>Mood</th><th>Candles</th><th>Trend</th><th>RSI</th><th>Volume</th><th>Reasoning</th><th colspan="2"></th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Direction</th><th>Detected</th><th>Confidence</th><th>Score</th><th>Setup</th><th>Mood</th><th>Candles</th><th>Trend</th><th>RSI</th><th>Volume</th><th>Reasoning</th><th colspan="2"></th></tr></thead>
       <tbody id="autoScanBody"></tbody>
     </table>
-    <div class="legend" id="autoScanEmpty">No breakout candidates yet — click "Scan now" or arm the loop above.</div>
+    <div class="legend" id="autoScanEmpty">No confirmed breakout → retest → confirmation candidates yet — click "Scan now" or arm the loop above.</div>
   </div>
 
   <div class="panel">
@@ -2839,6 +2860,10 @@ async function saveAutoConfig() {
     trail_after_pct: Number(document.getElementById("autoTrailAfter").value),
     trail_giveback_pct: Number(document.getElementById("autoTrailGiveback").value),
     min_breakout_score: Number(document.getElementById("autoMinScore").value),
+    retest_enabled: document.getElementById("autoRetestEnabled").checked,
+    retest_max_wait_bars: Number(document.getElementById("autoRetestWait").value),
+    retest_tolerance_atr: Number(document.getElementById("autoRetestTol").value),
+    retest_require_confirmation: document.getElementById("autoRetestConfirm").checked,
     strict_breakout_filters: document.getElementById("autoStrictBreakout").checked,
     square_off_time: document.getElementById("autoSquareOff").value.trim(),
     use_market_mood: document.getElementById("autoUseMood").checked,
@@ -2928,6 +2953,10 @@ async function pollAutoTradeState() {
       document.getElementById("autoExitMode").value = s.exit_mode || "auto";
       document.getElementById("autoHardStopPct").value = s.hard_stop_pct ?? 50;
       document.getElementById("autoStrictBreakout").checked = s.strict_breakout_filters !== false;
+      document.getElementById("autoRetestEnabled").checked = s.retest_enabled !== false;
+      document.getElementById("autoRetestWait").value = s.retest_max_wait_bars ?? 2;
+      document.getElementById("autoRetestTol").value = s.retest_tolerance_atr ?? 0.20;
+      document.getElementById("autoRetestConfirm").checked = s.retest_require_confirmation !== false;
       onExitModeChange();
     }
     if (s.scan_all_fo && s.last_scan_universe_size) {
@@ -2943,6 +2972,10 @@ async function pollAutoTradeState() {
     if(document.getElementById("autoUseMood")) document.getElementById("autoUseMood").checked = s.use_market_mood !== false;
     if(document.getElementById("autoRequireCandle")) document.getElementById("autoRequireCandle").checked = s.require_candle_alignment !== false;
     if(document.getElementById("autoMinCandleScore")) document.getElementById("autoMinCandleScore").value = s.min_candle_score ?? 1;
+    if(document.getElementById("autoRetestEnabled")) document.getElementById("autoRetestEnabled").checked = s.retest_enabled !== false;
+    if(document.getElementById("autoRetestWait")) document.getElementById("autoRetestWait").value = s.retest_max_wait_bars ?? 2;
+    if(document.getElementById("autoRetestTol")) document.getElementById("autoRetestTol").value = s.retest_tolerance_atr ?? 0.20;
+    if(document.getElementById("autoRetestConfirm")) document.getElementById("autoRetestConfirm").checked = s.retest_require_confirmation !== false;
     renderAutoScanTable(autoLastCandidates, s.mode);
     renderAutoOpenPosition(d.open_trades);
     updateAutoPositionChart(d.open_trades);
@@ -2965,7 +2998,7 @@ function renderAutoScanTable(candidates, mode) {
     empty.style.display = "block";
     empty.textContent = candidates.length
       ? "No candidates match the current filter (or all were dismissed)."
-      : 'No breakout candidates yet — click "Scan now" or arm the loop above.';
+      : 'No confirmed breakout → retest → confirmation candidates yet — click "Scan now" or arm the loop above.';
     return;
   }
   empty.style.display = "none"; table.style.display = "table";
@@ -2986,6 +3019,7 @@ function renderAutoScanTable(candidates, mode) {
       <td style="font-size:12px; color:var(--muted);">${detectedTime}</td>
       <td><span class="pill ${confClass}">${c.confidence || "—"}</span></td>
       <td>${c.score}</td>
+      <td>${c.retest_enabled ? `<span class="pill ok">RETEST + CONFIRM</span>` : `<span class="pill warn">BREAKOUT</span>`}</td>
       <td>${c.market_mood ? `<span class="pill ${c.mood_aligned ? "ok" : "warn"}">${c.market_mood.label}</span>` : "—"}</td>
       <td style="font-size:11px; max-width:170px;">${c.candle_sequence ? `${c.candle_sequence.label}<br><span class="legend">${(c.candle_sequence.patterns||[]).slice(0,2).join(", ")}</span>` : "—"}</td>
       <td>${trendPill}</td>
@@ -3083,16 +3117,20 @@ async function runAutoBacktest() {
   try {
     const r=await apiFetch("/api/autotrade/backtest",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
       symbol:document.getElementById("autoBtSymbol").value.trim().toUpperCase(), interval:document.getElementById("autoBtInterval").value,
-      days:Number(document.getElementById("autoBtDays").value)||20, lookback:Number(document.getElementById("autoBtLookback").value)||20
+      days:Number(document.getElementById("autoBtDays").value)||20, lookback:Number(document.getElementById("autoBtLookback").value)||20,
+      retest_enabled:document.getElementById("autoBtRetest").checked,
+      retest_max_wait_bars:Number(document.getElementById("autoBtWait").value)||2,
+      retest_tolerance_atr:Number(document.getElementById("autoBtTol").value)||0.20,
+      retest_require_confirmation:true
     })});
     const d=await r.json(); if(d.error){status.textContent="Error";alert(d.error);return;}
     const s=d.summary||{};
     document.getElementById("autoBtSummary").innerHTML=`<span class="pill ok">Trades ${s.trades??0}</span><span class="pill ${s.win_rate>=50?"ok":"warn"}">Win ${s.win_rate??0}%</span><span class="pill ${s.net_points>=0?"ok":"bad"}">Net ${s.net_points??0} pts</span><span class="pill">PF ${s.profit_factor??0}</span><span class="pill">Max DD ${s.max_drawdown_points??0} pts</span>`;
     const sideTxt=Object.entries(s.side_stats||{}).map(([k,v])=>`${k}: ${v.trades} trades, ${v.win_rate}% win, ${v.net_points} pts`).join(" | ");
     const regimeTxt=Object.entries(s.regime_stats||{}).map(([k,v])=>`${k}: ${v.trades} trades, ${v.win_rate}% win, ${v.net_points} pts`).join(" | ");
-    document.getElementById("autoBtBreakdown").innerHTML=`<b>Direction check:</b> ${sideTxt||"—"}<br><b>Regime check:</b> ${regimeTxt||"—"}<br><span style="opacity:.85">3 same-colour candles are context only; the prior-range breakout is the trigger. Exhausted 3-candle runs are filtered rather than chased.</span>`;
+    document.getElementById("autoBtBreakdown").innerHTML=`<b>Direction check:</b> ${sideTxt||"—"}<br><b>Regime check:</b> ${regimeTxt||"—"}<br><span style="opacity:.85">Entry timing is breakout → retest → confirmation, then next candle OPEN. Intrabar stop/target uses HIGH/LOW; same-bar stop+target is counted as stop first.</span>`;
     const table=document.getElementById("autoBtTable"), body=document.getElementById("autoBtBody");
-    body.innerHTML=(d.trades||[]).map(t=>`<tr><td>${t.entry_time||"—"}</td><td>${t.direction}</td><td>${t.entry}</td><td>${t.exit}</td><td class="${t.pnl_points>=0?"buy":"sell"}">${t.pnl_points}</td><td>${t.exit_reason}</td><td>${t.candle_label||"—"}</td><td>${t.mood||"—"}</td></tr>`).join("");
+    body.innerHTML=(d.trades||[]).map(t=>`<tr><td>${t.entry_time||"—"}</td><td>${t.direction}</td><td>${t.entry}</td><td>${t.exit}</td><td class="${t.pnl_points>=0?"buy":"sell"}">${t.pnl_points}</td><td>${t.exit_reason}</td><td>${t.setup||"—"}</td><td>${t.candle_label||"—"}</td><td>${t.mood||"—"}</td></tr>`).join("");
     table.style.display=d.trades&&d.trades.length?"table":"none"; status.textContent="Done";
     document.getElementById("autoBtNote").textContent=d.note||"Backtest completed.";
   } catch(e){status.textContent="Failed";alert("Backtest request failed: "+e);}
@@ -3103,7 +3141,11 @@ async function runAutoWalkForward() {
   try {
     const r=await apiFetch("/api/autotrade/walk-forward",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
       symbol:document.getElementById("autoBtSymbol").value.trim().toUpperCase(), interval:document.getElementById("autoBtInterval").value,
-      days:Number(document.getElementById("autoWfDays").value)||120, folds:Number(document.getElementById("autoWfFolds").value)||4
+      days:Number(document.getElementById("autoWfDays").value)||120, folds:Number(document.getElementById("autoWfFolds").value)||4,
+      retest_enabled:document.getElementById("autoBtRetest").checked,
+      retest_max_wait_bars:Number(document.getElementById("autoBtWait").value)||2,
+      retest_tolerance_atr:Number(document.getElementById("autoBtTol").value)||0.20,
+      retest_require_confirmation:true
     })});
     const d=await r.json(); if(d.error){status.textContent="Error";alert(d.error);return;}
     const s=d.summary||{};
