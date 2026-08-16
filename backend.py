@@ -4715,6 +4715,42 @@ def _detect_breakout_retest(candles, lookback, strict=True, max_wait_bars=2, tol
             return result
     return None
 
+def _setup_quality_score(result, mood=None):
+    """Transparent 0-100 setup-quality score; ranking/filter, never a win probability."""
+    r=result or {}; mood=mood or r.get("market_mood") or {}; direction=r.get("direction"); seq=r.get("candle_sequence") or {}
+    score=0.0; failures=[]
+    bs=float(r.get("breakout_size_atr") or 0); breakout_pts=min(max(bs,0.0),1.0)*20; score+=breakout_pts
+    if bs<0.25: failures.append("small breakout")
+    retest_pts=15.0
+    if r.get("retest_enabled"):
+        level=float(r.get("retest_level") or r.get("breakout_level") or 0); close=float(r.get("retest_close") or 0)
+        held=(close>level) if direction=="CE" else (close<level); rejection=bool(r.get("retest_rejection",True))
+        retest_pts=15.0 if held and rejection else 7.0 if held else 0.0
+        if not held: failures.append("retest did not hold")
+        if not rejection: failures.append("weak retest rejection")
+    score+=retest_pts
+    conf_pts=15.0 if r.get("confirmation_ok") and r.get("strong_close") else 10.0 if r.get("confirmation_ok") else 0.0; score+=conf_pts
+    if not r.get("confirmation_ok"): failures.append("confirmation missing/weak")
+    trend_pts=15.0 if r.get("trend_aligned") is True else 7.5 if r.get("trend_aligned") is None else 0.0; score+=trend_pts
+    if r.get("trend_aligned") is None: failures.append("trend unavailable")
+    elif r.get("trend_aligned") is False: failures.append("counter-trend")
+    mom_pts=10.0 if r.get("momentum_aligned") is True else 5.0 if r.get("momentum_aligned") is None else 0.0; score+=mom_pts
+    if r.get("momentum_aligned") is None: failures.append("momentum unavailable")
+    elif r.get("momentum_aligned") is False: failures.append("momentum disagrees")
+    rv=r.get("rel_volume"); vol_pts=min(max(float(rv)/1.5,0.0),1.0)*10.0 if rv is not None else 5.0; score+=vol_pts
+    if rv is None: failures.append("volume baseline unavailable")
+    elif float(rv)<1.0: failures.append("low relative volume")
+    ds=float(seq.get("score") or 0)*(1 if direction=="CE" else -1); candle_pts=min(max(ds/3.0,0.0),1.0)*5.0; score+=candle_pts
+    if ds<1: failures.append("weak candle alignment")
+    if seq.get("exhaustion"): failures.append("candle-run exhaustion")
+    aligned=((direction=="CE" and float(mood.get("score",0))>=1) or (direction=="PE" and float(mood.get("score",0))<=-1)); mood_pts=5.0 if aligned else 0.0; score+=mood_pts
+    if not aligned: failures.append("market mood not aligned")
+    whips=int(r.get("failed_breakouts_recent") or 0); risk_pts=max(0.0,5.0-min(whips,3)*1.5-(2.0 if seq.get("exhaustion") else 0.0)); score+=risk_pts
+    if whips: failures.append(f"{whips} recent failed breakout(s)")
+    score=round(max(0.0,min(100.0,score)),1); bucket="A+" if score>=85 else "A" if score>=75 else "B" if score>=65 else "C" if score>=55 else "Reject"
+    return {"score":score,"bucket":bucket,"components":{"breakout":round(breakout_pts,1),"retest":round(retest_pts,1),"confirmation":round(conf_pts,1),"trend":trend_pts,"momentum":mom_pts,"volume":round(vol_pts,1),"candles":round(candle_pts,1),"mood":mood_pts,"risk":round(risk_pts,1)},"failure_diagnostics":"; ".join(failures) if failures else "All quality components aligned"}
+
+
 def _annotate_candidate(result, symbol, lookback):
     """Fills in symbol, timestamp, confidence bucket, and the plain-English reasoning string for a
     raw _detect_breakout() result. Shared by scan_breakouts (full scan) and the single-symbol
@@ -4729,6 +4765,7 @@ def _annotate_candidate(result, symbol, lookback):
     result["market_mood"] = mood
     result["mood_aligned"] = ((result["direction"] == "CE" and mood["score"] >= 1) or
                                (result["direction"] == "PE" and mood["score"] <= -1))
+    result["setup_quality"] = _setup_quality_score(result, mood)
     direction_word = "broke above" if result["direction"] == "CE" else "broke below"
     trend_note = ("EMA9/21 trend agrees" if result["trend_aligned"] is True else
                    "EMA9/21 trend disagrees (counter-trend, discounted)" if result["trend_aligned"] is False
@@ -4897,6 +4934,14 @@ def _revalidate_autotrade_candidate(candidate, state):
         if fresh.get("direction") != candidate.get("direction"):
             return False, f"Setup direction changed from {candidate.get('direction')} to {fresh.get('direction')}."
         candidate.update(fresh)
+        fresh_mood = _market_mood(candidate["symbol"], candles)
+        candidate["market_mood"] = fresh_mood
+        candidate["mood_aligned"] = ((candidate.get("direction") == "CE" and fresh_mood.get("score",0) >= 1) or
+                                      (candidate.get("direction") == "PE" and fresh_mood.get("score",0) <= -1))
+        candidate["setup_quality"] = _setup_quality_score(candidate, fresh_mood)
+        min_q=float(state.get("min_entry_quality",70))
+        if candidate["setup_quality"]["score"] < min_q:
+            return False, f"Setup quality dropped to {candidate['setup_quality']['score']}/100, below minimum {min_q:.0f}."
         return True, None
     except Exception as e:
         return False, f"Entry revalidation failed: {e}"
@@ -5182,7 +5227,8 @@ def _autotrade_loop():
                                            and (c.get("candle_sequence", {}).get("score", 0) * (1 if c.get("direction") == "CE" else -1)
                                                 >= int(state.get("min_candle_score", 1)))
                                            and (not state.get("retest_enabled", True) or c.get("confirmation_ok") is True)
-                                           and (not state.get("use_market_mood", True) or c.get("mood_aligned") is True)]
+                                           and (not state.get("use_market_mood", True) or c.get("mood_aligned") is True)
+                                           and float((c.get("setup_quality") or {}).get("score", 0)) >= float(state.get("min_entry_quality", 70))]
                         best = None
                         for c in auto_qualified:
                             # Re-verify right now, not just at scan time -- price can revert in the
@@ -5400,6 +5446,7 @@ def autotrade_backtest():
     max_wait=max(1,min(int(body.get("retest_max_wait_bars",2)),4))
     tolerance=float(body.get("retest_tolerance_atr",0.20))
     require_confirmation=bool(body.get("retest_require_confirmation",True))
+    min_entry_quality=max(0.0,min(float(body.get("min_entry_quality",70)),100.0))
     token,err=resolve_token_for_symbol(symbol)
     if err: return jsonify({"error":err}),400
     try:
@@ -5467,9 +5514,12 @@ def autotrade_backtest():
         aligned=(r["direction"]=="CE" and mood["score"]>=1) or (r["direction"]=="PE" and mood["score"]<=-1)
         seq=r.get("candle_sequence",{})
         directional_score=seq.get("score",0) if r["direction"]=="CE" else -seq.get("score",0)
+        r["retest_enabled"]=retest_enabled; r["market_mood"]=mood; r["mood_aligned"]=bool(aligned)
+        quality=_setup_quality_score(r,mood); r["setup_quality"]=quality
         if (r.get("trend_aligned") is not True or r.get("momentum_aligned") is not True or
             not r.get("volume_confirmed") or seq.get("exhaustion",False) or
-            directional_score<1 or not r.get("candle_aligned",False) or not aligned):
+            directional_score<1 or not r.get("candle_aligned",False) or not aligned or
+            quality["score"] < min_entry_quality):
             i+=1; continue
 
         entry_bar=candles[i+1]; entry=float(entry_bar["open"])
@@ -5480,7 +5530,8 @@ def autotrade_backtest():
                 "stop":round(stop_dist,2),"target":round(target_dist,2),
                 "stop_price":round(entry-stop_dist if r["direction"]=="CE" else entry+stop_dist,2),
                 "target_price":round(entry+target_dist if r["direction"]=="CE" else entry-target_dist,2),
-                "score":r["score"],"candle_label":seq.get("label"),"mood":mood.get("label"),
+                "score":r["score"],"setup_quality":quality,"failure_diagnostics":quality.get("failure_diagnostics"),
+                "candle_label":seq.get("label"),"mood":mood.get("label"),
                 "setup":"breakout -> retest -> confirmation" if retest_enabled else "breakout"}
         i+=1
 
@@ -5492,12 +5543,12 @@ def autotrade_backtest():
     for t in trades:
         running+=float(t["pnl_points"]); peak=max(peak,running); max_dd=max(max_dd,peak-running)
     pf=round(gains/losses_abs,2) if losses_abs else (999.0 if gains else 0.0)
-    side_stats={}; regime_stats={}
+    side_stats={}; regime_stats={}; setup_quality_stats={}
     for t in trades:
-        for bucket,key in ((side_stats,t.get("direction") or "Unknown"),(regime_stats,t.get("mood") or "Unknown")):
+        for bucket,key in ((side_stats,t.get("direction") or "Unknown"),(regime_stats,t.get("mood") or "Unknown"),(setup_quality_stats,(t.get("setup_quality") or {}).get("bucket") or "Unknown")):
             d=bucket.setdefault(key,{"trades":0,"wins":0,"net_points":0.0})
             d["trades"]+=1; d["wins"]+=int(float(t["pnl_points"])>=0); d["net_points"]+=float(t["pnl_points"])
-    for bucket in (side_stats,regime_stats):
+    for bucket in (side_stats,regime_stats,setup_quality_stats):
         for d in bucket.values():
             d["win_rate"]=round(100*d["wins"]/d["trades"],1) if d["trades"] else 0
             d["net_points"]=round(d["net_points"],2)
@@ -5505,11 +5556,11 @@ def autotrade_backtest():
                     "trades":trades[-100:],
                     "summary":{"trades":total,"wins":wins,"losses":losses,"win_rate":winrate,
                                "net_points":round(equity,2),"avg_points":avg,"profit_factor":pf,
-                               "max_drawdown_points":round(max_dd,2),"side_stats":side_stats,"regime_stats":regime_stats},
+                               "max_drawdown_points":round(max_dd,2),"side_stats":side_stats,"regime_stats":regime_stats,"setup_quality_stats":setup_quality_stats,"min_entry_quality":min_entry_quality},
                     "note":"BREAKOUT -> RETEST -> CONFIRMATION. Signal is confirmed on a completed candle and entry is the next candle OPEN. Stops/targets use intrabar HIGH/LOW; if both are touched in one candle, STOP is assumed first conservatively. Underlying points only; not option-premium P&L."})
 
 def _simulate_signal_segment(symbol,candles,broad_candles,lookback,stop_atr,target_atr,strict=True,
-                              retest_enabled=True,max_wait_bars=2,tolerance_atr=0.20,require_confirmation=True):
+                              retest_enabled=True,max_wait_bars=2,tolerance_atr=0.20,require_confirmation=True,min_entry_quality=70):
     """Walk-forward simulator using the exact next-open/intrabar model used by backtest."""
     minbars=max(lookback+30,50); trades=[]; open_t=None; equity=peak=max_dd=0.0; i=minbars
     while i<len(candles):
@@ -5546,8 +5597,11 @@ def _simulate_signal_segment(symbol,candles,broad_candles,lookback,stop_atr,targ
         bp=[x for x in broad_candles if str(x.get("date"))<=str(bar.get("date"))][-100:]; mood=_market_mood(symbol,window,bp)
         aligned=(r["direction"]=="CE" and mood["score"]>=1) or (r["direction"]=="PE" and mood["score"]<=-1)
         seq=r.get("candle_sequence",{}); directional_score=seq.get("score",0) if r["direction"]=="CE" else -seq.get("score",0)
+        r["retest_enabled"]=retest_enabled; r["market_mood"]=mood; r["mood_aligned"]=bool(aligned)
+        quality=_setup_quality_score(r,mood); r["setup_quality"]=quality
         if (r.get("trend_aligned") is not True or r.get("momentum_aligned") is not True or not r.get("volume_confirmed") or
-            seq.get("exhaustion",False) or directional_score<1 or not r.get("candle_aligned",False) or not aligned):
+            seq.get("exhaustion",False) or directional_score<1 or not r.get("candle_aligned",False) or not aligned or
+            quality["score"] < float(min_entry_quality)):
             i+=1; continue
         entry_bar=candles[i+1]; entry=float(entry_bar["open"]); atr=max(float(r.get("atr") or 0),entry*0.001)
         stop_dist=max(atr*stop_atr,entry*0.001); target_dist=max(atr*target_atr,entry*0.0015)
@@ -5573,6 +5627,7 @@ def autotrade_walk_forward():
     max_wait=max(1,min(int(body.get("retest_max_wait_bars",2)),4))
     tolerance=float(body.get("retest_tolerance_atr",0.20))
     require_confirmation=bool(body.get("retest_require_confirmation",True))
+    min_entry_quality=max(0.0,min(float(body.get("min_entry_quality",70)),100.0))
     token,err=resolve_token_for_symbol(symbol)
     if err: return jsonify({"error":err}),400
     try:
@@ -5591,15 +5646,15 @@ def autotrade_walk_forward():
         train=candles[:test_start]; test=candles[:test_end]
         best=None
         for lb,sl,tg in grid:
-            sim=_simulate_signal_segment(symbol,train,broad[:len(train)],lb,sl,tg,True,retest_enabled,max_wait,tolerance,require_confirmation)
+            sim=_simulate_signal_segment(symbol,train,broad[:len(train)],lb,sl,tg,True,retest_enabled,max_wait,tolerance,require_confirmation,min_entry_quality)
             score=sim["net_points"]/(1+sim["max_drawdown"]) if sim["trades"] else -1e9
             if best is None or score>best[0]: best=(score,lb,sl,tg,sim)
         _,blb,bsl,btg,_=best
         # Warm the test with training candles so indicators have their normal history, but only record test-period trades.
-        sim=_simulate_signal_segment(symbol,test,broad[:len(test)],blb,bsl,btg,True,retest_enabled,max_wait,tolerance,require_confirmation)
+        sim=_simulate_signal_segment(symbol,test,broad[:len(test)],blb,bsl,btg,True,retest_enabled,max_wait,tolerance,require_confirmation,min_entry_quality)
         test_trades=[t for t in sim["trades"] if str(t.get("entry_time"))>=str(candles[test_start].get("date"))]
         net=sum(t["pnl_points"] for t in test_trades); wins=sum(1 for t in test_trades if t["pnl_points"]>=0); losses=len(test_trades)-wins
-        results.append({"fold":f+1,"train_bars":len(train),"test_bars":test_end-test_start,"lookback":blb,"stop_atr":bsl,"target_atr":btg,"trades":len(test_trades),"wins":wins,"losses":losses,"win_rate":round(wins/len(test_trades)*100,1) if test_trades else 0,"net_points":round(net,2),"max_drawdown":sim["max_drawdown"]})
+        results.append({"fold":f+1,"train_bars":len(train),"test_bars":test_end-test_start,"lookback":blb,"stop_atr":bsl,"target_atr":btg,"min_entry_quality":min_entry_quality,"trades":len(test_trades),"wins":wins,"losses":losses,"win_rate":round(wins/len(test_trades)*100,1) if test_trades else 0,"net_points":round(net,2),"max_drawdown":sim["max_drawdown"]})
         all_test.extend(test_trades)
     total=len(all_test); wins=sum(1 for t in all_test if t["pnl_points"]>=0); net=sum(t["pnl_points"] for t in all_test)
     return jsonify({"ok":True,"symbol":symbol,"interval":interval,"days":days,"folds":results,"summary":{"trades":total,"wins":wins,"losses":total-wins,"win_rate":round(wins/total*100,1) if total else 0,"net_points":round(net,2)},"note":"Walk-forward: parameters are selected only on earlier training data and then frozen on the next unseen test window. This is a validation tool, not a guarantee of future returns."})
