@@ -4357,44 +4357,68 @@ def _candle_features(c):
 
 
 def _candle_sequence(candles):
+    """Read the last 3 candles as CONTEXT, not as a 'wait for 3 green/red candles' trigger.
+
+    A breakout can be late by the third same-colour candle.  The engine therefore rewards structure
+    (higher highs/lows or lower highs/lows), rejection/engulfing and close quality, while flagging
+    possible exhaustion after an extended 3-candle run.  The actual trigger remains the Donchian
+    break of the PRIOR range in _detect_breakout().
+    """
     if len(candles) < 3:
-        return {"score":0, "label":"Insufficient candles", "patterns":[], "direction":None, "reason":"Need at least 3 candles."}
+        return {"score":0,"label":"Insufficient candles","patterns":[],"direction":None,
+                "reason":"Need at least 3 candles.","exhaustion":False,"same_colour_count":0}
     last3=candles[-3:]; f=[_candle_features(x) for x in last3]
     patterns=[]; bull=0; bear=0
     for x in f:
         if x["body_pct"] < 0.18: patterns.append("Doji/indecision")
         if x["lower_pct"] >= 0.45 and x["body_pct"] <= 0.45: patterns.append("Lower-wick rejection")
         if x["upper_pct"] >= 0.45 and x["body_pct"] <= 0.45: patterns.append("Upper-wick rejection")
-    # 2/3 candle direction and strength
-    if all(x["bull"] for x in f): bull += 2
-    if all(x["bear"] for x in f): bear += 2
+
+    # Directional participation: two recent candles are useful confirmation; three are context,
+    # not a mandatory trigger (avoids entering only after the move is already mature).
     if sum(x["bull"] for x in f[-2:]) == 2: bull += 1
     if sum(x["bear"] for x in f[-2:]) == 2: bear += 1
-    # Engulfing using the last two candles
+    all_bull=all(x["bull"] for x in f); all_bear=all(x["bear"] for x in f)
+    if all_bull: bull += 1; patterns.append("3-candle bullish run")
+    if all_bear: bear += 1; patterns.append("3-candle bearish run")
+
+    # Engulfing using the last two candles.
     a,b=last3[-2],last3[-1]; fa,fb=f[-2],f[-1]
     if fa["bear"] and fb["bull"] and float(b["open"]) <= float(a["close"]) and float(b["close"]) >= float(a["open"]):
         patterns.append("Bullish engulfing"); bull += 2
     if fa["bull"] and fb["bear"] and float(b["open"]) >= float(a["close"]) and float(b["close"]) <= float(a["open"]):
         patterns.append("Bearish engulfing"); bear += 2
-    # Hammer / shooting-star style rejection
     if fb["lower_pct"] >= 0.5 and fb["body_pct"] >= 0.12 and fb["upper_pct"] <= 0.25:
         patterns.append("Hammer/rejection"); bull += 2
     if fb["upper_pct"] >= 0.5 and fb["body_pct"] >= 0.12 and fb["lower_pct"] <= 0.25:
         patterns.append("Shooting-star/rejection"); bear += 2
-    # Close progression: higher closes/lows vs lower closes/highs
-    closes=[float(x["close"]) for x in last3]
-    highs=[float(x["high"]) for x in last3]; lows=[float(x["low"]) for x in last3]
-    if closes[0] < closes[1] < closes[2] and lows[0] <= lows[1] <= lows[2]: bull += 1
-    if closes[0] > closes[1] > closes[2] and highs[0] >= highs[1] >= highs[2]: bear += 1
-    score=bull-bear
-    direction="CE" if score>0 else "PE" if score<0 else None
-    if score>=4: label="Strong bullish sequence"
-    elif score>=2: label="Bullish sequence"
-    elif score<=-4: label="Strong bearish sequence"
-    elif score<=-2: label="Bearish sequence"
-    else: label="Neutral / mixed sequence"
-    return {"score":int(score), "label":label, "patterns":sorted(set(patterns)), "direction":direction,
-            "bull_points":bull, "bear_points":bear, "reason":"; ".join(sorted(set(patterns))) or "No dominant named pattern; sequence direction used."}
+
+    closes=[float(x["close"]) for x in last3]; highs=[float(x["high"]) for x in last3]; lows=[float(x["low"]) for x in last3]
+    bull_structure = highs[0] <= highs[1] <= highs[2] and lows[0] <= lows[1] <= lows[2]
+    bear_structure = highs[0] >= highs[1] >= highs[2] and lows[0] >= lows[1] >= lows[2]
+    if bull_structure: bull += 2; patterns.append("Higher-high / higher-low structure")
+    if bear_structure: bear += 2; patterns.append("Lower-high / lower-low structure")
+
+    # Exhaustion warning: three same-colour candles with expanding bodies/ranges and a weak final
+    # close/wick can mean the breakout is already stretched.  Penalise rather than blindly reward.
+    bodies=[x["body_pct"] for x in f]; ranges=[x["range"] for x in f]
+    exhaustion=False
+    if all_bull and ranges[2] > ranges[0]*1.35 and (f[-1]["upper_pct"] > 0.28 or f[-1]["close_pos"] < 0.72):
+        exhaustion=True; bull=max(0,bull-2); patterns.append("Bullish run exhaustion risk")
+    if all_bear and ranges[2] > ranges[0]*1.35 and (f[-1]["lower_pct"] > 0.28 or f[-1]["close_pos"] > 0.28):
+        exhaustion=True; bear=max(0,bear-2); patterns.append("Bearish run exhaustion risk")
+
+    score=bull-bear; direction="CE" if score>0 else "PE" if score<0 else None
+    if score>=4: label="Strong bullish structure"
+    elif score>=2: label="Bullish structure"
+    elif score<=-4: label="Strong bearish structure"
+    elif score<=-2: label="Bearish structure"
+    else: label="Neutral / mixed structure"
+    same_colour_count=3 if (all_bull or all_bear) else (2 if (sum(x["bull"] for x in f[-2:])==2 or sum(x["bear"] for x in f[-2:])==2) else 0)
+    return {"score":int(score),"label":label,"patterns":sorted(set(patterns)),"direction":direction,
+            "bull_points":bull,"bear_points":bear,"exhaustion":exhaustion,"same_colour_count":same_colour_count,
+            "bull_structure":bull_structure,"bear_structure":bear_structure,
+            "reason":"; ".join(sorted(set(patterns))) or "No dominant pattern; structure is mixed."}
 
 
 _MOOD_CACHE = {}
@@ -4573,8 +4597,11 @@ def _detect_breakout(candles, lookback, strict=True):
         momentum_aligned = (rsi > 55) if direction == "CE" else (rsi < 45)
 
     candle_seq = _candle_sequence(candles)
-    # Broad mood is added in scan/annotation; here we only enforce local candle alignment.
-    candle_aligned = candle_seq.get("direction") == direction and candle_seq.get("score",0) >= 1
+    # Three same-colour candles are NOT required.  Confirmation comes from structure/pattern agreement
+    # plus the breakout candle's own strong close.  Explicit exhaustion blocks a late chase.
+    candle_aligned = (candle_seq.get("direction") in (None, direction) and
+                      candle_seq.get("score",0) * (1 if direction=="CE" else -1) >= 0 and
+                      not candle_seq.get("exhaustion", False))
 
     # Composite: breakout size is the base signal; trend agreement and momentum each scale it up,
     # a counter-trend breakout gets heavily discounted (those fail far more often intraday), relative
@@ -5276,7 +5303,9 @@ def autotrade_backtest():
         cseq=r.get("candle_sequence",{}); broad_prefix=[x for x in broad_candles if str(x.get("date")) <= str(bar.get("date"))][-100:]; mood=_market_mood(symbol,window,broad_prefix)
         aligned=(r["direction"]=="CE" and mood["score"]>=1) or (r["direction"]=="PE" and mood["score"]<=-1)
         if r.get("trend_aligned") is not True or r.get("momentum_aligned") is not True or not r.get("volume_confirmed"): continue
-        if cseq.get("direction")!=r["direction"] or cseq.get("score",0)<1: continue
+        # Do not wait for 3 green/red candles: breakout is the trigger; candle structure confirms it.
+        directional_score = cseq.get("score",0) if r["direction"]=="CE" else -cseq.get("score",0)
+        if cseq.get("exhaustion",False) or directional_score < 0 or not r.get("candle_aligned",False): continue
         if not aligned: continue
         open_t={"symbol":symbol,"direction":r["direction"],"entry":px,"entry_time":str(bar.get("date")),"stop":max(r["atr"]*1.0,px*0.002),"target":max(r["atr"]*1.8,px*0.003),"score":r["score"],"candle_label":cseq.get("label"),"mood":mood.get("label")}
     total=len(trades); winrate=round(wins/total*100,1) if total else 0
@@ -5286,7 +5315,16 @@ def autotrade_backtest():
     for t in trades:
         running += float(t.get("pnl_points",0)); peak=max(peak,running); max_dd=max(max_dd,peak-running)
     pf=round(gains/losses_abs,2) if losses_abs else (999.0 if gains else 0.0)
-    return jsonify({"ok":True,"symbol":symbol,"interval":interval,"days":days,"lookback":lookback,"trades":trades[-100:],"summary":{"trades":total,"wins":wins,"losses":losses,"win_rate":winrate,"net_points":round(equity,2),"avg_points":avg,"profit_factor":pf,"max_drawdown_points":round(max_dd,2)},"note":"Underlying-point walk-forward backtest using the same breakout, candle-sequence and market-mood filters. It is not option-premium P&L and is not a guarantee of future performance."})
+    side_stats={}
+    regime_stats={}
+    for t in trades:
+        for bucket,key in ((side_stats,t.get("direction") or "Unknown"),(regime_stats,t.get("mood") or "Unknown")):
+            d=bucket.setdefault(key,{"trades":0,"wins":0,"net_points":0.0})
+            d["trades"]+=1; d["wins"]+=1 if float(t.get("pnl_points",0))>=0 else 0; d["net_points"]+=float(t.get("pnl_points",0))
+    for bucket in (side_stats,regime_stats):
+        for d in bucket.values():
+            d["win_rate"]=round(100*d["wins"]/d["trades"],1) if d["trades"] else 0; d["net_points"]=round(d["net_points"],2)
+    return jsonify({"ok":True,"symbol":symbol,"interval":interval,"days":days,"lookback":lookback,"trades":trades[-100:],"summary":{"trades":total,"wins":wins,"losses":losses,"win_rate":winrate,"net_points":round(equity,2),"avg_points":avg,"profit_factor":pf,"max_drawdown_points":round(max_dd,2),"side_stats":side_stats,"regime_stats":regime_stats},"note":"Underlying-point strategy backtest using the same breakout, candle-structure and market-mood filters. Three same-colour candles are context, not a mandatory entry trigger. It is not option-premium P&L and is not a guarantee of future performance."})
 
 
 def _simulate_signal_segment(symbol, candles, broad_candles, lookback, stop_atr, target_atr, strict=True):
@@ -5313,7 +5351,8 @@ def _simulate_signal_segment(symbol, candles, broad_candles, lookback, stop_atr,
         cseq=r.get("candle_sequence",{}); mood=_market_mood(symbol,window,broad_prefix)
         aligned=(r["direction"]=="CE" and mood["score"]>=1) or (r["direction"]=="PE" and mood["score"]<=-1)
         if r.get("trend_aligned") is not True or r.get("momentum_aligned") is not True or not r.get("volume_confirmed"): continue
-        if cseq.get("direction")!=r["direction"] or cseq.get("score",0)<1 or not aligned: continue
+        directional_score = cseq.get("score",0) if r["direction"]=="CE" else -cseq.get("score",0)
+        if cseq.get("exhaustion",False) or directional_score < 0 or not r.get("candle_aligned",False) or not aligned: continue
         atr=max(float(r.get("atr") or 0), px*0.001)
         open_t={"symbol":symbol,"direction":r["direction"],"entry":px,"entry_time":str(bar.get("date")),"stop":max(atr*stop_atr,px*0.001),"target":max(atr*target_atr,px*0.0015),"score":r["score"],"candle_label":cseq.get("label"),"mood":mood.get("label")}
     return {"trades":trades,"net_points":round(equity,2),"max_drawdown":round(max_dd,2),"wins":sum(1 for t in trades if t["pnl_points"]>=0),"losses":sum(1 for t in trades if t["pnl_points"]<0)}
