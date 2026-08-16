@@ -798,6 +798,7 @@
     </div>
     <div class="row" style="margin-top:10px;">
       <label class="inline">Min breakout size (x ATR) <input type="number" id="autoMinScore" value="0.5" min="0.1" max="5" step="0.1" /></label>
+      <label class="inline">Min setup quality <input type="number" id="autoMinQuality" value="70" min="0" max="100" step="5" /></label>
       <label class="inline">Square-off time (24h) <input type="text" id="autoSquareOff" value="15:15" style="width:70px;" /></label>
       <button class="secondary small-btn" onclick="saveAutoConfig()">Save settings</button>
     </div>
@@ -813,13 +814,14 @@
       <label class="inline"><input type="checkbox" id="autoBtRetest" checked /> Retest entry</label>
       <label class="inline">Wait <input type="number" id="autoBtWait" value="2" min="1" max="4" style="width:48px;" /></label>
       <label class="inline">Tol ATR <input type="number" id="autoBtTol" value="0.20" min="0" max="1" step="0.05" style="width:58px;" /></label>
+      <label class="inline">Min quality <input type="number" id="autoBtQuality" value="70" min="0" max="100" step="5" style="width:58px;" /></label>
       <button class="secondary small-btn" onclick="runAutoBacktest()">Run backtest</button>
       <span class="loading" id="autoBtStatus"></span>
     </div>
     <div id="autoBtSummary" class="row" style="margin-top:12px; gap:12px;"></div>
     <div id="autoBtBreakdown" class="legend" style="margin-top:8px;"></div>
-    <div id="autoBtNote" class="legend" style="margin-top:8px;">Breakout → retest → confirmation. Signal is confirmed on a completed candle; entry is next candle OPEN; stop/target use intrabar HIGH/LOW. Results are underlying points, not option-premium P&amp;L.</div>
-    <table id="autoBtTable" style="display:none; margin-top:12px;"><thead><tr><th>Signal/Entry time</th><th>Side</th><th>Entry</th><th>Exit</th><th>Points</th><th>Exit reason</th><th>Setup</th><th>Candles</th><th>Mood</th></tr></thead><tbody id="autoBtBody"></tbody></table>
+    <div id="autoBtNote" class="legend" style="margin-top:8px;">Breakout → retest → confirmation with setup-quality filtering. Signal is confirmed on a completed candle; entry is next candle OPEN; stop/target use intrabar HIGH/LOW. Results are underlying points, not option-premium P&amp;L.</div>
+    <table id="autoBtTable" style="display:none; margin-top:12px;"><thead><tr><th>Signal/Entry time</th><th>Side</th><th>Entry</th><th>Exit</th><th>Points</th><th>Exit reason</th><th>Quality</th><th>Failure diagnostics</th><th>Setup</th><th>Candles</th><th>Mood</th></tr></thead><tbody id="autoBtBody"></tbody></table>
     <div class="panel" style="margin-top:14px; background:rgba(91,141,239,.04);">
       <h3 style="margin-top:0;">🔬 Walk-forward validation</h3>
       <div class="legend">Parameters are selected on earlier data and tested only on the next unseen period. This is the preferred validation before Live mode.</div>
@@ -830,7 +832,7 @@
         <span class="loading" id="autoWfStatus"></span>
       </div>
       <div id="autoWfSummary" class="row" style="margin-top:10px;gap:10px;"></div>
-      <table id="autoWfTable" style="display:none;margin-top:10px;"><thead><tr><th>Fold</th><th>Train</th><th>Test</th><th>Lookback</th><th>SL ATR</th><th>Target ATR</th><th>Trades</th><th>Win %</th><th>Net pts</th><th>Max DD</th></tr></thead><tbody id="autoWfBody"></tbody></table>
+      <table id="autoWfTable" style="display:none;margin-top:10px;"><thead><tr><th>Fold</th><th>Train</th><th>Test</th><th>Lookback</th><th>SL ATR</th><th>Target ATR</th><th>Min Quality</th><th>Trades</th><th>Win %</th><th>Net pts</th><th>Max DD</th></tr></thead><tbody id="autoWfBody"></tbody></table>
     </div>
   </div>
 
@@ -2860,6 +2862,7 @@ async function saveAutoConfig() {
     trail_after_pct: Number(document.getElementById("autoTrailAfter").value),
     trail_giveback_pct: Number(document.getElementById("autoTrailGiveback").value),
     min_breakout_score: Number(document.getElementById("autoMinScore").value),
+    min_entry_quality: Number(document.getElementById("autoMinQuality").value),
     retest_enabled: document.getElementById("autoRetestEnabled").checked,
     retest_max_wait_bars: Number(document.getElementById("autoRetestWait").value),
     retest_tolerance_atr: Number(document.getElementById("autoRetestTol").value),
@@ -3121,16 +3124,18 @@ async function runAutoBacktest() {
       retest_enabled:document.getElementById("autoBtRetest").checked,
       retest_max_wait_bars:Number(document.getElementById("autoBtWait").value)||2,
       retest_tolerance_atr:Number(document.getElementById("autoBtTol").value)||0.20,
-      retest_require_confirmation:true
+      retest_require_confirmation:true,
+      min_entry_quality:Number(document.getElementById("autoBtQuality").value)||70
     })});
     const d=await r.json(); if(d.error){status.textContent="Error";alert(d.error);return;}
     const s=d.summary||{};
     document.getElementById("autoBtSummary").innerHTML=`<span class="pill ok">Trades ${s.trades??0}</span><span class="pill ${s.win_rate>=50?"ok":"warn"}">Win ${s.win_rate??0}%</span><span class="pill ${s.net_points>=0?"ok":"bad"}">Net ${s.net_points??0} pts</span><span class="pill">PF ${s.profit_factor??0}</span><span class="pill">Max DD ${s.max_drawdown_points??0} pts</span>`;
     const sideTxt=Object.entries(s.side_stats||{}).map(([k,v])=>`${k}: ${v.trades} trades, ${v.win_rate}% win, ${v.net_points} pts`).join(" | ");
     const regimeTxt=Object.entries(s.regime_stats||{}).map(([k,v])=>`${k}: ${v.trades} trades, ${v.win_rate}% win, ${v.net_points} pts`).join(" | ");
-    document.getElementById("autoBtBreakdown").innerHTML=`<b>Direction check:</b> ${sideTxt||"—"}<br><b>Regime check:</b> ${regimeTxt||"—"}<br><span style="opacity:.85">Entry timing is breakout → retest → confirmation, then next candle OPEN. Intrabar stop/target uses HIGH/LOW; same-bar stop+target is counted as stop first.</span>`;
+    const qTxt=Object.entries(s.setup_quality_stats||{}).map(([k,v])=>`${k}: ${v.trades} trades, ${v.win_rate}% win, ${v.net_points} pts`).join(" | ");
+    document.getElementById("autoBtBreakdown").innerHTML=`<b>Direction check:</b> ${sideTxt||"—"}<br><b>Regime check:</b> ${regimeTxt||"—"}<br><b>Quality check:</b> ${qTxt||"—"}<br><span style="opacity:.85">Setup quality is a ranking/filter, not a probability. Entry is breakout → retest → confirmation, then next candle OPEN. Intrabar stop/target uses HIGH/LOW; same-bar stop+target is counted as stop first.</span>`;
     const table=document.getElementById("autoBtTable"), body=document.getElementById("autoBtBody");
-    body.innerHTML=(d.trades||[]).map(t=>`<tr><td>${t.entry_time||"—"}</td><td>${t.direction}</td><td>${t.entry}</td><td>${t.exit}</td><td class="${t.pnl_points>=0?"buy":"sell"}">${t.pnl_points}</td><td>${t.exit_reason}</td><td>${t.setup||"—"}</td><td>${t.candle_label||"—"}</td><td>${t.mood||"—"}</td></tr>`).join("");
+    body.innerHTML=(d.trades||[]).map(t=>`<tr><td>${t.entry_time||"—"}</td><td>${t.direction}</td><td>${t.entry}</td><td>${t.exit}</td><td class="${t.pnl_points>=0?"buy":"sell"}">${t.pnl_points}</td><td>${t.exit_reason}</td><td>${t.setup_quality?`${t.setup_quality.score}/100 (${t.setup_quality.bucket})`:"—"}</td><td>${t.failure_diagnostics||"—"}</td><td>${t.setup||"—"}</td><td>${t.candle_label||"—"}</td><td>${t.mood||"—"}</td></tr>`).join("");
     table.style.display=d.trades&&d.trades.length?"table":"none"; status.textContent="Done";
     document.getElementById("autoBtNote").textContent=d.note||"Backtest completed.";
   } catch(e){status.textContent="Failed";alert("Backtest request failed: "+e);}
