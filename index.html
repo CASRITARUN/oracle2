@@ -796,6 +796,7 @@
       <span class="loading" id="autoBtStatus"></span>
     </div>
     <div id="autoBtSummary" class="row" style="margin-top:12px; gap:12px;"></div>
+    <div id="autoBtBreakdown" class="legend" style="margin-top:8px;"></div>
     <div id="autoBtNote" class="legend" style="margin-top:8px;">Uses the same breakout + candle + mood filters. Results are underlying points, not fabricated option-premium P&amp;L.</div>
     <table id="autoBtTable" style="display:none; margin-top:12px;"><thead><tr><th>Entry</th><th>Side</th><th>Entry</th><th>Exit</th><th>Points</th><th>Exit reason</th><th>Candles</th><th>Mood</th></tr></thead><tbody id="autoBtBody"></tbody></table>
     <div class="panel" style="margin-top:14px; background:rgba(91,141,239,.04);">
@@ -3087,6 +3088,9 @@ async function runAutoBacktest() {
     const d=await r.json(); if(d.error){status.textContent="Error";alert(d.error);return;}
     const s=d.summary||{};
     document.getElementById("autoBtSummary").innerHTML=`<span class="pill ok">Trades ${s.trades??0}</span><span class="pill ${s.win_rate>=50?"ok":"warn"}">Win ${s.win_rate??0}%</span><span class="pill ${s.net_points>=0?"ok":"bad"}">Net ${s.net_points??0} pts</span><span class="pill">PF ${s.profit_factor??0}</span><span class="pill">Max DD ${s.max_drawdown_points??0} pts</span>`;
+    const sideTxt=Object.entries(s.side_stats||{}).map(([k,v])=>`${k}: ${v.trades} trades, ${v.win_rate}% win, ${v.net_points} pts`).join(" | ");
+    const regimeTxt=Object.entries(s.regime_stats||{}).map(([k,v])=>`${k}: ${v.trades} trades, ${v.win_rate}% win, ${v.net_points} pts`).join(" | ");
+    document.getElementById("autoBtBreakdown").innerHTML=`<b>Direction check:</b> ${sideTxt||"—"}<br><b>Regime check:</b> ${regimeTxt||"—"}<br><span style="opacity:.85">3 same-colour candles are context only; the prior-range breakout is the trigger. Exhausted 3-candle runs are filtered rather than chased.</span>`;
     const table=document.getElementById("autoBtTable"), body=document.getElementById("autoBtBody");
     body.innerHTML=(d.trades||[]).map(t=>`<tr><td>${t.entry_time||"—"}</td><td>${t.direction}</td><td>${t.entry}</td><td>${t.exit}</td><td class="${t.pnl_points>=0?"buy":"sell"}">${t.pnl_points}</td><td>${t.exit_reason}</td><td>${t.candle_label||"—"}</td><td>${t.mood||"—"}</td></tr>`).join("");
     table.style.display=d.trades&&d.trades.length?"table":"none"; status.textContent="Done";
