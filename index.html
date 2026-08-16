@@ -820,6 +820,7 @@
     </div>
     <div id="autoBtSummary" class="row" style="margin-top:12px; gap:12px;"></div>
     <div id="autoBtBreakdown" class="legend" style="margin-top:8px;"></div>
+    <div class="legend">Quality score (0–100) is a transparent setup filter built from breakout strength, retest/confirmation, trend, momentum, volume, candle structure, market mood and exhaustion/whipsaw risk. It is a ranking/filter, not a probability of profit.</div>
     <div id="autoBtNote" class="legend" style="margin-top:8px;">Breakout → retest → confirmation with setup-quality filtering. Signal is confirmed on a completed candle; entry is next candle OPEN; stop/target use intrabar HIGH/LOW. Results are underlying points, not option-premium P&amp;L.</div>
     <table id="autoBtTable" style="display:none; margin-top:12px;"><thead><tr><th>Signal/Entry time</th><th>Side</th><th>Entry</th><th>Exit</th><th>Points</th><th>Exit reason</th><th>Quality</th><th>Failure diagnostics</th><th>Setup</th><th>Candles</th><th>Mood</th></tr></thead><tbody id="autoBtBody"></tbody></table>
     <div class="panel" style="margin-top:14px; background:rgba(91,141,239,.04);">
@@ -871,7 +872,7 @@
       <span class="legend">Scores update every scan cycle — use "Recheck" on a row for its score right now, or "Dismiss" to hide a stale row until the next scan.</span>
     </div>
     <table id="autoScanTable" style="margin-top:12px; display:none;">
-      <thead><tr><th>Symbol</th><th>Direction</th><th>Detected</th><th>Confidence</th><th>Score</th><th>Setup</th><th>Mood</th><th>Candles</th><th>Trend</th><th>RSI</th><th>Volume</th><th>Reasoning</th><th colspan="2"></th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Direction</th><th>Detected</th><th>Confidence</th><th>Score</th><th>Quality</th><th>Setup</th><th>Mood</th><th>Candles</th><th>Trend</th><th>RSI</th><th>Volume</th><th>Reasoning</th><th colspan="2"></th></tr></thead>
       <tbody id="autoScanBody"></tbody>
     </table>
     <div class="legend" id="autoScanEmpty">No confirmed breakout → retest → confirmation candidates yet — click "Scan now" or arm the loop above.</div>
@@ -3022,6 +3023,7 @@ function renderAutoScanTable(candidates, mode) {
       <td style="font-size:12px; color:var(--muted);">${detectedTime}</td>
       <td><span class="pill ${confClass}">${c.confidence || "—"}</span></td>
       <td>${c.score}</td>
+      <td>${c.setup_quality ? `${c.setup_quality.score}/100 (${c.setup_quality.bucket})` : "—"}</td>
       <td>${c.retest_enabled ? `<span class="pill ok">RETEST + CONFIRM</span>` : `<span class="pill warn">BREAKOUT</span>`}</td>
       <td>${c.market_mood ? `<span class="pill ${c.mood_aligned ? "ok" : "warn"}">${c.market_mood.label}</span>` : "—"}</td>
       <td style="font-size:11px; max-width:170px;">${c.candle_sequence ? `${c.candle_sequence.label}<br><span class="legend">${(c.candle_sequence.patterns||[]).slice(0,2).join(", ")}</span>` : "—"}</td>
@@ -3150,13 +3152,14 @@ async function runAutoWalkForward() {
       retest_enabled:document.getElementById("autoBtRetest").checked,
       retest_max_wait_bars:Number(document.getElementById("autoBtWait").value)||2,
       retest_tolerance_atr:Number(document.getElementById("autoBtTol").value)||0.20,
-      retest_require_confirmation:true
+      retest_require_confirmation:true,
+      min_entry_quality:Number(document.getElementById("autoBtQuality").value)||70
     })});
     const d=await r.json(); if(d.error){status.textContent="Error";alert(d.error);return;}
     const s=d.summary||{};
     document.getElementById("autoWfSummary").innerHTML=`<span class="pill ok">Out-of-sample trades ${s.trades??0}</span><span class="pill ${s.win_rate>=50?"ok":"warn"}">OOS Win ${s.win_rate??0}%</span><span class="pill ${s.net_points>=0?"ok":"bad"}">OOS Net ${s.net_points??0} pts</span>`;
     const body=document.getElementById("autoWfBody");
-    body.innerHTML=(d.folds||[]).map(x=>`<tr><td>${x.fold}</td><td>${x.train_bars}</td><td>${x.test_bars}</td><td>${x.lookback}</td><td>${x.stop_atr}</td><td>${x.target_atr}</td><td>${x.trades}</td><td>${x.win_rate}%</td><td class="${x.net_points>=0?"buy":"sell"}">${x.net_points}</td><td>${x.max_drawdown}</td></tr>`).join("");
+    body.innerHTML=(d.folds||[]).map(x=>`<tr><td>${x.fold}</td><td>${x.train_bars}</td><td>${x.test_bars}</td><td>${x.lookback}</td><td>${x.stop_atr}</td><td>${x.target_atr}</td><td>${x.min_entry_quality??70}</td><td>${x.trades}</td><td>${x.win_rate}%</td><td class="${x.net_points>=0?"buy":"sell"}">${x.net_points}</td><td>${x.max_drawdown}</td></tr>`).join("");
     document.getElementById("autoWfTable").style.display=(d.folds||[]).length?"table":"none";
     status.textContent="Done";
   } catch(e){status.textContent="Failed";alert("Walk-forward request failed: "+e);}
