@@ -62,6 +62,7 @@ from typing import List, Optional, Callable, Dict, Any, Tuple
 API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
 API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
 REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
+
 # If your network does TLS interception (common on office/government networks — you'll see
 # "self-signed certificate in certificate chain" errors), set this env var to allow the news
 # feature specifically to fall back to an unverified request. This does NOT affect Kite API calls
@@ -4159,6 +4160,11 @@ AUTOTRADE_DEFAULTS = {
     "_fo_scan_cursor": 0,             # internal: rotation position through the full F&O list
     "candle_interval": "5minute",
     "breakout_lookback": 20,          # candles in the Donchian channel
+    # Breakout -> retest -> confirmation timing. A breakout alone is not chased.
+    "retest_enabled": True,
+    "retest_max_wait_bars": 2,
+    "retest_tolerance_atr": 0.20,
+    "retest_require_confirmation": True,
     "poll_seconds": 20,
     "max_trades_per_day": 3,
     "max_concurrent_positions": 1,    # how many auto-trade positions can be open AT ONCE
@@ -4220,6 +4226,7 @@ CONFIGURABLE_AUTOTRADE_KEYS = (
     "exit_mode", "hard_stop_pct",
     "sl_mode", "sl_pct_of_premium", "sl_points", "target_mode", "target_pct_of_premium", "target_points",
     "trail_after_pct", "trail_giveback_pct", "min_breakout_score", "strict_breakout_filters",
+    "retest_enabled", "retest_max_wait_bars", "retest_tolerance_atr", "retest_require_confirmation",
     "square_off_time", "use_market_mood", "require_candle_alignment", "min_candle_score",
     "market_mood_min_score", "reversal_exit_score",
 )
@@ -4641,6 +4648,73 @@ def _detect_breakout(candles, lookback, strict=True):
     }
 
 
+
+def _detect_breakout_retest(candles, lookback, strict=True, max_wait_bars=2, tolerance_atr=0.20,
+                            require_confirmation=True):
+    """Detect a completed BREAKOUT -> RETEST -> CONFIRMATION setup.
+
+    Breakout is established on an earlier completed candle. A later candle must
+    retest the broken level and hold it, and the latest completed candle confirms
+    the direction. No future candle is used. Historical backtests enter on the
+    next candle OPEN.
+    """
+    n=len(candles)
+    max_wait_bars=max(1,min(int(max_wait_bars),4))
+    tolerance_atr=max(float(tolerance_atr),0.0)
+    if n < lookback + 4:
+        return None
+
+    confirmation_idx=n-1
+    first_breakout_idx=max(lookback+1, confirmation_idx-max_wait_bars-1)
+
+    for breakout_idx in range(first_breakout_idx, confirmation_idx-1):
+        base=_detect_breakout(candles[:breakout_idx+1],lookback,strict=strict)
+        if not base:
+            continue
+        direction=base["direction"]
+        level=float(base["breakout_level"])
+        atr=max(float(base.get("atr") or 0.0),1e-9)
+        tolerance=atr*tolerance_atr
+
+        for retest_idx in range(breakout_idx+1,min(confirmation_idx,breakout_idx+max_wait_bars+1)):
+            rb=candles[retest_idx]
+            rh=float(rb["high"]); rl=float(rb["low"]); rc=float(rb["close"]); ro=float(rb.get("open",rc))
+            rng=max(rh-rl,1e-9)
+            if direction=="CE":
+                touched=rl <= level+tolerance
+                held=rc > level
+                rejection=(rc >= ro) or ((rc-rl)/rng >= 0.55)
+            else:
+                touched=rh >= level-tolerance
+                held=rc < level
+                rejection=(rc <= ro) or ((rh-rc)/rng >= 0.55)
+            if not (touched and held and rejection):
+                continue
+
+            cb=candles[confirmation_idx]
+            ch=float(cb["high"]); cl=float(cb["low"]); cc=float(cb["close"]); co=float(cb.get("open",cc))
+            if direction=="CE":
+                confirmation_ok=cc>level and cc>=co and ch>=rh
+            else:
+                confirmation_ok=cc<level and cc<=co and cl<=rl
+            if require_confirmation and not confirmation_ok:
+                continue
+
+            seq=_candle_sequence(candles)
+            score=round(float(base["score"])*1.10*(1.10 if confirmation_ok else 1.0),2)
+            result=dict(base)
+            result.update({
+                "score":score, "last_close":round(cc,2),
+                "retest_enabled":True, "breakout_bar_index":breakout_idx,
+                "retest_bar_index":retest_idx, "confirmation_bar_index":confirmation_idx,
+                "retest_level":round(level,2), "retest_tolerance":round(tolerance,2),
+                "retest_low":round(rl,2), "retest_high":round(rh,2), "retest_close":round(rc,2),
+                "confirmation_close":round(cc,2), "confirmation_ok":bool(confirmation_ok),
+                "candle_sequence":seq, "entry_timing":"next_bar_open",
+            })
+            return result
+    return None
+
 def _annotate_candidate(result, symbol, lookback):
     """Fills in symbol, timestamp, confidence bucket, and the plain-English reasoning string for a
     raw _detect_breakout() result. Shared by scan_breakouts (full scan) and the single-symbol
@@ -4671,10 +4745,15 @@ def _annotate_candidate(result, symbol, lookback):
     seq = result.get("candle_sequence", {})
     candle_note = f"; candles: {seq.get('label','unknown')} ({', '.join(seq.get('patterns',[])[:3])})"
     mood_note = f"; market mood: {mood.get('label','Unknown')} (score {mood.get('score',0)})"
+    timing_note = (
+        f"; setup = BREAKOUT -> RETEST -> CONFIRMATION; retest close {result.get('retest_close')} "
+        f"held {result.get('retest_level')} within ±{result.get('retest_tolerance')} points; entry = next candle OPEN"
+        if result.get("retest_enabled") else "; setup = BREAKOUT"
+    )
     result["reasoning"] = (
         f"{symbol}: price {direction_word} its {lookback}-candle range ({result['breakout_level']}), "
         f"now at {result['last_close']} -- {result['breakout_size_atr']}x ATR raw move, {close_note}; "
-        f"{trend_note}; {momentum_note}; {vol_note}{whipsaw_note}{candle_note}{mood_note}. Composite score {result['score']}."
+        f"{trend_note}; {momentum_note}; {vol_note}{whipsaw_note}{candle_note}{mood_note}{timing_note}. Composite score {result['score']}."
     )
     return result
 
@@ -4693,7 +4772,15 @@ def scan_breakouts(universe, interval, lookback, strict=True):
         if err:
             errors.append(f"{symbol}: {err}")
             continue
-        result = _detect_breakout(candles, lookback, strict=strict)
+        state = load_autotrade_state()
+        if state.get("retest_enabled", True):
+            result = _detect_breakout_retest(
+                candles, lookback, strict=strict,
+                max_wait_bars=state.get("retest_max_wait_bars", 2),
+                tolerance_atr=state.get("retest_tolerance_atr", 0.20),
+                require_confirmation=state.get("retest_require_confirmation", True))
+        else:
+            result = _detect_breakout(candles, lookback, strict=strict)
         if not result:
             continue
         candidates.append(_annotate_candidate(result, symbol, lookback))
@@ -4787,6 +4874,32 @@ def _build_autotrade_order_impl(symbol, direction, capital_per_trade, state=None
         "lots": lots, "quantity": lots * lot_size, "premium": premium, "spot": spot,
         "risk_sizing": sizing,
     }, None
+
+
+def _revalidate_autotrade_candidate(candidate, state):
+    """Re-check the complete entry setup immediately before committing an entry.
+    Prevents a stale scan row from turning into a late breakout chase."""
+    if not state.get("retest_enabled", True):
+        return True, None
+    try:
+        candles, err = _fetch_recent_intraday(candidate["symbol"], state.get("candle_interval","5minute"),
+                                              state.get("breakout_lookback",20))
+        if err:
+            return False, err
+        fresh = _detect_breakout_retest(
+            candles, state.get("breakout_lookback",20),
+            strict=state.get("strict_breakout_filters",True),
+            max_wait_bars=state.get("retest_max_wait_bars",2),
+            tolerance_atr=state.get("retest_tolerance_atr",0.20),
+            require_confirmation=state.get("retest_require_confirmation",True))
+        if not fresh:
+            return False, "Setup is stale: the completed breakout -> retest -> confirmation sequence is no longer valid."
+        if fresh.get("direction") != candidate.get("direction"):
+            return False, f"Setup direction changed from {candidate.get('direction')} to {fresh.get('direction')}."
+        candidate.update(fresh)
+        return True, None
+    except Exception as e:
+        return False, f"Entry revalidation failed: {e}"
 
 
 def _execute_autotrade_entry(candidate, state):
@@ -5066,6 +5179,9 @@ def _autotrade_loop():
                                            and c.get("momentum_aligned") is True
                                            and c["volume_confirmed"]
                                            and (not state.get("require_candle_alignment", True) or c.get("candle_aligned") is True)
+                                           and (c.get("candle_sequence", {}).get("score", 0) * (1 if c.get("direction") == "CE" else -1)
+                                                >= int(state.get("min_candle_score", 1)))
+                                           and (not state.get("retest_enabled", True) or c.get("confirmation_ok") is True)
                                            and (not state.get("use_market_mood", True) or c.get("mood_aligned") is True)]
                         best = None
                         for c in auto_qualified:
@@ -5076,15 +5192,21 @@ def _autotrade_loop():
                                 continue
                             if _breakout_still_valid(c["direction"], c["breakout_level"], fresh_order["spot"]) is False:
                                 continue
+                            valid, verr = _revalidate_autotrade_candidate(c, state)
+                            if not valid:
+                                continue
                             best = c
                             break
                         if best:
-                            trade, err = _execute_autotrade_entry(best, state)
-                            if trade:
-                                trades.append(trade)
-                                state["trades_today"] = state.get("trades_today", 0) + 1
-                            else:
-                                state["last_error"] = f"Auto-entry failed for {best['symbol']}: {err}"
+                            if any(t.get("status") == "open" and t.get("symbol") == best.get("symbol") for t in trades):
+                                best = None
+                            if best:
+                                trade, err = _execute_autotrade_entry(best, state)
+                                if trade:
+                                    trades.append(trade)
+                                    state["trades_today"] = state.get("trades_today", 0) + 1
+                                else:
+                                    state["last_error"] = f"Auto-entry failed for {best['symbol']}: {err}"
 
                 if changed:
                     save_autotrade_state(state)
@@ -5222,10 +5344,17 @@ def autotrade_rescan_one():
     candles, err = _fetch_recent_intraday(symbol, state["candle_interval"], state["breakout_lookback"])
     if err:
         return jsonify({"error": err}), 400
-    result = _detect_breakout(candles, state["breakout_lookback"], strict=state.get("strict_breakout_filters", True))
+    if state.get("retest_enabled", True):
+        result = _detect_breakout_retest(
+            candles, state["breakout_lookback"], strict=state.get("strict_breakout_filters", True),
+            max_wait_bars=state.get("retest_max_wait_bars", 2),
+            tolerance_atr=state.get("retest_tolerance_atr", 0.20),
+            require_confirmation=state.get("retest_require_confirmation", True))
+    else:
+        result = _detect_breakout(candles, state["breakout_lookback"], strict=state.get("strict_breakout_filters", True))
     if not result:
         return jsonify({"candidate": None,
-                         "message": f"{symbol} is no longer breaking out -- price has moved back inside its range."})
+                         "message": f"{symbol} has no completed breakout -> retest -> confirmation setup right now."})
     return jsonify({"candidate": _annotate_candidate(result, symbol, state["breakout_lookback"])})
 
 
@@ -5253,109 +5382,184 @@ def autotrade_scan():
 
 @app.route("/api/autotrade/backtest", methods=["POST"])
 def autotrade_backtest():
-    """Walk-forward signal backtest on the UNDERLYING. It intentionally reports underlying points,
-    not fabricated option-premium P&L, because historical option-chain candles/IV must be available
-    for a defensible option-P&L backtest. Uses the same breakout + candle sequence + mood filters."""
-    if not require_session():
-        return jsonify({"error":"not_logged_in"}),401
-    body=request.json or {}; symbol=str(body.get("symbol") or "NIFTY").upper()
-    interval=str(body.get("interval") or "5minute"); days=max(2,min(int(body.get("days",20)),60))
-    lookback=max(5,min(int(body.get("lookback",20)),100)); strict=bool(body.get("strict",True))
+    """Underlying backtest with realistic entry timing and intrabar OHLC exits.
+
+    Signal: completed breakout -> retest -> confirmation.
+    Entry: next candle OPEN.
+    Exit: stop/target use HIGH/LOW; when both are touched in one OHLC candle,
+    stop is assumed first conservatively because OHLC has no intrabar sequence.
+    """
+    if not require_session(): return jsonify({"error":"not_logged_in"}),401
+    body=request.json or {}
+    symbol=str(body.get("symbol") or "NIFTY").upper()
+    interval=str(body.get("interval") or "5minute")
+    days=max(2,min(int(body.get("days",20)),60))
+    lookback=max(5,min(int(body.get("lookback",20)),100))
+    strict=bool(body.get("strict",True))
+    retest_enabled=bool(body.get("retest_enabled",True))
+    max_wait=max(1,min(int(body.get("retest_max_wait_bars",2)),4))
+    tolerance=float(body.get("retest_tolerance_atr",0.20))
+    require_confirmation=bool(body.get("retest_require_confirmation",True))
     token,err=resolve_token_for_symbol(symbol)
     if err: return jsonify({"error":err}),400
     try:
         end=now_ist(); start=end-timedelta(days=days)
-        candles=kite.historical_data(token,start,end,interval)
-        broad_candles=candles if symbol=="NIFTY" else kite.historical_data(resolve_token_for_symbol("NIFTY")[0],start,end,interval)
+        candles=kite.historical_data(token,start,end,interval) or []
+        broad=candles if symbol=="NIFTY" else (kite.historical_data(resolve_token_for_symbol("NIFTY")[0],start,end,interval) or [])
     except Exception as e:
         return jsonify({"error":f"Historical data fetch failed: {e}"}),400
-    minbars=max(lookback+30,50); candles=candles or []; broad_candles=broad_candles or []
+    minbars=max(lookback+30,50)
     if len(candles)<minbars: return jsonify({"error":f"Only {len(candles)} candles available; need at least {minbars}."}),400
-    trades=[]; open_t=None; equity=0.0; wins=losses=0
-    for i in range(minbars,len(candles)):
-        window=candles[:i+1]
-        # Manage existing underlying trade first.
-        bar=window[-1]; px=float(bar["close"])
+
+    trades=[]; open_t=None; equity=0.0; wins=losses=0; i=minbars
+    while i<len(candles):
+        bar=candles[i]
         if open_t:
+            hi=float(bar["high"]); lo=float(bar["low"]); close=float(bar["close"])
             if open_t["direction"]=="CE":
-                pnl=px-open_t["entry"]
-                adverse=px<=open_t["entry"]-open_t["stop"]
-                target=px>=open_t["entry"]+open_t["target"]
+                stop_hit=lo<=open_t["stop_price"]; target_hit=hi>=open_t["target_price"]
+                if stop_hit:
+                    exit_px=open_t["stop_price"]; reason="stop" if not target_hit else "stop_and_target_same_bar_conservative"
+                elif target_hit:
+                    exit_px=open_t["target_price"]; reason="target"
+                else: exit_px=close; reason=None
+                pnl=exit_px-open_t["entry"]
             else:
-                pnl=open_t["entry"]-px
-                adverse=px>=open_t["entry"]+open_t["stop"]
-                target=px<=open_t["entry"]-open_t["target"]
-            seq=_candle_sequence(window)
-            broad_prefix=[x for x in broad_candles if str(x.get("date")) <= str(bar.get("date"))][-100:]
-            mood=_market_mood(symbol,window,broad_prefix)
+                stop_hit=hi>=open_t["stop_price"]; target_hit=lo<=open_t["target_price"]
+                if stop_hit:
+                    exit_px=open_t["stop_price"]; reason="stop" if not target_hit else "stop_and_target_same_bar_conservative"
+                elif target_hit:
+                    exit_px=open_t["target_price"]; reason="target"
+                else: exit_px=close; reason=None
+                pnl=open_t["entry"]-exit_px
+
+            window=candles[:i+1]
+            bp=[x for x in broad if str(x.get("date"))<=str(bar.get("date"))][-100:]
+            seq=_candle_sequence(window); mood=_market_mood(symbol,window,bp)
             reversal=(seq["score"]<=-2 and mood["score"]<=-2) if open_t["direction"]=="CE" else (seq["score"]>=2 and mood["score"]>=2)
-            ema9=_ema(np.array([x["close"] for x in window[-60:]],float),9); ema21=_ema(np.array([x["close"] for x in window[-60:]],float),21); rsi=_rsi(np.array([x["close"] for x in window],float),14)
-            trendrev=(ema9<ema21 and rsi<45) if open_t["direction"]=="CE" else (ema9>ema21 and rsi>55)
-            if adverse or target or reversal or trendrev or i==len(candles)-1:
-                reason="stop" if adverse else "target" if target else "candle+mood reversal" if reversal else "trend reversal" if trendrev else "end"
-                equity+=pnl; rec={**open_t,"exit":px,"pnl_points":round(pnl,2),"exit_reason":reason,"exit_time":str(bar.get("date"))}; trades.append(rec)
+            vals=np.array([x["close"] for x in window[-60:]],float); e9=_ema(vals,9); e21=_ema(vals,21)
+            rr=_rsi(np.array([x["close"] for x in window],float),14)
+            trendrev=(e9 is not None and e21 is not None and rr is not None and
+                      ((e9<e21 and rr<45) if open_t["direction"]=="CE" else (e9>e21 and rr>55)))
+            if reason is None and (reversal or trendrev or i==len(candles)-1):
+                reason="candle+mood reversal" if reversal else "trend reversal" if trendrev else "end"
+                exit_px=close
+                pnl=(exit_px-open_t["entry"]) if open_t["direction"]=="CE" else (open_t["entry"]-exit_px)
+            if reason is not None:
+                trades.append({**open_t,"exit":round(exit_px,2),"pnl_points":round(pnl,2),
+                               "exit_reason":reason,"exit_time":str(bar.get("date"))})
+                equity+=pnl
                 if pnl>=0: wins+=1
                 else: losses+=1
                 open_t=None
+                i+=1
                 continue
-        r=_detect_breakout(window,lookback,strict=strict)
-        if not r: continue
-        cseq=r.get("candle_sequence",{}); broad_prefix=[x for x in broad_candles if str(x.get("date")) <= str(bar.get("date"))][-100:]; mood=_market_mood(symbol,window,broad_prefix)
+
+        window=candles[:i+1]
+        r=(_detect_breakout_retest(window,lookback,strict=strict,max_wait_bars=max_wait,
+                                    tolerance_atr=tolerance,require_confirmation=require_confirmation)
+           if retest_enabled else _detect_breakout(window,lookback,strict=strict))
+        if not r or i+1>=len(candles):
+            i+=1; continue
+
+        bp=[x for x in broad if str(x.get("date"))<=str(bar.get("date"))][-100:]
+        mood=_market_mood(symbol,window,bp)
         aligned=(r["direction"]=="CE" and mood["score"]>=1) or (r["direction"]=="PE" and mood["score"]<=-1)
-        if r.get("trend_aligned") is not True or r.get("momentum_aligned") is not True or not r.get("volume_confirmed"): continue
-        # Do not wait for 3 green/red candles: breakout is the trigger; candle structure confirms it.
-        directional_score = cseq.get("score",0) if r["direction"]=="CE" else -cseq.get("score",0)
-        if cseq.get("exhaustion",False) or directional_score < 0 or not r.get("candle_aligned",False): continue
-        if not aligned: continue
-        open_t={"symbol":symbol,"direction":r["direction"],"entry":px,"entry_time":str(bar.get("date")),"stop":max(r["atr"]*1.0,px*0.002),"target":max(r["atr"]*1.8,px*0.003),"score":r["score"],"candle_label":cseq.get("label"),"mood":mood.get("label")}
+        seq=r.get("candle_sequence",{})
+        directional_score=seq.get("score",0) if r["direction"]=="CE" else -seq.get("score",0)
+        if (r.get("trend_aligned") is not True or r.get("momentum_aligned") is not True or
+            not r.get("volume_confirmed") or seq.get("exhaustion",False) or
+            directional_score<1 or not r.get("candle_aligned",False) or not aligned):
+            i+=1; continue
+
+        entry_bar=candles[i+1]; entry=float(entry_bar["open"])
+        atr=max(float(r.get("atr") or 0),entry*0.001)
+        stop_dist=max(atr*1.0,entry*0.001); target_dist=max(atr*1.8,entry*0.0015)
+        open_t={"symbol":symbol,"direction":r["direction"],"entry":round(entry,2),
+                "signal_time":str(bar.get("date")),"entry_time":str(entry_bar.get("date")),
+                "stop":round(stop_dist,2),"target":round(target_dist,2),
+                "stop_price":round(entry-stop_dist if r["direction"]=="CE" else entry+stop_dist,2),
+                "target_price":round(entry+target_dist if r["direction"]=="CE" else entry-target_dist,2),
+                "score":r["score"],"candle_label":seq.get("label"),"mood":mood.get("label"),
+                "setup":"breakout -> retest -> confirmation" if retest_enabled else "breakout"}
+        i+=1
+
     total=len(trades); winrate=round(wins/total*100,1) if total else 0
     avg=round(equity/total,2) if total else 0
-    gains=sum(max(0,float(t.get("pnl_points",0))) for t in trades); losses_abs=sum(max(0,-float(t.get("pnl_points",0))) for t in trades)
-    peak=0.0; max_dd=0.0; running=0.0
+    gains=sum(max(0,float(t["pnl_points"])) for t in trades)
+    losses_abs=sum(max(0,-float(t["pnl_points"])) for t in trades)
+    running=peak=max_dd=0.0
     for t in trades:
-        running += float(t.get("pnl_points",0)); peak=max(peak,running); max_dd=max(max_dd,peak-running)
+        running+=float(t["pnl_points"]); peak=max(peak,running); max_dd=max(max_dd,peak-running)
     pf=round(gains/losses_abs,2) if losses_abs else (999.0 if gains else 0.0)
-    side_stats={}
-    regime_stats={}
+    side_stats={}; regime_stats={}
     for t in trades:
         for bucket,key in ((side_stats,t.get("direction") or "Unknown"),(regime_stats,t.get("mood") or "Unknown")):
             d=bucket.setdefault(key,{"trades":0,"wins":0,"net_points":0.0})
-            d["trades"]+=1; d["wins"]+=1 if float(t.get("pnl_points",0))>=0 else 0; d["net_points"]+=float(t.get("pnl_points",0))
+            d["trades"]+=1; d["wins"]+=int(float(t["pnl_points"])>=0); d["net_points"]+=float(t["pnl_points"])
     for bucket in (side_stats,regime_stats):
         for d in bucket.values():
-            d["win_rate"]=round(100*d["wins"]/d["trades"],1) if d["trades"] else 0; d["net_points"]=round(d["net_points"],2)
-    return jsonify({"ok":True,"symbol":symbol,"interval":interval,"days":days,"lookback":lookback,"trades":trades[-100:],"summary":{"trades":total,"wins":wins,"losses":losses,"win_rate":winrate,"net_points":round(equity,2),"avg_points":avg,"profit_factor":pf,"max_drawdown_points":round(max_dd,2),"side_stats":side_stats,"regime_stats":regime_stats},"note":"Underlying-point strategy backtest using the same breakout, candle-structure and market-mood filters. Three same-colour candles are context, not a mandatory entry trigger. It is not option-premium P&L and is not a guarantee of future performance."})
+            d["win_rate"]=round(100*d["wins"]/d["trades"],1) if d["trades"] else 0
+            d["net_points"]=round(d["net_points"],2)
+    return jsonify({"ok":True,"symbol":symbol,"interval":interval,"days":days,"lookback":lookback,
+                    "trades":trades[-100:],
+                    "summary":{"trades":total,"wins":wins,"losses":losses,"win_rate":winrate,
+                               "net_points":round(equity,2),"avg_points":avg,"profit_factor":pf,
+                               "max_drawdown_points":round(max_dd,2),"side_stats":side_stats,"regime_stats":regime_stats},
+                    "note":"BREAKOUT -> RETEST -> CONFIRMATION. Signal is confirmed on a completed candle and entry is the next candle OPEN. Stops/targets use intrabar HIGH/LOW; if both are touched in one candle, STOP is assumed first conservatively. Underlying points only; not option-premium P&L."})
 
-
-def _simulate_signal_segment(symbol, candles, broad_candles, lookback, stop_atr, target_atr, strict=True):
-    """Deterministic underlying simulation used by walk-forward validation. No future bars are used."""
-    minbars=max(lookback+30,50); trades=[]; open_t=None; equity=0.0; peak=0.0; max_dd=0.0
-    for i in range(minbars,len(candles)):
-        window=candles[:i+1]; bar=window[-1]; px=float(bar["close"])
-        broad_prefix=[x for x in broad_candles if str(x.get("date")) <= str(bar.get("date"))][-100:]
+def _simulate_signal_segment(symbol,candles,broad_candles,lookback,stop_atr,target_atr,strict=True,
+                              retest_enabled=True,max_wait_bars=2,tolerance_atr=0.20,require_confirmation=True):
+    """Walk-forward simulator using the exact next-open/intrabar model used by backtest."""
+    minbars=max(lookback+30,50); trades=[]; open_t=None; equity=peak=max_dd=0.0; i=minbars
+    while i<len(candles):
+        bar=candles[i]
         if open_t:
-            pnl=(px-open_t["entry"]) if open_t["direction"]=="CE" else (open_t["entry"]-px)
-            adverse=(px<=open_t["entry"]-open_t["stop"]) if open_t["direction"]=="CE" else (px>=open_t["entry"]+open_t["stop"])
-            target=(px>=open_t["entry"]+open_t["target"]) if open_t["direction"]=="CE" else (px<=open_t["entry"]-open_t["target"])
-            seq=_candle_sequence(window); mood=_market_mood(candles=window,broad_candles=broad_prefix) if False else _market_mood(open_t["symbol"],window,broad_prefix)
+            hi=float(bar["high"]); lo=float(bar["low"]); close=float(bar["close"])
+            if open_t["direction"]=="CE":
+                stop_hit=lo<=open_t["stop_price"]; target_hit=hi>=open_t["target_price"]
+                if stop_hit: exit_px=open_t["stop_price"]; reason="stop" if not target_hit else "stop_and_target_same_bar_conservative"
+                elif target_hit: exit_px=open_t["target_price"]; reason="target"
+                else: exit_px=close; reason=None
+                pnl=exit_px-open_t["entry"]
+            else:
+                stop_hit=hi>=open_t["stop_price"]; target_hit=lo<=open_t["target_price"]
+                if stop_hit: exit_px=open_t["stop_price"]; reason="stop" if not target_hit else "stop_and_target_same_bar_conservative"
+                elif target_hit: exit_px=open_t["target_price"]; reason="target"
+                else: exit_px=close; reason=None
+                pnl=open_t["entry"]-exit_px
+            window=candles[:i+1]; bp=[x for x in broad_candles if str(x.get("date"))<=str(bar.get("date"))][-100:]
+            seq=_candle_sequence(window); mood=_market_mood(symbol,window,bp)
             reversal=(seq["score"]<=-2 and mood["score"]<=-2) if open_t["direction"]=="CE" else (seq["score"]>=2 and mood["score"]>=2)
             vals=np.array([x["close"] for x in window[-60:]],float); e9=_ema(vals,9); e21=_ema(vals,21); rr=_rsi(np.array([x["close"] for x in window],float),14)
-            trendrev=(e9<e21 and rr<45) if open_t["direction"]=="CE" else (e9>e21 and rr>55)
-            if adverse or target or reversal or trendrev or i==len(candles)-1:
-                reason="stop" if adverse else "target" if target else "candle+mood reversal" if reversal else "trend reversal" if trendrev else "end"
-                equity += pnl; peak=max(peak,equity); max_dd=max(max_dd,peak-equity)
-                trades.append({**open_t,"exit":px,"pnl_points":round(pnl,2),"exit_reason":reason,"exit_time":str(bar.get("date"))})
-                open_t=None; continue
-        r=_detect_breakout(window,lookback,strict=strict)
-        if not r: continue
-        cseq=r.get("candle_sequence",{}); mood=_market_mood(symbol,window,broad_prefix)
+            trendrev=(e9 is not None and e21 is not None and rr is not None and ((e9<e21 and rr<45) if open_t["direction"]=="CE" else (e9>e21 and rr>55)))
+            if reason is None and (reversal or trendrev or i==len(candles)-1):
+                reason="candle+mood reversal" if reversal else "trend reversal" if trendrev else "end"
+                exit_px=close; pnl=(exit_px-open_t["entry"]) if open_t["direction"]=="CE" else (open_t["entry"]-exit_px)
+            if reason is not None:
+                trades.append({**open_t,"exit":round(exit_px,2),"pnl_points":round(pnl,2),"exit_reason":reason,"exit_time":str(bar.get("date"))})
+                equity+=pnl; peak=max(peak,equity); max_dd=max(max_dd,peak-equity); open_t=None; i+=1; continue
+        window=candles[:i+1]
+        r=(_detect_breakout_retest(window,lookback,strict=strict,max_wait_bars=max_wait_bars,tolerance_atr=tolerance_atr,require_confirmation=require_confirmation)
+           if retest_enabled else _detect_breakout(window,lookback,strict=strict))
+        if not r or i+1>=len(candles): i+=1; continue
+        bp=[x for x in broad_candles if str(x.get("date"))<=str(bar.get("date"))][-100:]; mood=_market_mood(symbol,window,bp)
         aligned=(r["direction"]=="CE" and mood["score"]>=1) or (r["direction"]=="PE" and mood["score"]<=-1)
-        if r.get("trend_aligned") is not True or r.get("momentum_aligned") is not True or not r.get("volume_confirmed"): continue
-        directional_score = cseq.get("score",0) if r["direction"]=="CE" else -cseq.get("score",0)
-        if cseq.get("exhaustion",False) or directional_score < 0 or not r.get("candle_aligned",False) or not aligned: continue
-        atr=max(float(r.get("atr") or 0), px*0.001)
-        open_t={"symbol":symbol,"direction":r["direction"],"entry":px,"entry_time":str(bar.get("date")),"stop":max(atr*stop_atr,px*0.001),"target":max(atr*target_atr,px*0.0015),"score":r["score"],"candle_label":cseq.get("label"),"mood":mood.get("label")}
-    return {"trades":trades,"net_points":round(equity,2),"max_drawdown":round(max_dd,2),"wins":sum(1 for t in trades if t["pnl_points"]>=0),"losses":sum(1 for t in trades if t["pnl_points"]<0)}
+        seq=r.get("candle_sequence",{}); directional_score=seq.get("score",0) if r["direction"]=="CE" else -seq.get("score",0)
+        if (r.get("trend_aligned") is not True or r.get("momentum_aligned") is not True or not r.get("volume_confirmed") or
+            seq.get("exhaustion",False) or directional_score<1 or not r.get("candle_aligned",False) or not aligned):
+            i+=1; continue
+        entry_bar=candles[i+1]; entry=float(entry_bar["open"]); atr=max(float(r.get("atr") or 0),entry*0.001)
+        stop_dist=max(atr*stop_atr,entry*0.001); target_dist=max(atr*target_atr,entry*0.0015)
+        open_t={"symbol":symbol,"direction":r["direction"],"entry":round(entry,2),"signal_time":str(bar.get("date")),"entry_time":str(entry_bar.get("date")),
+                "stop":round(stop_dist,2),"target":round(target_dist,2),
+                "stop_price":round(entry-stop_dist if r["direction"]=="CE" else entry+stop_dist,2),
+                "target_price":round(entry+target_dist if r["direction"]=="CE" else entry-target_dist,2),
+                "score":r["score"],"candle_label":seq.get("label"),"mood":mood.get("label"),
+                "setup":"breakout -> retest -> confirmation" if retest_enabled else "breakout"}
+        i+=1
+    return {"trades":trades,"net_points":round(equity,2),"max_drawdown":round(max_dd,2),
+            "wins":sum(1 for t in trades if t["pnl_points"]>=0),"losses":sum(1 for t in trades if t["pnl_points"]<0)}
 
 
 @app.route("/api/autotrade/walk-forward", methods=["POST"])
@@ -5365,6 +5569,10 @@ def autotrade_walk_forward():
     if not require_session(): return jsonify({"error":"not_logged_in"}),401
     body=request.json or {}; symbol=str(body.get("symbol") or "NIFTY").upper(); interval=str(body.get("interval") or "5minute")
     days=max(20,min(int(body.get("days",120)),365)); folds=max(2,min(int(body.get("folds",4)),8)); lookback=int(body.get("lookback",20))
+    retest_enabled=bool(body.get("retest_enabled",True))
+    max_wait=max(1,min(int(body.get("retest_max_wait_bars",2)),4))
+    tolerance=float(body.get("retest_tolerance_atr",0.20))
+    require_confirmation=bool(body.get("retest_require_confirmation",True))
     token,err=resolve_token_for_symbol(symbol)
     if err: return jsonify({"error":err}),400
     try:
@@ -5383,12 +5591,12 @@ def autotrade_walk_forward():
         train=candles[:test_start]; test=candles[:test_end]
         best=None
         for lb,sl,tg in grid:
-            sim=_simulate_signal_segment(symbol,train,broad[:len(train)],lb,sl,tg,True)
+            sim=_simulate_signal_segment(symbol,train,broad[:len(train)],lb,sl,tg,True,retest_enabled,max_wait,tolerance,require_confirmation)
             score=sim["net_points"]/(1+sim["max_drawdown"]) if sim["trades"] else -1e9
             if best is None or score>best[0]: best=(score,lb,sl,tg,sim)
         _,blb,bsl,btg,_=best
         # Warm the test with training candles so indicators have their normal history, but only record test-period trades.
-        sim=_simulate_signal_segment(symbol,test,broad[:len(test)],blb,bsl,btg,True)
+        sim=_simulate_signal_segment(symbol,test,broad[:len(test)],blb,bsl,btg,True,retest_enabled,max_wait,tolerance,require_confirmation)
         test_trades=[t for t in sim["trades"] if str(t.get("entry_time"))>=str(candles[test_start].get("date"))]
         net=sum(t["pnl_points"] for t in test_trades); wins=sum(1 for t in test_trades if t["pnl_points"]>=0); losses=len(test_trades)-wins
         results.append({"fold":f+1,"train_bars":len(train),"test_bars":test_end-test_start,"lookback":blb,"stop_atr":bsl,"target_atr":btg,"trades":len(test_trades),"wins":wins,"losses":losses,"win_rate":round(wins/len(test_trades)*100,1) if test_trades else 0,"net_points":round(net,2),"max_drawdown":sim["max_drawdown"]})
@@ -5442,6 +5650,9 @@ def autotrade_execute_signal():
     if open_count >= max_positions:
         return jsonify({"error": f"Max concurrent positions ({max_positions}) already open. Raise "
                                   f"'Max concurrent positions' in Settings, or close one first."}), 400
+    valid, verr = _revalidate_autotrade_candidate(candidate, state)
+    if not valid:
+        return jsonify({"error": verr}), 400
     trade, err = _execute_autotrade_entry(candidate, state)
     if err:
         return jsonify({"error": err}), 400
