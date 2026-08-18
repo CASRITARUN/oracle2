@@ -414,7 +414,12 @@ INDEX_SYMBOLS = {
     "BANKNIFTY": "NSE:NIFTY BANK",
     "FINNIFTY": "NSE:NIFTY FIN SERVICE",
     "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+    "SENSEX": "BSE:SENSEX",
 }
+
+INDEX_OPTION_EXCHANGE = {"SENSEX": "BFO", "NIFTY": "NFO", "BANKNIFTY": "NFO", "FINNIFTY": "NFO", "MIDCPNIFTY": "NFO"}
+
+OPTION_EXCHANGE_SEGMENT = {"NFO": "NFO-OPT", "BFO": "BFO-OPT"}
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
@@ -437,7 +442,7 @@ _QUOTE_MIN_INTERVAL = float(os.environ.get("KITE_QUOTE_MIN_INTERVAL", "1.05"))
 _QUOTE_429_COOLDOWN = float(os.environ.get("KITE_QUOTE_429_COOLDOWN", "10.5"))
 
 SESSION = {"access_token": None, "logged_in_at": None}
-INSTRUMENT_CACHE = {"nfo": None, "nse": None, "fetched_at": None}
+INSTRUMENT_CACHE = {"nfo": None, "nse": None, "bfo": None, "bse": None, "fetched_at": None}
 SCREENER_CACHE = {"results": None, "fetched_at": None}
 IC_SCREENER_CACHE = {"results": None, "fetched_at": None}
 
@@ -1213,15 +1218,17 @@ def _adx(highs, lows, closes, period=14):
 
 
 def resolve_token_for_symbol(symbol):
-    """Shared instrument-token lookup for stocks AND indices (used by trend detection)."""
+    """Shared instrument-token lookup for stocks AND indices, including BSE SENSEX."""
     symbol = symbol.upper()
-    _, nse = get_instruments()
     if symbol in INDEX_SYMBOLS:
         wanted = INDEX_SYMBOLS[symbol].split(":")[1]
-        for i in nse:
-            if i["segment"] == "INDICES" and i["tradingsymbol"] == wanted:
+        exchange = INDEX_SYMBOLS[symbol].split(":")[0]
+        instruments = get_bse_instruments() if exchange == "BSE" else get_instruments()[1]
+        for i in instruments:
+            if i.get("segment") == "INDICES" and i.get("tradingsymbol") == wanted:
                 return i["instrument_token"], None
         return None, f"Could not resolve index token for {symbol}"
+    _, nse = get_instruments()
     matches = [i for i in nse if i["exchange"] == "NSE" and i["tradingsymbol"] == symbol]
     if not matches:
         return None, f"{symbol} not found on NSE"
@@ -1731,6 +1738,37 @@ def handle_any_exception(e):
 # ---------------------------------------------------------------------------
 # Instrument cache
 # ---------------------------------------------------------------------------
+def get_bfo_instruments(force=False):
+    now = now_ist()
+    if force or INSTRUMENT_CACHE.get("bfo") is None or INSTRUMENT_CACHE.get("fetched_at") is None or now - INSTRUMENT_CACHE["fetched_at"] > timedelta(hours=6):
+        INSTRUMENT_CACHE["bfo"] = kite.instruments("BFO")
+    return INSTRUMENT_CACHE["bfo"]
+
+
+def get_bse_instruments(force=False):
+    now = now_ist()
+    if force or INSTRUMENT_CACHE.get("bse") is None or INSTRUMENT_CACHE.get("fetched_at") is None or now - INSTRUMENT_CACHE["fetched_at"] > timedelta(hours=6):
+        INSTRUMENT_CACHE["bse"] = kite.instruments("BSE")
+    return INSTRUMENT_CACHE["bse"]
+
+
+def option_exchange_for_symbol(symbol):
+    return INDEX_OPTION_EXCHANGE.get(symbol.upper(), "NFO")
+
+
+def option_segment_for_symbol(symbol):
+    return OPTION_EXCHANGE_SEGMENT.get(option_exchange_for_symbol(symbol), "NFO-OPT")
+
+
+def get_option_instruments_for_symbol(symbol):
+    exchange = option_exchange_for_symbol(symbol)
+    if exchange == "BFO":
+        instruments = get_bfo_instruments()
+    else:
+        instruments, _ = get_instruments()
+    return exchange, [i for i in instruments if i.get("name") == symbol.upper() and i.get("segment") == option_segment_for_symbol(symbol)]
+
+
 def get_instruments(force=False):
     now = now_ist()
     if (force or INSTRUMENT_CACHE["fetched_at"] is None or
@@ -2273,8 +2311,7 @@ def expiries(symbol):
     if not require_session():
         return jsonify({"error": "not_logged_in"}), 401
     symbol = symbol.upper()
-    nfo, _ = get_instruments()
-    opts = [i for i in nfo if i["name"] == symbol and i["segment"] == "NFO-OPT"]
+    exchange, opts = get_option_instruments_for_symbol(symbol)
     if not opts:
         return jsonify({"error": f"No options found for {symbol}"}), 404
     today = now_ist().date()
@@ -2283,14 +2320,13 @@ def expiries(symbol):
 
 
 def get_chain_for_symbol(symbol, expiry_str=None):
-    """Returns (data_dict, None) or (None, error_dict). data_dict has spot/expiry/T/lot_size/chain."""
+    """Returns (data_dict, None) or (None, error_dict). Supports NFO indices and BFO SENSEX."""
     symbol = symbol.upper()
     spot, err = get_spot_price(symbol)
     if err:
         return None, err
 
-    nfo, _ = get_instruments()
-    opts = [i for i in nfo if i["name"] == symbol and i["segment"] == "NFO-OPT"]
+    exchange, opts = get_option_instruments_for_symbol(symbol)
     if not opts:
         return None, {"error": f"No options found for {symbol}"}
 
@@ -2332,7 +2368,7 @@ def get_chain_for_symbol(symbol, expiry_str=None):
                          "spread_pct": round(st["spread_pct"],2) if st["spread_pct"] is not None else None,
                          "volume": st["volume"], "oi": st["oi"], "iv": round(iv * 100, 1), "delta": round(delta, 3)})
 
-    return {"spot": spot, "expiry": expiry, "T": T, "lot_size": lot_size, "chain": enriched,
+    return {"symbol": symbol, "exchange": exchange, "spot": spot, "expiry": expiry, "T": T, "lot_size": lot_size, "chain": enriched,
             "all_expiries": [str(e) for e in all_expiries]}, None
 
 
@@ -3492,7 +3528,7 @@ def place_basket_orders(legs_to_place, product, order_type, sequence_for_margin=
         reference_price = item.get("price")
         try:
             kwargs = dict(
-                variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NFO,
+                variety=kite.VARIETY_REGULAR, exchange=item.get("exchange", kite.EXCHANGE_NFO),
                 tradingsymbol=item["tradingsymbol"], transaction_type=txn_type,
                 quantity=quantity, product=getattr(kite, f"PRODUCT_{product}"),
                 order_type=getattr(kite, f"ORDER_TYPE_{order_type}"),
@@ -4474,6 +4510,113 @@ def _rsi(closes, period=14):
     return 100.0 - (100.0 / (1 + rs))
 
 
+# ---------------------------------------------------------------------------
+# NIFTY Bullish Breakout Quality Engine
+# ---------------------------------------------------------------------------
+NIFTY_BREAKOUT_DEFAULT_LOOKBACK = 20
+NIFTY_BREAKOUT_VOLUME_MULTIPLE = 1.5
+
+
+def _latest_session_candles(candles):
+    if not candles:
+        return []
+    last_dt = candles[-1].get("date")
+    last_day = last_dt.date() if hasattr(last_dt, "date") else str(last_dt)[:10]
+    return [c for c in candles
+            if (c.get("date").date() if hasattr(c.get("date"), "date") else str(c.get("date"))[:10]) == last_day]
+
+
+def _session_vwap(candles):
+    session = _latest_session_candles(candles)
+    if not session:
+        return None
+    pv = sum(((float(c["high"]) + float(c["low"]) + float(c["close"])) / 3.0) * float(c.get("volume", 0) or 0) for c in session)
+    vol = sum(float(c.get("volume", 0) or 0) for c in session)
+    return pv / vol if vol > 0 else None
+
+
+def _nifty_bullish_breakout(candles, option_chain_data=None, lookback=20):
+    """Six-condition, read-only NIFTY bullish breakout classifier."""
+    if len(candles) < max(lookback + 2, 55):
+        return None, "Not enough NIFTY candles for EMA20/EMA50 and breakout analysis."
+    closes = np.array([float(c["close"]) for c in candles], dtype=float)
+    highs = np.array([float(c["high"]) for c in candles], dtype=float)
+    volumes = np.array([float(c.get("volume", 0) or 0) for c in candles], dtype=float)
+    spot = float(closes[-1])
+    vwap = _session_vwap(candles)
+    ema20 = _ema(closes[-min(len(closes), 120):], 20)
+    ema50 = _ema(closes[-min(len(closes), 120):], 50)
+    rsi = _rsi(closes, 14)
+    resistance = float(np.max(highs[-(lookback + 1):-1]))
+    avg_vol = float(np.mean(volumes[-(lookback + 1):-1]))
+    rel_volume = float(volumes[-1] / avg_vol) if avg_vol > 0 else None
+    true_ranges = np.maximum(highs[1:] - np.array([float(c["low"]) for c in candles[1:]]),
+                              np.maximum(np.abs(highs[1:] - closes[:-1]),
+                                         np.abs(np.array([float(c["low"]) for c in candles[1:]]) - closes[:-1])))
+    atr = float(np.mean(true_ranges[-lookback:])) if len(true_ranges) >= lookback else float(np.mean(true_ranges))
+    breakout_distance = spot - resistance
+    conditions = {
+        "bullish_breakout": breakout_distance >= max(0.0, 0.15 * atr),
+        "above_vwap": vwap is not None and spot > vwap,
+        "ema20_above_ema50": ema20 is not None and ema50 is not None and ema20 > ema50,
+        "rsi_above_55": rsi is not None and rsi > 55,
+        "volume_expansion": rel_volume is not None and rel_volume >= NIFTY_BREAKOUT_VOLUME_MULTIPLE,
+        "resistance_broken": spot > resistance,
+        "call_side_momentum": False,
+    }
+    ce_momentum = pe_momentum = None
+    ce_volume = pe_volume = None
+    atm_strike = option_expiry = None
+    if option_chain_data:
+        chain = option_chain_data.get("chain") or []
+        chain_spot = float(option_chain_data.get("spot") or spot)
+        ce_opts = [o for o in chain if o.get("instrument_type") == "CE" and o.get("instrument_token")]
+        pe_opts = [o for o in chain if o.get("instrument_type") == "PE" and o.get("instrument_token")]
+        ce_closes, pe_closes = [], []
+        if ce_opts:
+            ce_atm = min(ce_opts, key=lambda o: abs(float(o["strike"]) - chain_spot))
+            atm_strike, option_expiry = ce_atm.get("strike"), option_chain_data.get("expiry")
+            ce_volume = float(ce_atm.get("volume") or 0)
+            try:
+                ce_hist = kite.historical_data(int(ce_atm["instrument_token"]), now_ist() - timedelta(days=3), now_ist(), "5minute")
+                ce_closes = [float(c["close"]) for c in ce_hist if c.get("close") is not None]
+                if len(ce_closes) >= 4:
+                    ce_momentum = ce_closes[-1] > ce_closes[-2] and ce_closes[-1] > ce_closes[-4]
+            except Exception as e:
+                logger.warning("NIFTY CE momentum fetch failed: %s", e)
+            if pe_opts:
+                pe_atm = min(pe_opts, key=lambda o: abs(float(o["strike"]) - chain_spot))
+                pe_volume = float(pe_atm.get("volume") or 0)
+                try:
+                    pe_hist = kite.historical_data(int(pe_atm["instrument_token"]), now_ist() - timedelta(days=3), now_ist(), "5minute")
+                    pe_closes = [float(c["close"]) for c in pe_hist if c.get("close") is not None]
+                    if len(pe_closes) >= 4:
+                        pe_momentum = pe_closes[-1] > pe_closes[-2] and pe_closes[-1] > pe_closes[-4]
+                except Exception as e:
+                    logger.warning("NIFTY PE momentum fetch failed: %s", e)
+            ce_change = (ce_closes[-1] / ce_closes[-2] - 1) if len(ce_closes) >= 2 else None
+            pe_change = (pe_closes[-1] / pe_closes[-2] - 1) if len(pe_closes) >= 2 else None
+            conditions["call_side_momentum"] = bool(ce_momentum and
+                (pe_change is None or ce_change is None or ce_change > pe_change) and
+                (ce_volume == 0 or pe_volume is None or ce_volume >= pe_volume))
+
+    score = sum(1 for v in conditions.values() if v)
+    quality = "HIGH QUALITY CE SETUP" if score == 7 else ("WATCH — 5/7 or 6/7" if score >= 5 else "NO CE SETUP")
+    return {
+        "symbol": "NIFTY", "direction": "CE", "score": score, "max_score": 6, "quality": quality,
+        "spot": round(spot, 2), "vwap": round(vwap, 2) if vwap is not None else None,
+        "ema20": round(ema20, 2) if ema20 is not None else None,
+        "ema50": round(ema50, 2) if ema50 is not None else None,
+        "rsi": round(rsi, 1) if rsi is not None else None, "resistance": round(resistance, 2),
+        "atr": round(atr, 2), "breakout_distance": round(breakout_distance, 2),
+        "rel_volume": round(rel_volume, 2) if rel_volume is not None else None,
+        "conditions": conditions, "ce_momentum": ce_momentum, "pe_momentum": pe_momentum,
+        "ce_volume": ce_volume, "pe_volume": pe_volume, "atm_strike": atm_strike,
+        "option_expiry": str(option_expiry) if option_expiry else None, "checked_at": now_ist().isoformat(),
+        "note": "Rule-based setup score only; not a probability of profit or trading recommendation.",
+    }, None
+
+
 # --- False-breakout guards (active whenever strict=True, i.e. state["strict_breakout_filters"]) ---
 # Intraday breakouts fail (whipsaw back into the range) very often; these thresholds exist
 # specifically to filter out the weakest, least-reliable-looking ones before they ever become a
@@ -4710,7 +4853,7 @@ def _build_autotrade_order_impl(symbol, direction, capital_per_trade):
     lots = max(1, int(capital_per_trade // (premium * lot_size)))
     return {
         "symbol": symbol, "direction": direction, "tradingsymbol": atm["tradingsymbol"],
-        "strike": atm["strike"], "expiry": str(data["expiry"]), "lot_size": lot_size,
+        "exchange": data.get("exchange", "NFO"), "strike": atm["strike"], "expiry": str(data["expiry"]), "lot_size": lot_size,
         "lots": lots, "quantity": lots * lot_size, "premium": premium, "spot": spot,
     }, None
 
@@ -4723,7 +4866,7 @@ def _execute_autotrade_entry(candidate, state):
     execution_mode = state.get("execution_mode", "track")
     if execution_mode == "live":
         leg = {"leg": "auto_entry", "tradingsymbol": order_info["tradingsymbol"],
-               "transaction_type": "BUY", "quantity": order_info["quantity"]}
+               "exchange": order_info.get("exchange", "NFO"), "transaction_type": "BUY", "quantity": order_info["quantity"]}
         # MIS (intraday) product on purpose for auto-trades: it carries the broker's OWN automatic
         # end-of-day square-off as a second, independent safety net on top of ours.
         results = place_basket_orders([leg], product="MIS", order_type="MARKET", sequence_for_margin=False)
@@ -4774,7 +4917,7 @@ def _execute_autotrade_exit(trade, reason):
     execution_mode = trade.get("execution_mode", "live")
     if execution_mode == "live":
         leg = {"leg": "auto_exit", "tradingsymbol": trade["tradingsymbol"],
-               "transaction_type": "SELL", "quantity": trade["quantity"]}
+               "exchange": trade.get("exchange", "NFO"), "transaction_type": "SELL", "quantity": trade["quantity"]}
         results = place_basket_orders([leg], product="MIS", order_type="MARKET", sequence_for_margin=False)
         result = results[0] if results else {"status": "failed", "error": "No result returned"}
         exit_status = result["status"]
@@ -5015,6 +5158,553 @@ def _autotrade_loop():
             except Exception:
                 pass
         time.sleep(max(5, sleep_for))
+
+
+
+# ============================================================================
+# CONTINUOUS INDEX BREAKOUT MONITOR
+# NIFTY / BANKNIFTY / SENSEX / FINNIFTY
+# Bullish breakout -> BUY ATM CE; bearish breakout -> BUY ATM PE.
+# Closing a BUY option position always uses SELL. Paper mode never sends broker orders.
+# ============================================================================
+BREAKOUT_MONITOR_FILE = os.path.join(os.path.dirname(__file__), "breakout_monitor_state.json")
+BREAKOUT_MONITOR_TRADES_FILE = os.path.join(os.path.dirname(__file__), "breakout_monitor_trades.json")
+BREAKOUT_MONITOR_LOCK = threading.Lock()
+BREAKOUT_MONITOR_SYMBOLS = ["NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY"]
+BREAKOUT_MONITOR_DEFAULTS = {
+    "enabled": False,
+    "execution_mode": "paper",       # paper | live
+    "interval": "5minute",
+    "lookback": 20,
+    "poll_seconds": 20,
+    "capital_per_trade": 15000,
+    "max_trades_per_day": 4,
+    "max_concurrent_positions": 1,
+    "max_daily_loss": 5000,
+    "min_score": 6,                   # 6/7 may be monitored; 7/7 is highest quality
+    "hard_stop_pct": 35,
+    "trail_after_pct": 30,
+    "trail_giveback_pct": 15,
+    "square_off_time": "15:15",
+    "symbols": BREAKOUT_MONITOR_SYMBOLS,
+    "last_scan_at": None,
+    "last_error": None,
+    "trades_today": 0,
+    "realized_pnl_today": 0.0,
+    "day": None,
+    "last_signals": {},
+    "disarm_reason": None,
+}
+
+
+def _load_breakout_monitor_state():
+    state = dict(BREAKOUT_MONITOR_DEFAULTS)
+    if os.path.exists(BREAKOUT_MONITOR_FILE):
+        try:
+            with open(BREAKOUT_MONITOR_FILE, "r") as f:
+                state.update(json.load(f))
+        except Exception:
+            pass
+    return state
+
+
+def _save_breakout_monitor_state(state):
+    with BREAKOUT_MONITOR_LOCK:
+        with open(BREAKOUT_MONITOR_FILE, "w") as f:
+            json.dump(state, f, indent=2, default=str)
+
+
+def _load_breakout_monitor_trades():
+    if not os.path.exists(BREAKOUT_MONITOR_TRADES_FILE):
+        return []
+    try:
+        with open(BREAKOUT_MONITOR_TRADES_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_breakout_monitor_trades(trades):
+    with BREAKOUT_MONITOR_LOCK:
+        with open(BREAKOUT_MONITOR_TRADES_FILE, "w") as f:
+            json.dump(trades, f, indent=2, default=str)
+
+
+def _breakout_monitor_roll_day(state):
+    today = now_ist().strftime("%Y-%m-%d")
+    if state.get("day") != today:
+        state["day"] = today
+        state["trades_today"] = 0
+        state["realized_pnl_today"] = 0.0
+        state["disarm_reason"] = None
+    return state
+
+
+def _monitor_session_vwap(candles, upto_index):
+    if upto_index < 0:
+        return None
+    last_dt = candles[upto_index].get("date")
+    last_day = last_dt.date() if hasattr(last_dt, "date") else str(last_dt)[:10]
+    session = []
+    for c in candles[:upto_index + 1]:
+        d = c.get("date")
+        day = d.date() if hasattr(d, "date") else str(d)[:10]
+        if day == last_day:
+            session.append(c)
+    vol = sum(float(c.get("volume", 0) or 0) for c in session)
+    if vol <= 0:
+        return None
+    return sum(((float(c["high"]) + float(c["low"]) + float(c["close"])) / 3.0) * float(c.get("volume", 0) or 0) for c in session) / vol
+
+
+def _breakout_monitor_signal(symbol, candles, lookback=20, option_chain_data=None):
+    """Detailed 7-condition directional breakout signal for one index."""
+    if len(candles) < max(lookback + 2, 55):
+        return None, "Not enough candles"
+    closes = np.array([float(c["close"]) for c in candles], dtype=float)
+    highs = np.array([float(c["high"]) for c in candles], dtype=float)
+    lows = np.array([float(c["low"]) for c in candles], dtype=float)
+    volumes = np.array([float(c.get("volume", 0) or 0) for c in candles], dtype=float)
+    spot = closes[-1]
+    resistance = float(np.max(highs[-(lookback + 1):-1]))
+    support = float(np.min(lows[-(lookback + 1):-1]))
+    tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
+    atr = float(np.mean(tr[-lookback:])) if len(tr) >= lookback else float(np.mean(tr))
+    if atr <= 0:
+        return None, "ATR unavailable"
+    ema20 = _ema(closes[-min(len(closes), 120):], 20)
+    ema50 = _ema(closes[-min(len(closes), 120):], 50)
+    rsi = _rsi(closes, 14)
+    vwap = _monitor_session_vwap(candles, len(candles) - 1)
+    avg_vol = float(np.mean(volumes[-(lookback + 1):-1]))
+    rel_volume = float(volumes[-1] / avg_vol) if avg_vol > 0 else None
+    bull_dist = spot - resistance
+    bear_dist = support - spot
+    bull_break = bull_dist >= 0.15 * atr
+    bear_break = bear_dist >= 0.15 * atr
+    if bull_break and not bear_break:
+        direction = "CE"
+    elif bear_break and not bull_break:
+        direction = "PE"
+    else:
+        direction = None
+    # Prefer a direction only when the breakout itself is clear; no trade in the middle.
+    if direction == "CE":
+        level = resistance
+        close_pos = (spot - lows[-1]) / max(highs[-1] - lows[-1], 1e-9)
+        strong_close = close_pos >= 0.60
+        conditions = {
+            "breakout": bull_break,
+            "above_vwap": vwap is not None and spot > vwap,
+            "ema20_50": ema20 is not None and ema50 is not None and ema20 > ema50,
+            "rsi": rsi is not None and rsi > 55,
+            "volume": rel_volume is not None and rel_volume >= 1.5,
+            "level_broken": spot > resistance,
+            "option_momentum": False,
+        }
+    elif direction == "PE":
+        level = support
+        close_pos = (highs[-1] - spot) / max(highs[-1] - lows[-1], 1e-9)
+        strong_close = close_pos >= 0.60
+        conditions = {
+            "breakout": bear_break,
+            "above_vwap": vwap is not None and spot < vwap,  # named consistently in UI; means below VWAP for PE
+            "ema20_50": ema20 is not None and ema50 is not None and ema20 < ema50,
+            "rsi": rsi is not None and rsi < 45,
+            "volume": rel_volume is not None and rel_volume >= 1.5,
+            "level_broken": spot < support,
+            "option_momentum": False,
+        }
+    else:
+        return {"symbol": symbol, "direction": None, "score": 0, "quality": "NO BREAKOUT", "spot": round(spot, 2),
+                "vwap": round(vwap, 2) if vwap is not None else None, "ema20": round(ema20, 2) if ema20 else None,
+                "ema50": round(ema50, 2) if ema50 else None, "rsi": round(rsi, 1) if rsi is not None else None,
+                "resistance": round(resistance, 2), "support": round(support, 2), "rel_volume": round(rel_volume, 2) if rel_volume else None,
+                "atr": round(atr, 2), "conditions": conditions if False else {"breakout": False, "above_vwap": False, "ema20_50": False, "rsi": False, "volume": False, "level_broken": False, "option_momentum": False},
+                "checked_at": now_ist().isoformat(), "note": "No directional breakout beyond the 0.15 ATR noise floor."}, None
+
+    # False-breakout guard: breakout candle should close strongly in the breakout direction.
+    conditions["strong_close"] = strong_close
+    # Option-side momentum: ATM option must move in the same direction over recent 5-min bars and beat opposite side.
+    option_detail = {}
+    if option_chain_data:
+        chain = option_chain_data.get("chain") or []
+        chain_spot = float(option_chain_data.get("spot") or spot)
+        own = [o for o in chain if o.get("instrument_type") == direction and o.get("instrument_token")]
+        opp = [o for o in chain if o.get("instrument_type") == ("PE" if direction == "CE" else "CE") and o.get("instrument_token")]
+        if own:
+            own_atm = min(own, key=lambda o: abs(float(o["strike"]) - chain_spot))
+            opp_atm = min(opp, key=lambda o: abs(float(o["strike"]) - chain_spot)) if opp else None
+            own_hist = opp_hist = []
+            try:
+                ex = option_chain_data.get("exchange", "NFO")
+                own_hist = kite.historical_data(int(own_atm["instrument_token"]), now_ist() - timedelta(days=3), now_ist(), "5minute")
+                if opp_atm:
+                    opp_hist = kite.historical_data(int(opp_atm["instrument_token"]), now_ist() - timedelta(days=3), now_ist(), "5minute")
+            except Exception as e:
+                logger.warning("%s option momentum fetch failed: %s", symbol, e)
+            own_c = [float(c["close"]) for c in own_hist if c.get("close") is not None]
+            opp_c = [float(c["close"]) for c in opp_hist if c.get("close") is not None]
+            own_change = (own_c[-1] / own_c[-2] - 1) if len(own_c) >= 2 and own_c[-2] else None
+            opp_change = (opp_c[-1] / opp_c[-2] - 1) if len(opp_c) >= 2 and opp_c[-2] else None
+            own_rise = len(own_c) >= 4 and own_c[-1] > own_c[-2] and own_c[-1] > own_c[-4]
+            own_volume = float(own_atm.get("volume") or 0)
+            opp_volume = float(opp_atm.get("volume") or 0) if opp_atm else 0
+            conditions["option_momentum"] = bool(own_rise and (opp_change is None or own_change is None or own_change > opp_change) and (own_volume == 0 or opp_volume == 0 or own_volume >= opp_volume))
+            option_detail = {"tradingsymbol": own_atm.get("tradingsymbol"), "strike": own_atm.get("strike"), "expiry": str(option_chain_data.get("expiry")),
+                             "premium": own_atm.get("ltp"), "own_change_pct": round(own_change * 100, 2) if own_change is not None else None,
+                             "opposite_change_pct": round(opp_change * 100, 2) if opp_change is not None else None,
+                             "own_volume": own_volume, "opposite_volume": opp_volume, "exchange": option_chain_data.get("exchange", "NFO")}
+
+    # Strong close is an additional quality guard but not counted as one of the seven displayed confirmations.
+    score = sum(1 for k in ("breakout", "above_vwap", "ema20_50", "rsi", "volume", "level_broken", "option_momentum") if conditions[k])
+    quality = "HIGH QUALITY BREAKOUT" if score == 7 and strong_close else ("QUALIFIED — 6/7+" if score >= 6 else ("WATCH — 5/7" if score == 5 else "NO TRADE"))
+    return {
+        "symbol": symbol, "direction": direction, "score": score, "max_score": 7, "quality": quality,
+        "spot": round(spot, 2), "vwap": round(vwap, 2) if vwap is not None else None,
+        "ema20": round(ema20, 2) if ema20 is not None else None, "ema50": round(ema50, 2) if ema50 is not None else None,
+        "rsi": round(rsi, 1) if rsi is not None else None, "resistance": round(resistance, 2), "support": round(support, 2),
+        "breakout_level": round(level, 2), "breakout_distance": round(abs(spot - level), 2), "atr": round(atr, 2),
+        "rel_volume": round(rel_volume, 2) if rel_volume is not None else None, "strong_close": strong_close,
+        "conditions": {k: bool(v) for k, v in conditions.items() if k != "strong_close"}, "option": option_detail,
+        "checked_at": now_ist().isoformat(),
+        "reason": f"{symbol} {direction}: {'above resistance' if direction == 'CE' else 'below support'} by {abs(spot-level):.2f} ({abs(spot-level)/atr:.2f} ATR); VWAP/EMA/RSI/volume/option momentum confirmations are shown individually."
+    }, None
+
+
+def _breakout_monitor_build_state_for_entry(state):
+    # Reuse the existing, tested option-entry sizing/execution machinery with the breakout monitor's own limits.
+    s = dict(AUTOTRADE_DEFAULTS)
+    s.update({
+        "execution_mode": "live" if state.get("execution_mode") == "live" else "track",
+        "capital_per_trade": float(state.get("capital_per_trade", 15000)),
+        "sl_mode": "pct", "sl_pct_of_premium": float(state.get("hard_stop_pct", 35)),
+        "hard_stop_pct": float(state.get("hard_stop_pct", 35)), "exit_mode": "auto",
+        "trail_after_pct": float(state.get("trail_after_pct", 30)), "trail_giveback_pct": float(state.get("trail_giveback_pct", 15)),
+        "square_off_time": state.get("square_off_time", "15:15"), "mode": "auto",
+    })
+    return s
+
+
+def _breakout_monitor_entry(signal, state):
+    entry_state = _breakout_monitor_build_state_for_entry(state)
+    return _execute_autotrade_entry(signal, entry_state)
+
+
+def _breakout_monitor_exit(trade, reason):
+    return _execute_autotrade_exit(trade, reason)
+
+
+def _breakout_monitor_positions(state, trades):
+    changed = False
+    for trade in trades:
+        if trade.get("status") != "open":
+            continue
+        key = f"{trade.get('exchange', 'NFO')}:{trade['tradingsymbol']}"
+        try:
+            q = kite_quote_bulk([key]).get(key)
+            ltp = extract_price(q)
+        except Exception as e:
+            state["last_error"] = f"Quote failed for {trade['tradingsymbol']}: {e}"
+            continue
+        if not ltp:
+            continue
+        trade["last_ltp"] = ltp
+        pnl_pct = (ltp / trade["entry_price"] - 1) * 100.0
+        trade["peak_pnl_pct"] = max(float(trade.get("peak_pnl_pct", 0)), pnl_pct)
+        reason = None
+        hard_stop = float(trade.get("hard_stop_price") or trade["entry_price"] * (1 - state.get("hard_stop_pct", 35) / 100))
+        if ltp <= hard_stop:
+            reason = "Hard safety stop hit"
+        elif trade["peak_pnl_pct"] >= state.get("trail_after_pct", 30) and pnl_pct <= trade["peak_pnl_pct"] - state.get("trail_giveback_pct", 15):
+            reason = "Trailing exit after momentum/profit giveback"
+        else:
+            # Underlying reversal / breakout invalidation check.
+            candles, err = _fetch_recent_intraday(trade["symbol"], state.get("interval", "5minute"), state.get("lookback", 20))
+            if not err and candles:
+                closes = np.array([float(c["close"]) for c in candles], dtype=float)
+                ema20 = _ema(closes[-min(len(closes), 120):], 20)
+                ema50 = _ema(closes[-min(len(closes), 120):], 50)
+                rsi = _rsi(closes, 14)
+                spot = closes[-1]
+                level = float(trade.get("breakout_level") or spot)
+                if trade["direction"] == "CE" and ((ema20 is not None and ema50 is not None and ema20 < ema50 and rsi is not None and rsi < 50) or spot < level):
+                    reason = "Bullish breakout invalidated"
+                elif trade["direction"] == "PE" and ((ema20 is not None and ema50 is not None and ema20 > ema50 and rsi is not None and rsi > 50) or spot > level):
+                    reason = "Bearish breakout invalidated"
+        if not reason and now_ist().strftime("%H:%M") >= state.get("square_off_time", "15:15"):
+            reason = "End-of-day square-off"
+        if reason:
+            closed = _breakout_monitor_exit(trade, reason)
+            if closed.get("realized_pnl") is not None:
+                state["realized_pnl_today"] = round(state.get("realized_pnl_today", 0) + closed["realized_pnl"], 2)
+            changed = True
+    return changed
+
+
+def _breakout_monitor_scan(state):
+    signals = {}
+    for symbol in state.get("symbols") or BREAKOUT_MONITOR_SYMBOLS:
+        try:
+            candles, err = _fetch_recent_intraday(symbol, state.get("interval", "5minute"), max(int(state.get("lookback", 20)), 55))
+            if err:
+                signals[symbol] = {"symbol": symbol, "error": err, "checked_at": now_ist().isoformat()}
+                continue
+            # Fetch option chain only after the underlying has produced a directional breakout.
+            prelim, _ = _breakout_monitor_signal(symbol, candles, int(state.get("lookback", 20)), None)
+            chain_data = None
+            if prelim and prelim.get("direction"):
+                chain_data, _ = get_chain_for_symbol(symbol)
+            signal, err2 = _breakout_monitor_signal(symbol, candles, int(state.get("lookback", 20)), chain_data)
+            if err2:
+                signals[symbol] = {"symbol": symbol, "error": err2, "checked_at": now_ist().isoformat()}
+            else:
+                signals[symbol] = signal
+        except Exception as e:
+            logger.exception("Breakout monitor scan failed for %s", symbol)
+            signals[symbol] = {"symbol": symbol, "error": str(e), "checked_at": now_ist().isoformat()}
+    state["last_signals"] = signals
+    state["last_scan_at"] = now_ist().isoformat()
+    return signals
+
+
+def _breakout_monitor_loop():
+    while True:
+        sleep_for = 20
+        try:
+            if SESSION.get("access_token"):
+                state = _breakout_monitor_roll_day(_load_breakout_monitor_state())
+                trades = _load_breakout_monitor_trades()
+                changed = _breakout_monitor_positions(state, trades)
+                now_str = now_ist().strftime("%H:%M")
+                if state.get("enabled") and now_str >= "09:20" and now_str <= state.get("square_off_time", "15:15"):
+                    signals = _breakout_monitor_scan(state)
+                    open_count = sum(1 for t in trades if t.get("status") == "open")
+                    if (state.get("realized_pnl_today", 0) <= -abs(state.get("max_daily_loss", 5000))):
+                        state["enabled"] = False
+                        state["disarm_reason"] = "Daily loss limit reached"
+                        changed = True
+                    elif state.get("trades_today", 0) < int(state.get("max_trades_per_day", 4)) and open_count < int(state.get("max_concurrent_positions", 1)):
+                        ranked = [s for s in signals.values() if s.get("direction") and s.get("score", 0) >= int(state.get("min_score", 6)) and s.get("option", {}).get("tradingsymbol")]
+                        ranked.sort(key=lambda x: (x.get("score", 0), x.get("breakout_distance", 0)), reverse=True)
+                        if ranked:
+                            candidate = ranked[0]
+                            # Prevent repeated entries on the same breakout until its signal changes/position closes.
+                            already = any(t.get("status") == "open" and t.get("symbol") == candidate["symbol"] for t in trades)
+                            last_trade_key = f"{candidate['symbol']}:{candidate['direction']}:{candidate.get('breakout_level')}"
+                            duplicate_recent = any(t.get("status") == "closed" and t.get("signal_key") == last_trade_key and t.get("closed_at", "")[:10] == state.get("day") for t in trades[-50:])
+                            if not already and not duplicate_recent:
+                                trade, err = _breakout_monitor_entry(candidate, state)
+                                if trade:
+                                    trade["signal_key"] = last_trade_key
+                                    trade["breakout_monitor"] = True
+                                    trades.append(trade)
+                                    state["trades_today"] = int(state.get("trades_today", 0)) + 1
+                                    changed = True
+                                else:
+                                    state["last_error"] = f"Entry failed for {candidate['symbol']}: {err}"
+                if changed or state.get("last_signals"):
+                    _save_breakout_monitor_state(state)
+                    _save_breakout_monitor_trades(trades)
+                sleep_for = max(10, int(state.get("poll_seconds", 20)))
+        except Exception as e:
+            logger.exception("Breakout monitor loop error")
+        time.sleep(sleep_for)
+
+
+def _breakout_backtest_symbol(symbol, interval, days, lookback, stop_atr, target_atr):
+    token, err = resolve_token_for_symbol(symbol)
+    if err:
+        return {"symbol": symbol, "error": err, "trades": []}
+    end = now_ist()
+    start = end - timedelta(days=min(max(days, 1), 60) + 5)
+    try:
+        candles = kite.historical_data(token, start, end, interval)
+    except Exception as e:
+        return {"symbol": symbol, "error": str(e), "trades": []}
+    if len(candles) < max(lookback + 55, 70):
+        return {"symbol": symbol, "error": "Not enough historical candles", "trades": []}
+    closes = np.array([float(c["close"]) for c in candles], dtype=float)
+    highs = np.array([float(c["high"]) for c in candles], dtype=float)
+    lows = np.array([float(c["low"]) for c in candles], dtype=float)
+    vols = np.array([float(c.get("volume", 0) or 0) for c in candles], dtype=float)
+    trades = []
+    in_trade = None
+    for i in range(max(lookback + 55, 70), len(candles)):
+        hist = candles[:i+1]
+        tr = np.maximum(highs[1:i+1] - lows[1:i+1], np.maximum(np.abs(highs[1:i+1] - closes[:i]), np.abs(lows[1:i+1] - closes[:i])))
+        atr = float(np.mean(tr[-lookback:])) if len(tr) >= lookback else 0
+        if atr <= 0:
+            continue
+        resistance = float(np.max(highs[i-lookback:i]))
+        support = float(np.min(lows[i-lookback:i]))
+        ema20 = _ema(closes[max(0, i-119):i+1], 20)
+        ema50 = _ema(closes[max(0, i-119):i+1], 50)
+        rsi = _rsi(closes[:i+1], 14)
+        vwap = _monitor_session_vwap(candles, i)
+        avg_vol = float(np.mean(vols[i-lookback:i])) if i >= lookback else 0
+        rv = vols[i] / avg_vol if avg_vol > 0 else 0
+        direction = None
+        if closes[i] > resistance + 0.15 * atr and vwap is not None and closes[i] > vwap and ema20 > ema50 and rsi is not None and rsi > 55 and rv >= 1.5:
+            direction = "CE"
+            level = resistance
+        elif closes[i] < support - 0.15 * atr and vwap is not None and closes[i] < vwap and ema20 < ema50 and rsi is not None and rsi < 45 and rv >= 1.5:
+            direction = "PE"
+            level = support
+        if in_trade:
+            entry = in_trade["entry"]
+            if in_trade["direction"] == "CE":
+                stop = entry - stop_atr * in_trade["atr"]
+                target = entry + target_atr * in_trade["atr"]
+                reversal = closes[i] < in_trade["level"] or (ema20 < ema50 and rsi is not None and rsi < 50)
+                hit_stop, hit_target = lows[i] <= stop, highs[i] >= target
+                if hit_stop or hit_target or reversal or i == len(candles)-1:
+                    if hit_stop:
+                        exit_px, reason = stop, "ATR stop"
+                    elif hit_target:
+                        exit_px, reason = target, "ATR target"
+                    else:
+                        exit_px, reason = closes[i], "Breakout invalidated/reversal"
+                    pts = exit_px - entry
+                    trades.append({**in_trade, "exit": round(exit_px,2), "points": round(pts,2), "result": "WIN" if pts > 0 else "LOSS", "exit_reason": reason,
+                                   "entry_time": str(in_trade["entry_time"]), "exit_time": str(candles[i]["date"])})
+                    in_trade = None
+            else:
+                stop = entry + stop_atr * in_trade["atr"]
+                target = entry - target_atr * in_trade["atr"]
+                reversal = closes[i] > in_trade["level"] or (ema20 > ema50 and rsi is not None and rsi > 50)
+                hit_stop, hit_target = highs[i] >= stop, lows[i] <= target
+                if hit_stop or hit_target or reversal or i == len(candles)-1:
+                    if hit_stop:
+                        exit_px, reason = stop, "ATR stop"
+                    elif hit_target:
+                        exit_px, reason = target, "ATR target"
+                    else:
+                        exit_px, reason = closes[i], "Breakout invalidated/reversal"
+                    pts = entry - exit_px
+                    trades.append({**in_trade, "exit": round(exit_px,2), "points": round(pts,2), "result": "WIN" if pts > 0 else "LOSS", "exit_reason": reason,
+                                   "entry_time": str(in_trade["entry_time"]), "exit_time": str(candles[i]["date"])})
+                    in_trade = None
+        if in_trade is None and direction:
+            # Entry is the closing price of the confirming candle; option premium is NOT backtested here.
+            in_trade = {"direction": direction, "entry": float(closes[i]), "level": float(level), "atr": float(atr), "entry_time": candles[i]["date"]}
+    total_points = round(sum(t["points"] for t in trades), 2)
+    wins = sum(1 for t in trades if t["points"] > 0)
+    losses = sum(1 for t in trades if t["points"] <= 0)
+    return {"symbol": symbol, "trades": trades, "trade_count": len(trades), "wins": wins, "losses": losses,
+            "win_rate": round(100 * wins / len(trades), 1) if trades else 0, "points": total_points,
+            "best_points": max([t["points"] for t in trades], default=0), "worst_points": min([t["points"] for t in trades], default=0),
+            "note": "Backtest points are on the underlying index. Historical option-chain momentum/premium P&L is not assumed from current quotes."}
+
+
+@app.route("/api/breakout-monitor/state")
+def breakout_monitor_state_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    state = _breakout_monitor_roll_day(_load_breakout_monitor_state())
+    trades = _load_breakout_monitor_trades()
+    _save_breakout_monitor_state(state)
+    return jsonify({"state": state, "open_trades": [t for t in trades if t.get("status") == "open"],
+                    "recent_trades": sorted(trades, key=lambda t: t.get("opened_at", ""), reverse=True)[:50]})
+
+
+@app.route("/api/breakout-monitor/config", methods=["POST"])
+def breakout_monitor_config_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    state = _load_breakout_monitor_state()
+    allowed = {"interval", "lookback", "poll_seconds", "capital_per_trade", "max_trades_per_day", "max_concurrent_positions", "max_daily_loss", "min_score", "hard_stop_pct", "trail_after_pct", "trail_giveback_pct", "square_off_time", "symbols"}
+    for k in allowed:
+        if k in body:
+            state[k] = body[k]
+    state["symbols"] = [s.upper() for s in state.get("symbols", BREAKOUT_MONITOR_SYMBOLS) if s.upper() in BREAKOUT_MONITOR_SYMBOLS]
+    _save_breakout_monitor_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/breakout-monitor/mode", methods=["POST"])
+def breakout_monitor_mode_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    mode = body.get("mode")
+    if mode not in ("paper", "live"):
+        return jsonify({"error": "mode must be paper or live"}), 400
+    if mode == "live" and body.get("ack") is not True:
+        return jsonify({"error": "Live mode requires explicit confirmation that future entries/exits place REAL Zerodha orders."}), 400
+    state = _load_breakout_monitor_state()
+    state["execution_mode"] = mode
+    _save_breakout_monitor_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/breakout-monitor/arm", methods=["POST"])
+def breakout_monitor_arm_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    state = _breakout_monitor_roll_day(_load_breakout_monitor_state())
+    if state.get("execution_mode") == "live" and body.get("ack") is not True:
+        return jsonify({"error": "Arming LIVE breakout automation requires explicit confirmation."}), 400
+    state["enabled"] = True
+    state["disarm_reason"] = None
+    _save_breakout_monitor_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/breakout-monitor/disarm", methods=["POST"])
+def breakout_monitor_disarm_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    state = _load_breakout_monitor_state()
+    state["enabled"] = False
+    state["disarm_reason"] = "Manually stopped by user"
+    _save_breakout_monitor_state(state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/breakout-monitor/backtest")
+def breakout_monitor_backtest_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    try:
+        days = max(5, min(int(request.args.get("days", 30)), 60))
+        interval = request.args.get("interval", "5minute")
+        if interval not in ("5minute", "15minute"):
+            return jsonify({"error": "Backtest interval must be 5minute or 15minute"}), 400
+        lookback = max(10, min(int(request.args.get("lookback", 20)), 60))
+        stop_atr = max(0.25, float(request.args.get("stop_atr", 1.0)))
+        target_atr = max(0.5, float(request.args.get("target_atr", 2.0)))
+        results = [_breakout_backtest_symbol(s, interval, days, lookback, stop_atr, target_atr) for s in BREAKOUT_MONITOR_SYMBOLS]
+        return jsonify({"days": days, "interval": interval, "lookback": lookback, "stop_atr": stop_atr, "target_atr": target_atr,
+                        "results": results, "note": "Backtest is historical index-point simulation; it does not pretend that today's option premium was available historically."})
+    except Exception as e:
+        logger.exception("Breakout backtest failed")
+        return jsonify({"error": f"Backtest failed: {e}"}), 500
+
+
+@app.route("/api/nifty/bullish-breakout")
+def nifty_bullish_breakout_route():
+    """Read-only NIFTY bullish breakout quality scan; never places an order."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    try:
+        interval = request.args.get("interval", "5minute")
+        lookback = max(10, min(int(request.args.get("lookback", NIFTY_BREAKOUT_DEFAULT_LOOKBACK)), 100))
+        candles, err = _fetch_recent_intraday("NIFTY", interval, max(lookback, 50))
+        if err:
+            return jsonify({"error": err}), 400
+        chain_data, chain_err = get_chain_for_symbol("NIFTY")
+        result, result_err = _nifty_bullish_breakout(candles, chain_data if not chain_err else None, lookback)
+        if result_err:
+            return jsonify({"error": result_err}), 400
+        if chain_err:
+            result["call_side_note"] = f"Option-chain momentum unavailable: {chain_err.get('error', chain_err)}"
+        return jsonify({"signal": result})
+    except Exception as e:
+        logger.exception("NIFTY bullish breakout scan failed")
+        return jsonify({"error": f"NIFTY breakout scan failed: {e}"}), 500
 
 
 @app.route("/api/autotrade/state")
@@ -5979,8 +6669,7 @@ def delta_engine_logs():
 
 
 threading.Thread(target=_autotrade_loop, daemon=True).start()
-threading.Thread(target=_delta_engine_loop, daemon=True).start()
-threading.Thread(target=_delta_spot_poll_loop, daemon=True).start()
+threading.Thread(target=_breakout_monitor_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
