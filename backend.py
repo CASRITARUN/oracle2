@@ -5512,51 +5512,136 @@ def _breakout_monitor_loop():
         time.sleep(sleep_for)
 
 
-def _breakout_backtest_symbol(symbol, interval, days, lookback, stop_atr, target_atr):
+def _breakout_backtest_symbol(symbol, interval, days, lookback, stop_atr, target_atr, min_score=5):
+    """Historical breakout identification + underlying-point simulation.
+
+    IMPORTANT: historical ATM option momentum/premium is deliberately NOT required here because
+    reconstructing the correct historical ATM CE/PE for every candidate would require a separate
+    option-chain history pass. The backtest therefore evaluates the six index-side confirmations:
+    breakout, VWAP, EMA20/50, RSI, volume and resistance/support break, plus the strong-close
+    false-breakout guard. It reports exactly how many raw breakouts were found and where the
+    confirmations rejected them, instead of silently returning zero trades.
+    """
     token, err = resolve_token_for_symbol(symbol)
     if err:
         return {"symbol": symbol, "error": err, "trades": []}
+
     end = now_ist()
-    start = end - timedelta(days=min(max(days, 1), 60) + 5)
+    requested_days = min(max(int(days), 5), 120)
+    # Fetch in <=20-day chunks. This avoids broker historical-range limits for intraday candles
+    # and makes the backtest work consistently for both 5-minute and 15-minute intervals.
+    start = end - timedelta(days=requested_days + 5)
+    chunks = []
+    cursor = start
     try:
-        candles = kite.historical_data(token, start, end, interval)
+        while cursor < end:
+            chunk_end = min(cursor + timedelta(days=20), end)
+            part = kite.historical_data(token, cursor, chunk_end, interval)
+            chunks.extend(part or [])
+            cursor = chunk_end
+            time.sleep(0.36)
     except Exception as e:
         return {"symbol": symbol, "error": str(e), "trades": []}
+
+    # De-duplicate and sort candles by timestamp.
+    uniq = {}
+    for c in chunks:
+        d = c.get("date")
+        key = d.isoformat() if hasattr(d, "isoformat") else str(d)
+        uniq[key] = c
+    candles = [uniq[k] for k in sorted(uniq)]
     if len(candles) < max(lookback + 55, 70):
-        return {"symbol": symbol, "error": "Not enough historical candles", "trades": []}
+        return {"symbol": symbol, "error": f"Only {len(candles)} candles returned; need at least {max(lookback + 55, 70)}.", "trades": []}
+
     closes = np.array([float(c["close"]) for c in candles], dtype=float)
     highs = np.array([float(c["high"]) for c in candles], dtype=float)
     lows = np.array([float(c["low"]) for c in candles], dtype=float)
     vols = np.array([float(c.get("volume", 0) or 0) for c in candles], dtype=float)
+
+    min_score = max(1, min(int(min_score), 6))
     trades = []
+    signals = []
+    raw_breakouts = 0
+    bullish_raw = bearish_raw = 0
+    rejection_counts = {
+        "breakout_size": 0, "vwap": 0, "ema": 0, "rsi": 0, "volume": 0,
+        "strong_close": 0, "qualified": 0
+    }
     in_trade = None
-    for i in range(max(lookback + 55, 70), len(candles)):
-        hist = candles[:i+1]
-        tr = np.maximum(highs[1:i+1] - lows[1:i+1], np.maximum(np.abs(highs[1:i+1] - closes[:i]), np.abs(lows[1:i+1] - closes[:i])))
-        atr = float(np.mean(tr[-lookback:])) if len(tr) >= lookback else 0
+    first_qualified = []
+
+    start_i = max(lookback + 55, 70)
+    for i in range(start_i, len(candles)):
+        tr = np.maximum(
+            highs[1:i+1] - lows[1:i+1],
+            np.maximum(np.abs(highs[1:i+1] - closes[:i]), np.abs(lows[1:i+1] - closes[:i]))
+        )
+        atr = float(np.mean(tr[-lookback:])) if len(tr) >= lookback else 0.0
         if atr <= 0:
             continue
+
         resistance = float(np.max(highs[i-lookback:i]))
         support = float(np.min(lows[i-lookback:i]))
+        close = closes[i]
+        candle_range = max(highs[i] - lows[i], 1e-9)
+        vwap = _monitor_session_vwap(candles, i)
         ema20 = _ema(closes[max(0, i-119):i+1], 20)
         ema50 = _ema(closes[max(0, i-119):i+1], 50)
         rsi = _rsi(closes[:i+1], 14)
-        vwap = _monitor_session_vwap(candles, i)
-        avg_vol = float(np.mean(vols[i-lookback:i])) if i >= lookback else 0
-        rv = vols[i] / avg_vol if avg_vol > 0 else 0
-        direction = None
-        if closes[i] > resistance + 0.15 * atr and vwap is not None and closes[i] > vwap and ema20 > ema50 and rsi is not None and rsi > 55 and rv >= 1.5:
-            direction = "CE"
-            level = resistance
-        elif closes[i] < support - 0.15 * atr and vwap is not None and closes[i] < vwap and ema20 < ema50 and rsi is not None and rsi < 45 and rv >= 1.5:
-            direction = "PE"
-            level = support
+        avg_vol = float(np.mean(vols[i-lookback:i])) if i >= lookback else 0.0
+        rv = vols[i] / avg_vol if avg_vol > 0 else 0.0
+
+        bull_raw = close > resistance
+        bear_raw = close < support
+        if bull_raw or bear_raw:
+            raw_breakouts += 1
+            bullish_raw += int(bull_raw)
+            bearish_raw += int(bear_raw)
+
+        if not bull_raw and not bear_raw:
+            # Still manage an open position below.
+            pass
+        else:
+            direction = "CE" if bull_raw else "PE"
+            level = resistance if bull_raw else support
+            breakout_ok = abs(close - level) >= 0.15 * atr
+            vwap_ok = (vwap is not None and ((close > vwap) if bull_raw else (close < vwap)))
+            ema_ok = (ema20 is not None and ema50 is not None and ((ema20 > ema50) if bull_raw else (ema20 < ema50)))
+            rsi_ok = (rsi is not None and ((rsi > 55) if bull_raw else (rsi < 45)))
+            volume_ok = rv >= 1.5
+            strong_close_ok = ((close - lows[i]) / candle_range >= 0.6) if bull_raw else ((highs[i] - close) / candle_range >= 0.6)
+            conditions = [breakout_ok, vwap_ok, ema_ok, rsi_ok, volume_ok, True]
+            score = sum(bool(x) for x in conditions)
+
+            if not breakout_ok: rejection_counts["breakout_size"] += 1
+            if not vwap_ok: rejection_counts["vwap"] += 1
+            if not ema_ok: rejection_counts["ema"] += 1
+            if not rsi_ok: rejection_counts["rsi"] += 1
+            if not volume_ok: rejection_counts["volume"] += 1
+            if not strong_close_ok: rejection_counts["strong_close"] += 1
+
+            # The sixth item is the already-proven resistance/support break; strong-close is an
+            # extra guard, not one of the six score points.
+            qualified = breakout_ok and score >= min_score and strong_close_ok
+            if qualified:
+                rejection_counts["qualified"] += 1
+                if len(first_qualified) < 12:
+                    first_qualified.append({
+                        "time": str(candles[i]["date"]), "direction": direction,
+                        "price": round(close, 2), "level": round(level, 2),
+                        "score": score, "rsi": round(rsi, 1) if rsi is not None else None,
+                        "rv": round(rv, 2), "vwap": round(vwap, 2) if vwap is not None else None,
+                    })
+                signals.append({"i": i, "direction": direction, "level": level, "atr": atr,
+                                "score": score, "time": candles[i]["date"]})
+
+        # Manage existing underlying simulation.
         if in_trade:
             entry = in_trade["entry"]
             if in_trade["direction"] == "CE":
                 stop = entry - stop_atr * in_trade["atr"]
                 target = entry + target_atr * in_trade["atr"]
-                reversal = closes[i] < in_trade["level"] or (ema20 < ema50 and rsi is not None and rsi < 50)
+                reversal = close < in_trade["level"] or (ema20 is not None and ema50 is not None and ema20 < ema50 and rsi is not None and rsi < 50)
                 hit_stop, hit_target = lows[i] <= stop, highs[i] >= target
                 if hit_stop or hit_target or reversal or i == len(candles)-1:
                     if hit_stop:
@@ -5564,15 +5649,16 @@ def _breakout_backtest_symbol(symbol, interval, days, lookback, stop_atr, target
                     elif hit_target:
                         exit_px, reason = target, "ATR target"
                     else:
-                        exit_px, reason = closes[i], "Breakout invalidated/reversal"
+                        exit_px, reason = close, "Breakout invalidated/reversal"
                     pts = exit_px - entry
-                    trades.append({**in_trade, "exit": round(exit_px,2), "points": round(pts,2), "result": "WIN" if pts > 0 else "LOSS", "exit_reason": reason,
+                    trades.append({**in_trade, "exit": round(exit_px,2), "points": round(pts,2),
+                                   "result": "WIN" if pts > 0 else "LOSS", "exit_reason": reason,
                                    "entry_time": str(in_trade["entry_time"]), "exit_time": str(candles[i]["date"])})
                     in_trade = None
             else:
                 stop = entry + stop_atr * in_trade["atr"]
                 target = entry - target_atr * in_trade["atr"]
-                reversal = closes[i] > in_trade["level"] or (ema20 > ema50 and rsi is not None and rsi > 50)
+                reversal = close > in_trade["level"] or (ema20 is not None and ema50 is not None and ema20 > ema50 and rsi is not None and rsi > 50)
                 hit_stop, hit_target = highs[i] >= stop, lows[i] <= target
                 if hit_stop or hit_target or reversal or i == len(candles)-1:
                     if hit_stop:
@@ -5580,21 +5666,36 @@ def _breakout_backtest_symbol(symbol, interval, days, lookback, stop_atr, target
                     elif hit_target:
                         exit_px, reason = target, "ATR target"
                     else:
-                        exit_px, reason = closes[i], "Breakout invalidated/reversal"
+                        exit_px, reason = close, "Breakout invalidated/reversal"
                     pts = entry - exit_px
-                    trades.append({**in_trade, "exit": round(exit_px,2), "points": round(pts,2), "result": "WIN" if pts > 0 else "LOSS", "exit_reason": reason,
+                    trades.append({**in_trade, "exit": round(exit_px,2), "points": round(pts,2),
+                                   "result": "WIN" if pts > 0 else "LOSS", "exit_reason": reason,
                                    "entry_time": str(in_trade["entry_time"]), "exit_time": str(candles[i]["date"])})
                     in_trade = None
-        if in_trade is None and direction:
-            # Entry is the closing price of the confirming candle; option premium is NOT backtested here.
-            in_trade = {"direction": direction, "entry": float(closes[i]), "level": float(level), "atr": float(atr), "entry_time": candles[i]["date"]}
+
+        # Enter only after the signal has been fully confirmed.
+        if in_trade is None and signals and signals[-1].get("i") == i:
+            sig = signals[-1]
+            in_trade = {"direction": sig["direction"], "entry": float(close), "level": float(sig["level"]),
+                        "atr": float(sig["atr"]), "score": int(sig["score"]), "entry_time": candles[i]["date"]}
+
     total_points = round(sum(t["points"] for t in trades), 2)
     wins = sum(1 for t in trades if t["points"] > 0)
     losses = sum(1 for t in trades if t["points"] <= 0)
-    return {"symbol": symbol, "trades": trades, "trade_count": len(trades), "wins": wins, "losses": losses,
-            "win_rate": round(100 * wins / len(trades), 1) if trades else 0, "points": total_points,
-            "best_points": max([t["points"] for t in trades], default=0), "worst_points": min([t["points"] for t in trades], default=0),
-            "note": "Backtest points are on the underlying index. Historical option-chain momentum/premium P&L is not assumed from current quotes."}
+    return {
+        "symbol": symbol, "trades": trades, "trade_count": len(trades), "wins": wins, "losses": losses,
+        "win_rate": round(100 * wins / len(trades), 1) if trades else 0, "points": total_points,
+        "best_points": max([t["points"] for t in trades], default=0),
+        "worst_points": min([t["points"] for t in trades], default=0),
+        "candles": len(candles), "raw_breakouts": raw_breakouts,
+        "bullish_raw": bullish_raw, "bearish_raw": bearish_raw,
+        "qualified_signals": rejection_counts["qualified"],
+        "rejection_counts": rejection_counts,
+        "first_qualified": first_qualified,
+        "min_score": min_score,
+        "option_momentum_backtested": False,
+        "note": "Historical test uses six index-side confirmations. Historical ATM CE/PE momentum and option-premium P&L are not fabricated from today's chain; option momentum is therefore shown as unavailable for the historical test. Strong-close is an additional false-breakout guard."
+    }
 
 
 @app.route("/api/breakout-monitor/state")
@@ -5669,16 +5770,17 @@ def breakout_monitor_backtest_route():
     if not require_session():
         return jsonify({"error": "not_logged_in"}), 401
     try:
-        days = max(5, min(int(request.args.get("days", 30)), 60))
+        days = max(5, min(int(request.args.get("days", 30)), 120))
         interval = request.args.get("interval", "5minute")
         if interval not in ("5minute", "15minute"):
             return jsonify({"error": "Backtest interval must be 5minute or 15minute"}), 400
         lookback = max(10, min(int(request.args.get("lookback", 20)), 60))
         stop_atr = max(0.25, float(request.args.get("stop_atr", 1.0)))
         target_atr = max(0.5, float(request.args.get("target_atr", 2.0)))
-        results = [_breakout_backtest_symbol(s, interval, days, lookback, stop_atr, target_atr) for s in BREAKOUT_MONITOR_SYMBOLS]
+        min_score = max(1, min(int(request.args.get("min_score", 5)), 6))
+        results = [_breakout_backtest_symbol(s, interval, days, lookback, stop_atr, target_atr, min_score) for s in BREAKOUT_MONITOR_SYMBOLS]
         return jsonify({"days": days, "interval": interval, "lookback": lookback, "stop_atr": stop_atr, "target_atr": target_atr,
-                        "results": results, "note": "Backtest is historical index-point simulation; it does not pretend that today's option premium was available historically."})
+                        "results": results, "min_score": min_score, "note": "Historical backtest now identifies raw breakouts, shows confirmation rejection counts, and simulates underlying index points. Six index-side confirmations are testable historically; ATM option momentum is not fabricated from today's option chain."})
     except Exception as e:
         logger.exception("Breakout backtest failed")
         return jsonify({"error": f"Backtest failed: {e}"}), 500
