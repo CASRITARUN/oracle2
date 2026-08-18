@@ -491,15 +491,16 @@
     <div class="panel" style="margin-top:18px;padding:14px;">
       <h3 style="margin-top:0;">📊 Historical Backtest — did the breakout actually move?</h3>
       <div class="row">
-        <label class="inline">Past days <select id="bmBtDays"><option>10</option><option selected>30</option><option>60</option></select></label>
+        <label class="inline">Past days <select id="bmBtDays"><option>10</option><option selected>30</option><option>60</option><option>90</option><option>120</option></select></label>
+        <label class="inline">Historical score <select id="bmBtMinScore"><option value="4">4/6+</option><option value="5" selected>5/6+</option><option value="6">6/6 only</option></select></label>
         <label class="inline">Stop <input type="number" id="bmBtStop" value="1" min="0.25" step="0.25" style="width:60px;"> ATR</label>
         <label class="inline">Target <input type="number" id="bmBtTarget" value="2" min="0.5" step="0.5" style="width:60px;"> ATR</label>
       </div>
       <div id="bmBacktestSummary" style="margin-top:12px;"></div>
-      <div style="overflow:auto;margin-top:12px;"><table id="bmBtTable"><thead><tr><th>Index</th><th>Trades</th><th>Win %</th><th>Wins</th><th>Losses</th><th>Total points</th><th>Best</th><th>Worst</th></tr></thead><tbody></tbody></table></div>
+      <div style="overflow:auto;margin-top:12px;"><table id="bmBtTable"><thead><tr><th>Index</th><th>Raw breaks</th><th>Qualified</th><th>Trades</th><th>Win %</th><th>Wins</th><th>Losses</th><th>Total points</th><th>Best</th><th>Worst</th></tr></thead><tbody></tbody></table></div>
       <div class="legend" id="bmBtNote" style="margin-top:10px;">Backtest points are on the underlying index. It does not invent historical option premiums from today's option chain.</div>
     </div>
-    <div class="disclaimer">7 confirmations: breakout beyond 0.15 ATR + VWAP alignment + EMA20/50 trend + RSI momentum + ≥1.5× volume + resistance/support break + ATM option momentum. Strong-close is an additional false-breakout guard. A 7/7 score is a quality classification, not a guaranteed win rate.</div>
+    <div class="disclaimer">Live monitor: 7 confirmations = breakout beyond 0.15 ATR + VWAP + EMA20/50 + RSI + ≥1.5× volume + resistance/support break + ATM option momentum. Historical backtest: 6 index-side confirmations are testable from historical candles; ATM option momentum/premium is deliberately NOT fabricated. The backtest now reports raw breakouts, qualified signals and rejection diagnostics. Strong-close remains an additional false-breakout guard.</div>
   </div>
 </div>
 </div><!-- /tabPageNiftyBreakout -->
@@ -1975,9 +1976,25 @@ async function armBreakoutMonitor(){
 }
 async function stopBreakoutMonitor(){const r=await apiFetch("/api/breakout-monitor/disarm",{method:"POST"});const d=await r.json();if(d.error)alert(d.error);else refreshBreakoutMonitor();}
 async function runBreakoutBacktest(){
-  const status=document.getElementById("bmStatus");status.textContent="Running historical test for 4 indices…";
-  const q=`/api/breakout-monitor/backtest?days=${Number(document.getElementById("bmBtDays").value)||30}&interval=${encodeURIComponent(document.getElementById("bmInterval").value)}&lookback=${Number(document.getElementById("bmLookback").value)||20}&stop_atr=${Number(document.getElementById("bmBtStop").value)||1}&target_atr=${Number(document.getElementById("bmBtTarget").value)||2}`;
-  try{const d=await (await apiFetch(q)).json();if(d.error){status.textContent="Backtest error: "+d.error;return;}document.querySelector("#bmBtTable tbody").innerHTML=d.results.map(x=>x.error?`<tr><td>${x.symbol}</td><td colspan='7'>${x.error}</td></tr>`:`<tr><td><b>${x.symbol}</b></td><td>${x.trade_count}</td><td>${x.win_rate}%</td><td>${x.wins}</td><td>${x.losses}</td><td><b>${x.points}</b></td><td>${x.best_points}</td><td>${x.worst_points}</td></tr>`).join("");const v=d.results.filter(x=>!x.error);const pts=v.reduce((a,x)=>a+(x.points||0),0);const n=v.reduce((a,x)=>a+(x.trade_count||0),0);document.getElementById("bmBacktestSummary").innerHTML=`<div class='metric'><div class='k'>Combined underlying points</div><div class='v'>${pts.toFixed(2)} points</div><div class='legend'>${n} simulated trades across ${v.length} indices.</div></div>`;document.getElementById("bmBtNote").textContent=d.note||"";status.textContent="Backtest complete.";}catch(e){status.textContent="Backtest failed: "+e;}
+  const status=document.getElementById("bmStatus");
+  status.textContent="Running historical identification for 4 indices…";
+  const q=`/api/breakout-monitor/backtest?days=${Number(document.getElementById("bmBtDays").value)||30}&interval=${encodeURIComponent(document.getElementById("bmInterval").value)}&lookback=${Number(document.getElementById("bmLookback").value)||20}&stop_atr=${Number(document.getElementById("bmBtStop").value)||1}&target_atr=${Number(document.getElementById("bmBtTarget").value)||2}&min_score=${Number(document.getElementById("bmBtMinScore").value)||5}`;
+  try{
+    const d=await (await apiFetch(q)).json();
+    if(d.error){status.textContent="Backtest error: "+d.error;return;}
+    document.querySelector("#bmBtTable tbody").innerHTML=d.results.map(x=>x.error
+      ? `<tr><td>${x.symbol}</td><td colspan='9'>${x.error}</td></tr>`
+      : `<tr><td><b>${x.symbol}</b></td><td>${x.raw_breakouts??0}</td><td>${x.qualified_signals??0}</td><td>${x.trade_count}</td><td>${x.win_rate}%</td><td>${x.wins}</td><td>${x.losses}</td><td><b>${x.points}</b></td><td>${x.best_points}</td><td>${x.worst_points}</td></tr>`
+    ).join("");
+    const v=d.results.filter(x=>!x.error);
+    const pts=v.reduce((a,x)=>a+(x.points||0),0);
+    const n=v.reduce((a,x)=>a+(x.trade_count||0),0);
+    const raw=v.reduce((a,x)=>a+(x.raw_breakouts||0),0);
+    const qual=v.reduce((a,x)=>a+(x.qualified_signals||0),0);
+    document.getElementById("bmBacktestSummary").innerHTML=`<div class='metric'><div class='k'>Historical identification</div><div class='v'>${raw} raw breakouts → ${qual} qualified signals → ${n} simulated trades</div><div class='legend'>Combined underlying result: ${pts.toFixed(2)} points across ${v.length} indices. Score threshold: ${d.min_score}/6. Option momentum is not assumed historically.</div></div>`;
+    document.getElementById("bmBtNote").textContent=d.note||"";
+    status.textContent="Backtest complete — breakout identification included.";
+  }catch(e){status.textContent="Backtest failed: "+e;}
 }
 </script>
 
