@@ -489,7 +489,14 @@
     <h3 style="font-size:12px;color:var(--muted);text-transform:uppercase;margin-top:20px;">Recent paper / live trades</h3>
     <div style="overflow:auto;"><table id="bmTradeTable"><thead><tr><th>Time</th><th>Index</th><th>Direction</th><th>Option</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Exit reason</th></tr></thead><tbody></tbody></table></div>
     <div class="panel" style="margin-top:18px;padding:14px;">
-      <h3 style="margin-top:0;">📊 Historical Backtest — did the breakout actually move?</h3>
+      
+<div id="breakoutDiagnostics">
+<h3>🔎 Breakout Confirmation Diagnostics</h3>
+<p>Historical breakouts are tested against six index-side confirmations. Historical option momentum is not fabricated.</p>
+<table><thead><tr><th>Index</th><th>Raw</th><th>Breakout</th><th>VWAP</th><th>EMA</th><th>RSI</th><th>Volume</th><th>S/R</th><th>Strong close</th></tr></thead>
+<tbody id="diagRows"><tr><td colspan="9">Run backtest to populate diagnostics.</td></tr></tbody></table>
+</div>
+<h3 style="margin-top:0;">📊 Historical Backtest — did the breakout actually move?</h3>
       <div class="row">
         <label class="inline">Past days <select id="bmBtDays"><option>10</option><option selected>30</option><option>60</option><option>90</option><option>120</option></select></label>
         <label class="inline">Historical score <select id="bmBtMinScore"><option value="4">4/6+</option><option value="5" selected>5/6+</option><option value="6">6/6 only</option></select></label>
