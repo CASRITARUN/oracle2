@@ -3895,6 +3895,324 @@ def close_confirm(pos_id):
     return jsonify({"results": results, "fully_closed": fully_closed, "note": note})
 
 
+
+# ---------------------------------------------------------------------------
+# Existing Position Intelligence — live Zerodha positions
+# ---------------------------------------------------------------------------
+def _position_instrument_map():
+    """Map live option tradingsymbols to exchange/instrument metadata."""
+    mp = {}
+    try:
+        nfo, _ = get_instruments()
+        for i in nfo:
+            if i.get("segment") == "NFO-OPT":
+                mp[i.get("tradingsymbol")] = i
+    except Exception:
+        pass
+    try:
+        for i in get_bse_instruments():
+            if i.get("segment") == "BFO-OPT":
+                mp[i.get("tradingsymbol")] = i
+    except Exception:
+        pass
+    return mp
+
+
+def _option_quote_key(inst):
+    ex = inst.get("exchange") or ("BFO" if inst.get("segment") == "BFO-OPT" else "NFO")
+    return f"{ex}:{inst['tradingsymbol']}"
+
+
+def _classify_position_group(legs):
+    """Classify a same-underlying/same-expiry basket."""
+    calls = [x for x in legs if x["type"] == "CE"]
+    puts = [x for x in legs if x["type"] == "PE"]
+    shorts = [x for x in legs if x["side"] == "SHORT"]
+    longs = [x for x in legs if x["side"] == "LONG"]
+
+    if len(legs) == 4 and len(calls) == 2 and len(puts) == 2 and len(shorts) == 2 and len(longs) == 2:
+        return "IRON CONDOR"
+    if len(legs) == 2 and len(calls) == 1 and len(puts) == 1 and len(shorts) == 2:
+        return "SHORT STRANGLE"
+    if len(legs) == 2 and len(calls) == 1 and len(puts) == 1 and len(longs) == 2:
+        return "LONG STRADDLE"
+    if len(legs) == 2 and ((len(calls) == 2) or (len(puts) == 2)):
+        return "VERTICAL SPREAD"
+    if len(legs) == 4:
+        return "4-LEG / REVIEW"
+    return "UNCLASSIFIED"
+
+
+def _intraday_position_momentum(symbol):
+    """5-minute live momentum snapshot used only for management context."""
+    token, err = resolve_token_for_symbol(symbol)
+    if err:
+        return {"error": err}
+    try:
+        end = now_ist()
+        start = end - timedelta(days=4)
+        candles = kite.historical_data(token, start, end, "5minute")
+    except Exception as e:
+        return {"error": str(e)}
+    if len(candles) < 25:
+        return {"error": "Not enough 5-minute candles"}
+
+    c = candles[-120:]
+    closes = np.array([float(x["close"]) for x in c])
+    highs = np.array([float(x["high"]) for x in c])
+    lows = np.array([float(x["low"]) for x in c])
+    vols = np.array([float(x.get("volume") or 0) for x in c])
+
+    ema20 = _ema(closes, 20)
+    ema50 = _ema(closes, 50)
+    rsi = _rsi(closes, 14)
+    adx = _adx(highs, lows, closes, 14)
+    vwap = None
+    if np.sum(vols) > 0:
+        typical = (highs + lows + closes) / 3.0
+        vwap = float(np.sum(typical * vols) / np.sum(vols))
+
+    spot = float(closes[-1])
+    ret5 = (spot / closes[-2] - 1) * 100 if len(closes) >= 2 else 0
+    ret30 = (spot / closes[-7] - 1) * 100 if len(closes) >= 7 else None
+    ret60 = (spot / closes[-13] - 1) * 100 if len(closes) >= 13 else None
+    avg_vol = float(np.mean(vols[-21:-1])) if len(vols) >= 22 and np.mean(vols[-21:-1]) > 0 else None
+    rv = float(vols[-1] / avg_vol) if avg_vol else None
+
+    direction = "BULLISH" if ((ema20 is not None and ema50 is not None and ema20 > ema50)
+                               and (rsi is None or rsi >= 55)) else \
+                "BEARISH" if ((ema20 is not None and ema50 is not None and ema20 < ema50)
+                              and (rsi is None or rsi <= 45)) else "MIXED"
+
+    strength = "STRONG" if adx is not None and adx >= 25 else "MODERATE" if adx is not None and adx >= 20 else "WEAK/RANGE"
+
+    return {
+        "spot": round(spot, 2), "ema20": round(ema20, 2) if ema20 is not None else None,
+        "ema50": round(ema50, 2) if ema50 is not None else None,
+        "rsi": round(rsi, 1) if rsi is not None else None,
+        "adx": round(adx, 1) if adx is not None else None,
+        "vwap": round(vwap, 2) if vwap is not None else None,
+        "return_5m_pct": round(ret5, 3), "return_30m_pct": round(ret30, 3) if ret30 is not None else None,
+        "return_60m_pct": round(ret60, 3) if ret60 is not None else None,
+        "relative_volume": round(rv, 2) if rv is not None else None,
+        "direction": direction, "strength": strength,
+        "above_vwap": bool(vwap is not None and spot > vwap),
+    }
+
+
+def _position_management_action(group, momentum):
+    """Transparent rule-based triage. It recommends a management action; it never places orders."""
+    dte = group["dte"]
+    pnl = group["pnl"]
+    captured = group.get("profit_captured_pct")
+    call_risk = group.get("call_risk_score", 0)
+    put_risk = group.get("put_risk_score", 0)
+    call_delta = abs(group.get("short_call_delta") or 0)
+    put_delta = abs(group.get("short_put_delta") or 0)
+    direction = momentum.get("direction") if momentum and not momentum.get("error") else "MIXED"
+    strength = momentum.get("strength") if momentum and not momentum.get("error") else "UNKNOWN"
+
+    reasons, actions = [], []
+    threatened = None
+    if group["strategy"] == "IRON CONDOR":
+        if direction == "BULLISH" and call_risk >= put_risk:
+            threatened = "CALL"
+        elif direction == "BEARISH" and put_risk >= call_risk:
+            threatened = "PUT"
+        elif call_risk > put_risk * 1.25:
+            threatened = "CALL"
+        elif put_risk > call_risk * 1.25:
+            threatened = "PUT"
+
+    if captured is not None and captured >= 70 and dte <= 10:
+        action, level = "CLOSE ENTIRE POSITION / TAKE PROFIT", "HIGH"
+        reasons.append(f"{captured:.0f}% of estimated entry credit has been captured with only {dte} DTE.")
+    elif group["strategy"] == "IRON CONDOR" and threatened and (
+        (threatened == "CALL" and (call_delta >= 0.30 or call_risk >= 75)) or
+        (threatened == "PUT" and (put_delta >= 0.30 or put_risk >= 75))
+    ):
+        action, level = f"ADJUST {threatened} SIDE — DO NOT WAIT FOR EXPIRY", "HIGH"
+        reasons.append(f"{threatened} side is the threatened side based on spot distance and short-leg delta.")
+        reasons.append(f"Short {threatened} delta is {call_delta if threatened=='CALL' else put_delta:.2f}.")
+        if strength == "STRONG":
+            reasons.append("Underlying momentum is strong, increasing breakout/gamma risk.")
+    elif group["strategy"] == "IRON CONDOR" and dte <= 3 and (call_risk >= 55 or put_risk >= 55):
+        action, level = "REDUCE RISK / CONSIDER FULL EXIT", "HIGH"
+        reasons.append(f"{dte} DTE with a short strike under meaningful pressure.")
+    elif group["strategy"] == "IRON CONDOR" and pnl < 0 and (call_risk >= 55 or put_risk >= 55):
+        action, level = f"ADJUST THREATENED {threatened or 'SIDE'}", "MEDIUM"
+        reasons.append("Position is losing while one side is becoming materially closer to the underlying.")
+    elif group["strategy"] == "IRON CONDOR" and captured is not None and captured >= 50:
+        action, level = "HOLD / PROTECT PROFIT", "LOW"
+        reasons.append(f"{captured:.0f}% of estimated entry credit is captured and no severe side breach is detected.")
+    else:
+        action, level = "HOLD AND MONITOR", "LOW"
+        reasons.append("No current rule-based trigger for adjustment or full exit.")
+
+    if direction in ("BULLISH", "BEARISH"):
+        reasons.append(f"Underlying is currently {direction.lower()} with {strength.lower()} momentum.")
+    if momentum.get("above_vwap") is True:
+        reasons.append("Price is above VWAP.")
+    elif momentum.get("above_vwap") is False:
+        reasons.append("Price is below VWAP.")
+
+    return {"action": action, "level": level, "threatened_side": threatened,
+            "reasons": reasons,
+            "execution_note": "Recommendation only. Review live option-chain prices and margin before placing any adjustment."}
+
+
+@app.route("/api/existing-position-analysis")
+def existing_position_analysis():
+    """Analyse every currently open Zerodha NFO/BFO option basket as a whole."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+
+    try:
+        raw = kite.positions().get("net", [])
+        instruments = _position_instrument_map()
+        rows = []
+        for p in raw:
+            if p.get("exchange") not in ("NFO", "BFO"):
+                continue
+            qty = int(p.get("quantity") or 0)
+            ts = p.get("tradingsymbol")
+            if qty == 0 or not ts or ts not in instruments:
+                continue
+            ins = instruments[ts]
+            rows.append({
+                "tradingsymbol": ts, "exchange": p.get("exchange"),
+                "quantity": abs(qty), "side": "LONG" if qty > 0 else "SHORT",
+                "entry_price": float(p.get("average_price") or 0),
+                "ltp": float(p.get("last_price") or 0),
+                "pnl": float(p.get("pnl") or 0),
+                "type": ins.get("instrument_type"), "strike": float(ins.get("strike") or 0),
+                "expiry": str(ins.get("expiry")), "underlying": ins.get("name"),
+                "lot_size": int(ins.get("lot_size") or 1),
+                "instrument": ins,
+            })
+
+        # Group by underlying + expiry. This intentionally groups the user's actual
+        # open legs rather than relying on positions.json.
+        grouped = {}
+        for r in rows:
+            key = (r["underlying"], r["expiry"])
+            grouped.setdefault(key, []).append(r)
+
+        analyses = []
+        for (underlying, expiry), legs in grouped.items():
+            strategy = _classify_position_group(legs)
+            spot, spot_err = get_spot_price(underlying)
+            exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+            dte = max((exp_date - now_ist().date()).days, 0)
+
+            # Live quotes for executable exit prices and current leg Greeks.
+            keys = [_option_quote_key(x["instrument"]) for x in legs]
+            quotes = kite_quote_bulk(keys, force_refresh=True)
+            short_call_delta = short_put_delta = None
+            call_risk = put_risk = 0.0
+            initial_credit_total = 0.0
+            current_close_debit = 0.0
+
+            for r in legs:
+                q = quotes.get(_option_quote_key(r["instrument"])) or {}
+                bid, ask = extract_bid_ask(q)
+                r["bid"], r["ask"] = bid, ask
+                exit_px = bid if r["side"] == "LONG" else ask
+                r["exit_price"] = exit_px
+                # Short entry contributes positive credit; long entry is debit.
+                sign_credit = 1 if r["side"] == "SHORT" else -1
+                initial_credit_total += sign_credit * r["entry_price"] * r["quantity"]
+                if exit_px is not None:
+                    # Cost to close a short = buy at ask; proceeds from closing long = sell at bid.
+                    current_close_debit += (exit_px * r["quantity"]) * (1 if r["side"] == "SHORT" else -1)
+
+            if initial_credit_total > 0:
+                current_value_profit = initial_credit_total - current_close_debit
+                captured = max(0.0, min(100.0, current_value_profit / initial_credit_total * 100))
+            else:
+                current_value_profit = sum(r["pnl"] for r in legs)
+                captured = None
+
+            if spot is not None:
+                for r in legs:
+                    T = max((exp_date - now_ist().date()).days, 0) / 365.0
+                    ltp = r["ltp"]
+                    iv = implied_vol(ltp, spot, r["strike"], T, r["type"]) if ltp and T > 0 else 0.25
+                    delta = bs_delta(spot, r["strike"], T, RISK_FREE_RATE, iv, r["type"]) if T > 0 else (1.0 if ((r["type"]=="CE" and spot>r["strike"]) or (r["type"]=="PE" and spot<r["strike"])) else 0.0)
+                    r["delta"] = round(float(delta), 3)
+                    r["iv_pct"] = round(float(iv*100), 1)
+                    if r["side"] == "SHORT" and r["type"] == "CE":
+                        short_call_delta = r["delta"]
+                    if r["side"] == "SHORT" and r["type"] == "PE":
+                        short_put_delta = r["delta"]
+
+            short_calls = [r for r in legs if r["side"]=="SHORT" and r["type"]=="CE"]
+            short_puts = [r for r in legs if r["side"]=="SHORT" and r["type"]=="PE"]
+            if spot is not None:
+                if short_calls:
+                    sc = short_calls[0]
+                    call_risk = min(100.0, abs(spot-sc["strike"])/max(spot,1)*1000 + abs(short_call_delta or 0)*150)
+                if short_puts:
+                    sp = short_puts[0]
+                    put_risk = min(100.0, abs(spot-sp["strike"])/max(spot,1)*1000 + abs(short_put_delta or 0)*150)
+                # Distance is the better directional measure: closer strike = higher risk.
+                if short_calls:
+                    dist = (short_calls[0]["strike"]-spot)/spot*100
+                    call_risk = min(100.0, max(0.0, 100.0 - dist*40) + abs(short_call_delta or 0)*50)
+                if short_puts:
+                    dist = (spot-short_puts[0]["strike"])/spot*100
+                    put_risk = min(100.0, max(0.0, 100.0 - dist*40) + abs(short_put_delta or 0)*50)
+
+            momentum = _intraday_position_momentum(underlying)
+            health = 100.0
+            if pnl := sum(r["pnl"] for r in legs):
+                if pnl < 0: health -= min(30, abs(pnl)/max(abs(initial_credit_total), 1)*30)
+            health -= min(30, max(call_risk, put_risk)*0.30)
+            if dte <= 3: health -= 15
+            elif dte <= 7: health -= 8
+            if momentum.get("strength") == "STRONG": health -= 8
+            health = round(max(0, min(100, health)), 0)
+
+            group = {
+                "underlying": underlying, "expiry": expiry, "dte": dte, "strategy": strategy,
+                "legs": [{k:v for k,v in r.items() if k != "instrument"} for r in legs],
+                "pnl": round(sum(r["pnl"] for r in legs), 2),
+                "entry_credit_total": round(initial_credit_total, 2),
+                "current_close_debit": round(current_close_debit, 2),
+                "profit_captured_pct": round(captured, 1) if captured is not None else None,
+                "spot": round(spot, 2) if spot is not None else None,
+                "short_call_delta": short_call_delta, "short_put_delta": short_put_delta,
+                "call_risk_score": round(call_risk, 1), "put_risk_score": round(put_risk, 1),
+                "health_score": int(health), "momentum": momentum,
+            }
+            group["recommendation"] = _position_management_action(group, momentum)
+            # Scenario distances to the short strikes.
+            group["scenario"] = {}
+            if spot is not None:
+                for pct in (-2,-1,-0.5,0.5,1,2):
+                    s = spot*(1+pct/100)
+                    scenario_pnl = 0.0
+                    T = max(dte,0)/365.0
+                    for r in legs:
+                        iv = (r.get("iv_pct") or 20)/100
+                        theo = bs_price(s,r["strike"],T,RISK_FREE_RATE,iv,r["type"]) if T>0 else max((s-r["strike"]) if r["type"]=="CE" else (r["strike"]-s),0)
+                        # mark position to theoretical option value
+                        scenario_pnl += (theo-r["entry_price"]) * r["quantity"] * (1 if r["side"]=="LONG" else -1)
+                    group["scenario"][f"{pct:+g}%"] = round(scenario_pnl,2)
+            analyses.append(group)
+
+        analyses.sort(key=lambda x: x["health_score"])
+        return jsonify({
+            "positions": analyses,
+            "count": len(analyses),
+            "refreshed_at": now_ist().strftime("%H:%M:%S"),
+            "note": "Rule-based live position management. Recommendations are decision support, not automatic orders or guarantees. Greeks/IV are model estimates."
+        })
+    except Exception as e:
+        logger.exception("Existing position analysis failed")
+        return jsonify({"error": str(e)}), 400
+
+
 @app.route("/api/broker-positions")
 def broker_positions():
     """Live F&O positions straight from your Zerodha account (Kite's net positions() call) —
