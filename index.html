@@ -98,6 +98,24 @@
   .strike-mode-btn.active { background:var(--accent); color:white; border-color:var(--accent); }
   .sweetspot-band { background:rgba(91,141,239,.10); border:1px dashed rgba(91,141,239,.4); padding:8px 12px; border-radius:8px; font-size:12px; color:var(--muted); margin-top:8px; }
 
+
+  .position-intel-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:14px; margin-top:14px; }
+  .position-intel-card { background:#11151d; border:1px solid var(--line); border-radius:10px; padding:15px; }
+  .position-intel-card h4 { margin:0 0 8px; font-size:15px; }
+  .intel-health { font-size:22px; font-weight:800; }
+  .intel-health.good { color:var(--green); } .intel-health.warn { color:#e6b43c; } .intel-health.bad { color:var(--red); }
+  .intel-action { padding:10px 12px; border-radius:8px; margin:10px 0; font-weight:700; background:rgba(91,141,239,.12); }
+  .intel-action.high { background:rgba(229,72,77,.12); color:var(--red); }
+  .intel-action.medium { background:rgba(230,180,60,.12); color:#e6b43c; }
+  .intel-action.low { background:rgba(52,199,123,.12); color:var(--green); }
+  .intel-metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin:10px 0; }
+  .intel-metric { background:#1d212b; padding:8px; border-radius:7px; }
+  .intel-metric .k { color:var(--muted); font-size:10px; } .intel-metric .v { font-weight:700; margin-top:2px; }
+  .intel-reasons { margin:6px 0 0 18px; font-size:12px; line-height:1.5; }
+  .intel-legs { font-size:11px; color:var(--muted); }
+  .intel-scenario { overflow-x:auto; margin-top:10px; }
+  .intel-scenario table { font-size:11px; }
+
 </style>
 </head>
 <body>
@@ -396,7 +414,25 @@
     </div>
   </div>
 
-  <div class="panel">
+  
+  <div class="panel" id="existingPositionIntelPanel">
+    <h2>🛡️ Existing Position Intelligence — analyse open positions and suggest the next action</h2>
+    <div class="row">
+      <button id="refreshPositionIntelBtn">Analyse Existing Positions</button>
+      <span id="positionIntelStatus" class="loading">Automatically analyses live Zerodha F&amp;O positions.</span>
+    </div>
+    <div class="legend">
+      This section groups your actual open legs into structures such as Iron Condor, Strangle or Spread,
+      then evaluates P&amp;L, DTE, short-leg risk, live momentum, VWAP/EMA/RSI/ADX, scenario moves and
+      current option pricing. It gives a rule-based recommendation such as HOLD, TAKE PROFIT, ADJUST A SIDE,
+      REDUCE RISK or CLOSE THE ENTIRE POSITION. It does not place an adjustment order automatically.
+    </div>
+    <div id="positionIntelCards" class="position-intel-grid">
+      <div class="legend">Click “Analyse Existing Positions” to load the live analysis.</div>
+    </div>
+  </div>
+
+<div class="panel">
     <h2>7. Price Movement Chart (candlestick)</h2>
     <div class="row">
       <input type="text" id="chartSymbolInput" placeholder="e.g. ITC, NIFTY" />
@@ -2012,5 +2048,91 @@ loadOrders();
 loadBrokerPositions();
 loadEvents();
 </script>
+
+<script>
+// ---------- Existing Position Intelligence ----------
+function intelHealthClass(score) {
+  return score >= 70 ? "good" : score >= 45 ? "warn" : "bad";
+}
+function intelMoney(v) {
+  if (v == null || Number.isNaN(Number(v))) return "—";
+  const n = Number(v);
+  return `${n >= 0 ? "+" : "−"}₹${Math.abs(n).toFixed(0)}`;
+}
+function renderExistingPositionIntel(d) {
+  const root = document.getElementById("positionIntelCards");
+  if (!root) return;
+  if (d.error) { root.innerHTML = `<div class="warn-box">${d.error}</div>`; return; }
+  if (!d.positions || !d.positions.length) {
+    root.innerHTML = `<div class="legend">No open option positions were found in Zerodha.</div>`;
+    return;
+  }
+  root.innerHTML = d.positions.map(p => {
+    const m = p.momentum || {};
+    const rec = p.recommendation || {};
+    const h = intelHealthClass(Number(p.health_score || 0));
+    const legs = (p.legs || []).map(l =>
+      `${l.side} ${l.tradingsymbol} ×${l.quantity}`).join(" · ");
+    const scenario = p.scenario || {};
+    const scenarioRows = Object.entries(scenario).map(([move,val]) =>
+      `<td>${move}</td>`).join("");
+    const scenarioVals = Object.values(scenario).map(val =>
+      `<td class="${Number(val)>=0?'pnl-pos':'pnl-neg'}">${intelMoney(val)}</td>`).join("");
+    return `
+      <div class="position-intel-card">
+        <h4>${p.underlying} — ${p.strategy} <span class="badge ${h==='good'?'good':h==='warn'?'fair':'avoid'}">${p.health_score}/100</span></h4>
+        <div class="intel-legs">${legs}</div>
+        <div class="intel-metrics">
+          <div class="intel-metric"><div class="k">SPOT</div><div class="v">₹${p.spot ?? "—"}</div></div>
+          <div class="intel-metric"><div class="k">DTE</div><div class="v">${p.dte}</div></div>
+          <div class="intel-metric"><div class="k">CURRENT P&amp;L</div><div class="v ${p.pnl>=0?'pnl-pos':'pnl-neg'}">${intelMoney(p.pnl)}</div></div>
+          <div class="intel-metric"><div class="k">PROFIT CAPTURED</div><div class="v">${p.profit_captured_pct == null ? "—" : p.profit_captured_pct+"%"}</div></div>
+          <div class="intel-metric"><div class="k">SHORT CE DELTA</div><div class="v">${p.short_call_delta ?? "—"}</div></div>
+          <div class="intel-metric"><div class="k">SHORT PE DELTA</div><div class="v">${p.short_put_delta ?? "—"}</div></div>
+          <div class="intel-metric"><div class="k">CALL RISK</div><div class="v">${p.call_risk_score ?? "—"}/100</div></div>
+          <div class="intel-metric"><div class="k">PUT RISK</div><div class="v">${p.put_risk_score ?? "—"}/100</div></div>
+          <div class="intel-metric"><div class="k">MOMENTUM</div><div class="v">${m.direction ?? "—"} / ${m.strength ?? "—"}</div></div>
+        </div>
+        <div class="intel-action ${String(rec.level||'LOW').toLowerCase()}">
+          🎯 ${rec.action || "HOLD AND MONITOR"}
+        </div>
+        <div><b>Why:</b>
+          <ul class="intel-reasons">${(rec.reasons||[]).map(x=>`<li>${x}</li>`).join("")}</ul>
+        </div>
+        <div class="insight-note">
+          5m: ${m.return_5m_pct ?? "—"}% · 30m: ${m.return_30m_pct ?? "—"}% · 60m: ${m.return_60m_pct ?? "—"}% ·
+          VWAP: ${m.vwap ?? "—"} · EMA20: ${m.ema20 ?? "—"} · EMA50: ${m.ema50 ?? "—"} ·
+          RSI: ${m.rsi ?? "—"} · ADX: ${m.adx ?? "—"} · RV: ${m.relative_volume ?? "—"}x
+        </div>
+        <div class="intel-scenario">
+          <b>Underlying move scenario — modelled from current IV/entry data</b>
+          <table><tbody><tr>${scenarioRows}</tr><tr>${scenarioVals}</tr></tbody></table>
+        </div>
+        <div class="legend">${rec.execution_note || ""}</div>
+      </div>`;
+  }).join("");
+}
+
+async function loadExistingPositionIntel() {
+  const status = document.getElementById("positionIntelStatus");
+  if (!status) return;
+  status.textContent = "Analysing live positions, structure, momentum and risk...";
+  try {
+    const r = await apiFetch("/api/existing-position-analysis");
+    const d = await r.json();
+    if (d.error) { status.textContent = "Analysis failed."; renderExistingPositionIntel(d); return; }
+    renderExistingPositionIntel(d);
+    status.textContent = `Updated ${d.refreshed_at || "just now"} — ${d.count || 0} position group(s) analysed.`;
+  } catch (e) {
+    status.textContent = "Analysis failed: " + e;
+  }
+}
+document.getElementById("refreshPositionIntelBtn")?.addEventListener("click", loadExistingPositionIntel);
+setInterval(() => {
+  if (document.visibilityState === "visible") loadExistingPositionIntel();
+}, 30000);
+loadExistingPositionIntel();
+</script>
+
 </body>
 </html>
