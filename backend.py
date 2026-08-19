@@ -1653,6 +1653,25 @@ def estimate_charges(orders):
 # ---------------------------------------------------------------------------
 # Kite login flow
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Historical breakout diagnostics
+# ---------------------------------------------------------------------------
+def breakout_confirmation_diagnostics(c):
+    """Six historical index-side confirmations; option momentum is excluded."""
+    return {
+        "breakout": bool(c.get("breakout")),
+        "vwap": bool(c.get("vwap")),
+        "ema": bool(c.get("ema")),
+        "rsi": bool(c.get("rsi")),
+        "volume": bool(c.get("volume")),
+        "sr": bool(c.get("sr") or c.get("resistance_broken") or c.get("support_broken")),
+        "strong_close": bool(c.get("strong_close", True)),
+    }
+
+def diagnostic_score(c):
+    d = breakout_confirmation_diagnostics(c)
+    return sum(d[k] for k in ("breakout","vwap","ema","rsi","volume","sr")), d
+
 @app.route("/api/login-url")
 def login_url():
     return jsonify({"url": kite.login_url()})
@@ -6790,3 +6809,12 @@ if __name__ == "__main__":
         print("!! ALLOW_INSECURE_NEWS is on — news headline fetches will skip TLS verification on failure.")
     print("Starting server at http://localhost:5000")
     app.run(host="0.0.0.0", port=5000, debug=False)
+
+
+@app.route("/api/breakout/diagnostics")
+def breakout_diagnostics():
+    return jsonify({
+        "historical_confirmations": ["breakout","vwap","ema","rsi","volume","support_resistance"],
+        "thresholds": [4,5,6],
+        "option_momentum_included": False
+    })
