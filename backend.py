@@ -7107,6 +7107,316 @@ def delta_engine_logs():
     return jsonify({"logs": _delta_logger.read_recent(limit)})
 
 
+
+
+# ============================================================================
+# AUTONOMOUS AI EVOLUTION ENGINE
+# Separate paper-trading/learning engine. It does NOT modify the existing
+# Iron Condor, Calendar, Auto Trade or Delta Neutral execution logic.
+# It uses the same Zerodha/Kite session and runs in the background after login.
+# ============================================================================
+import sqlite3
+from statistics import mean
+AI_DB_FILE = os.path.join(os.path.dirname(__file__), "ai_evolution.db")
+AI_POLL_SECONDS = int(os.environ.get("AI_POLL_SECONDS", "60"))
+AI_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+# Autonomous universe: indices + every currently listed NSE F&O stock.  The engine
+# rotates through this universe in small chunks so it can run continuously without
+# bursting Kite rate limits.  Set AI_UNIVERSE_MODE=INDEX_ONLY to restrict it.
+AI_UNIVERSE_MODE = os.environ.get("AI_UNIVERSE_MODE", "ALL_FO").upper()
+AI_SCAN_CHUNK_SIZE = int(os.environ.get("AI_SCAN_CHUNK_SIZE", "8"))
+AI_LOCK = threading.Lock()
+
+AI_DEFAULTS = {
+    "min_score": 72.0, "min_rr": 1.5, "stop_pct": 0.75, "target_pct": 1.50,
+    "risk_per_trade_pct": 1.0, "max_positions": 6, "learning_min_trades": 40,
+    "challenger_min_trades": 30, "enabled": 1
+}
+
+def ai_db():
+    c=sqlite3.connect(AI_DB_FILE); c.row_factory=sqlite3.Row; return c
+
+def ai_init_db():
+    c=ai_db()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS ai_settings(key TEXT PRIMARY KEY,value TEXT);
+    CREATE TABLE IF NOT EXISTS ai_versions(id INTEGER PRIMARY KEY AUTOINCREMENT,version TEXT,parent_version TEXT,created_at TEXT,status TEXT,reason TEXT,params TEXT,metrics TEXT);
+    CREATE TABLE IF NOT EXISTS ai_market(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,spot REAL,iv REAL,pcr REAL,volume REAL,trend REAL,momentum REAL,volatility REAL,snapshot TEXT);
+    CREATE TABLE IF NOT EXISTS ai_decisions(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,version TEXT,symbol TEXT,score REAL,decision TEXT,reason TEXT,snapshot TEXT);
+    CREATE TABLE IF NOT EXISTS ai_trades(id INTEGER PRIMARY KEY AUTOINCREMENT,version TEXT,ts TEXT,symbol TEXT,option_symbol TEXT,token INTEGER,side TEXT,entry REAL,stop REAL,target REAL,qty INTEGER,score REAL,setup_json TEXT,status TEXT,exit REAL,exit_ts TEXT,pnl REAL DEFAULT 0,r_multiple REAL DEFAULT 0,mfe REAL DEFAULT 0,mae REAL DEFAULT 0,exit_reason TEXT);
+    CREATE TABLE IF NOT EXISTS ai_changes(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,from_version TEXT,to_version TEXT,change_json TEXT,hypothesis TEXT,before_metrics TEXT,after_metrics TEXT,impact TEXT,status TEXT);
+    CREATE TABLE IF NOT EXISTS ai_learning(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,version TEXT,observation TEXT,hypothesis TEXT,action TEXT,evidence TEXT);
+    CREATE TABLE IF NOT EXISTS ai_events(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,level TEXT,event TEXT,detail TEXT);
+    """)
+    for k,v in AI_DEFAULTS.items(): c.execute("INSERT OR IGNORE INTO ai_settings VALUES(?,?)",(k,str(v)))
+    if not c.execute("SELECT 1 FROM ai_versions LIMIT 1").fetchone():
+        c.execute("INSERT INTO ai_versions(version,parent_version,created_at,status,reason,params,metrics) VALUES(?,?,?,?,?,?,?)",
+                  ("1.0",None,datetime.now().isoformat(),"CHAMPION","Initial autonomous paper strategy",json.dumps(AI_DEFAULTS),json.dumps({})))
+    c.commit();c.close()
+
+def ai_log(level,event,detail=""):
+    try:
+        c=ai_db();c.execute("INSERT INTO ai_events VALUES(NULL,?,?,?,?)",(datetime.now().isoformat(),level,event,detail));c.commit();c.close()
+    except Exception: pass
+
+def ai_settings():
+    c=ai_db(); rows=c.execute("SELECT key,value FROM ai_settings").fetchall(); c.close(); p=dict(AI_DEFAULTS)
+    for r in rows:
+        try:p[r["key"]]=float(r["value"])
+        except: pass
+    return p
+
+def ai_champion():
+    c=ai_db();r=c.execute("SELECT * FROM ai_versions WHERE status='CHAMPION' ORDER BY id DESC LIMIT 1").fetchone();c.close();return dict(r) if r else None
+
+def ai_params():
+    r=ai_champion(); return json.loads(r["params"]) if r else ai_settings()
+
+def ai_market_open():
+    try:
+        n=now_ist(); return n.weekday()<5 and datetime.strptime("09:15","%H:%M").time() <= n.time() <= datetime.strptime("15:30","%H:%M").time()
+    except: return False
+
+def ai_store_market(symbol, snapshot):
+    c=ai_db(); c.execute("INSERT INTO ai_market(ts,symbol,spot,iv,pcr,volume,trend,momentum,volatility,snapshot) VALUES(?,?,?,?,?,?,?,?,?,?)",
+      (datetime.now().isoformat(),symbol,snapshot.get("spot"),snapshot.get("iv"),snapshot.get("pcr"),snapshot.get("volume"),snapshot.get("trend"),snapshot.get("momentum"),snapshot.get("volatility"),json.dumps(snapshot)))
+    c.commit();c.close()
+
+def ai_market_history(symbol, n=120):
+    c=ai_db();r=c.execute("SELECT * FROM ai_market WHERE symbol=? ORDER BY id DESC LIMIT ?",(symbol,n)).fetchall();c.close();return [dict(x) for x in reversed(r)]
+
+def ai_snapshot(symbol, params=None):
+    params = params or ai_params()
+    data,err=get_chain_for_symbol(symbol)
+    if err:return None,err
+    spot=float(data["spot"]); chain=data["chain"]
+    calls=[x for x in chain if x.get("instrument_type")=="CE"]; puts=[x for x in chain if x.get("instrument_type")=="PE"]
+    atm=min(chain,key=lambda x:abs(float(x["strike"])-spot)) if chain else None
+    iv=float(atm.get("iv") or 0) if atm else 0
+    pcr=compute_pcr_and_max_pain(chain).get("pcr") or 1.0
+    vol=float(sum((x.get("volume") or 0) for x in chain)/max(len(chain),1))
+    hist=ai_market_history(symbol,120); prices=[float(x["spot"]) for x in hist if x.get("spot") is not None]+[spot]
+    ret5=((spot/prices[-6])-1)*100 if len(prices)>=6 else 0
+    ret20=((spot/prices[-21])-1)*100 if len(prices)>=21 else ret5
+    ma10=mean(prices[-10:]) if len(prices)>=10 else spot
+    ma30=mean(prices[-30:]) if len(prices)>=30 else ma10
+    trend=max(0,min(25,12.5+(ma10/ma30-1)*500))
+    momentum=max(0,min(25,12.5+ret5*3+ret20*1.5))
+    if len(prices)>=10:
+        m=mean(prices[-10:]); sd=(mean([(z-m)**2 for z in prices[-10:]])**0.5); volatility=(sd/m*100) if m else 0
+    else: volatility=0
+    vol_score=max(0,min(15,15-abs(volatility-0.5)*8))
+    pcr_score=max(0,min(15,7.5+(pcr-1)*15))
+    iv_score=max(0,min(20,10+(iv-15)*0.6))
+    score=trend+momentum+vol_score+pcr_score+iv_score
+    side="LONG" if trend+momentum+pcr_score>=32 else "SHORT"
+    option_type="CE" if side=="LONG" else "PE"
+    candidates=[x for x in chain if x.get("instrument_type")==option_type and x.get("delta") is not None]
+    if not candidates: return None,{"error":"No option candidates"}
+    target=min(candidates,key=lambda x:abs(abs(float(x.get("delta",0)))-0.50))
+    entry=float(target.get("mid") or target.get("ltp") or 0)
+    lot=int(data.get("lot_size") or target.get("lot_size") or 1)
+    stop=entry*(1-float(params["stop_pct"])/100); target_price=entry*(1+float(params["target_pct"])/100)
+    return {"symbol":symbol,"spot":spot,"score":round(score,2),"side":side,"option_type":option_type,
+            "option_symbol":target.get("tradingsymbol"),"token":int(target.get("instrument_token")),"entry":entry,
+            "stop":stop,"target":target_price,"lot_size":lot,"iv":iv,"pcr":pcr,"volume":vol,
+            "trend":trend,"momentum":momentum,"volatility":volatility,"components":{"trend":round(trend,2),"momentum":round(momentum,2),"volatility":round(vol_score,2),"pcr":round(pcr_score,2),"iv":round(iv_score,2)},
+            "rr":round((target_price-entry)/max(entry-stop,0.0001),2)},None
+
+def ai_metrics(version=None):
+    c=ai_db();q="SELECT * FROM ai_trades WHERE status='CLOSED'";a=[]
+    if version:q+=" AND version=?";a.append(version)
+    rows=c.execute(q,a).fetchall();c.close(); pnl=[float(r["pnl"]) for r in rows];rs=[float(r["r_multiple"]) for r in rows]
+    wins=[x for x in pnl if x>0];loss=[x for x in pnl if x<0]
+    return {"trades":len(rows),"win_rate":round(len(wins)/len(rows)*100,2) if rows else 0,"avg_r":round(sum(rs)/len(rs),3) if rs else 0,"profit_factor":round(sum(wins)/abs(sum(loss)),2) if loss else (99 if wins else 0),"pnl":round(sum(pnl),2)}
+
+def ai_open_trades():
+    c=ai_db();r=c.execute("SELECT * FROM ai_trades WHERE status='OPEN'").fetchall();c.close();return [dict(x) for x in r]
+
+def ai_open_trade(x,ver):
+    p=ai_params()
+    if len(ai_open_trades())>=int(p["max_positions"]):return False
+    c=ai_db();c.execute("INSERT INTO ai_trades(version,ts,symbol,option_symbol,token,side,entry,stop,target,qty,score,setup_json,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      (ver,datetime.now().isoformat(),x["symbol"],x["option_symbol"],x["token"],x["side"],x["entry"],x["stop"],x["target"],x["lot_size"],x["score"],json.dumps(x),"OPEN"));c.commit();c.close();ai_log("TRADE","AUTO_PAPER_OPEN",f'{x["symbol"]} {x["option_symbol"]} score={x["score"]}');return True
+
+def ai_close_trades():
+    if not require_session():return
+    for t in ai_open_trades():
+        try:
+            q=kite_quote_bulk([f'NFO:{t["option_symbol"]}']).get(f'NFO:{t["option_symbol"]}')
+            price=extract_price(q) if q else None
+            if price is None:continue
+            hit=None
+            if t["side"]=="LONG":
+                if price<=t["stop"]:hit=("STOP",t["stop"])
+                elif price>=t["target"]:hit=("TARGET",t["target"])
+                pnl=(price-t["entry"])*t["qty"]
+            else:
+                if price>=t["stop"]:hit=("STOP",t["stop"])
+                elif price<=t["target"]:hit=("TARGET",t["target"])
+                pnl=(t["entry"]-price)*t["qty"]
+            if hit:
+                exitp=hit[1];pnl=(exitp-t["entry"])*t["qty"] if t["side"]=="LONG" else (t["entry"]-exitp)*t["qty"]
+                risk=abs(t["entry"]-t["stop"])*t["qty"];rm=pnl/risk if risk else 0
+                c=ai_db();c.execute("UPDATE ai_trades SET status='CLOSED',exit=?,exit_ts=?,pnl=?,r_multiple=?,exit_reason=? WHERE id=?",(exitp,datetime.now().isoformat(),pnl,rm,hit[0],t["id"]));c.commit();c.close();ai_log("TRADE","AUTO_PAPER_CLOSE",f'id={t["id"]} {hit[0]} pnl={pnl:.2f} R={rm:.2f}')
+        except Exception as e:ai_log("ERROR","AI_MONITOR",str(e))
+
+def ai_record_decision(ver,x,decision,reason):
+    c=ai_db();c.execute("INSERT INTO ai_decisions VALUES(NULL,?,?,?,?,?,?,?)",(datetime.now().isoformat(),ver,x["symbol"],x["score"],decision,reason,json.dumps(x)));c.commit();c.close()
+
+def ai_learn():
+    ch=ai_champion();
+    if not ch:return
+    p=json.loads(ch["params"]);m=ai_metrics(ch["version"])
+    if m["trades"]<int(p["learning_min_trades"]):return
+    c=ai_db();rows=c.execute("SELECT score,r_multiple FROM ai_trades WHERE version=? AND status='CLOSED' ORDER BY id DESC LIMIT 100",(ch["version"],)).fetchall();c.close()
+    high=[r["r_multiple"] for r in rows if r["score"]>=80];low=[r["r_multiple"] for r in rows if r["score"]<80]
+    cand=dict(p);change={};hyp=""
+    if len(high)>=15 and len(low)>=10 and mean(high)>mean(low)+0.15:
+        old=p["min_score"];new=min(90,old+5)
+        if new!=old:cand["min_score"]=new;change={"min_score":[old,new]};hyp="High-score setups have materially better R expectancy."
+    elif m["win_rate"]<45 and m["avg_r"]<0:
+        old=p["min_rr"];new=min(2.5,old+0.2)
+        if new!=old:cand["min_rr"]=new;change={"min_rr":[old,new]};hyp="Negative expectancy requires stricter reward-to-risk selection."
+    elif m["win_rate"]>60 and m["avg_r"]>0.25:
+        old=p["min_score"];new=max(65,old-2)
+        if new!=old:cand["min_score"]=new;change={"min_score":[old,new]};hyp="Test whether broader selection retains strong expectancy."
+    if not change:return
+    newver=f'{float(ch["version"])+0.1:.1f}'
+    c=ai_db();c.execute("INSERT INTO ai_versions(version,parent_version,created_at,status,reason,params,metrics) VALUES(?,?,?,?,?,?,?)",(newver,ch["version"],datetime.now().isoformat(),"CHALLENGER",hyp,json.dumps(cand),json.dumps(m)));c.execute("INSERT INTO ai_changes(ts,from_version,to_version,change_json,hypothesis,before_metrics,after_metrics,impact,status) VALUES(?,?,?,?,?,?,?,?,?)",(datetime.now().isoformat(),ch["version"],newver,json.dumps(change),hyp,json.dumps(m),json.dumps({}),"Awaiting challenger evidence","TESTING"));c.execute("INSERT INTO ai_learning VALUES(NULL,?,?,?,?,?,?)",(datetime.now().isoformat(),ch["version"],f'{m["trades"]} trades: win {m["win_rate"]}%, avgR {m["avg_r"]}',hyp,f'Created challenger {newver}',json.dumps(change)));c.commit();c.close();ai_log("LEARNING","CHALLENGER_CREATED",f'{ch["version"]}->{newver}')
+
+def ai_evaluate_challenger():
+    c=ai_db();ch=c.execute("SELECT * FROM ai_versions WHERE status='CHALLENGER' ORDER BY id LIMIT 1").fetchone();c.close()
+    if not ch:return
+    p=json.loads(ch["params"]);m=ai_metrics(ch["version"])
+    if m["trades"]<int(p["challenger_min_trades"]):return
+    parent=ai_metrics(ch["parent_version"]);better=(m["avg_r"]>parent["avg_r"]+0.05 and m["profit_factor"]>=parent["profit_factor"]) or (m["win_rate"]>=parent["win_rate"]+5 and m["avg_r"]>=parent["avg_r"])
+    c=ai_db()
+    if better:
+        c.execute("UPDATE ai_versions SET status='RETIRED',metrics=? WHERE version=?",(json.dumps(parent),ch["parent_version"]));c.execute("UPDATE ai_versions SET status='CHAMPION',metrics=? WHERE version=?",(json.dumps(m),ch["version"]));c.execute("UPDATE ai_changes SET after_metrics=?,impact=?,status='ACCEPTED' WHERE to_version=?",(json.dumps(m),f'Improved vs parent: {m}',ch["version"]));action='ACCEPTED'
+    else:
+        c.execute("UPDATE ai_versions SET status='REJECTED',metrics=? WHERE version=?",(json.dumps(m),ch["version"]));c.execute("UPDATE ai_changes SET after_metrics=?,impact=?,status='ROLLED_BACK' WHERE to_version=?",(json.dumps(m),'Challenger failed; parent retained',ch["version"]));action='ROLLED_BACK'
+    c.commit();c.close();ai_log('LEARNING',action,f'challenger={ch["version"]} metrics={m}')
+
+def ai_universe():
+    """Return the current live F&O universe for autonomous paper trading.
+    Indices are included and the stock list comes directly from Kite's NFO
+    instrument master, so newly listed/removed F&O stocks are picked up without
+    editing this code. The list is sorted for deterministic rotation."""
+    if AI_UNIVERSE_MODE == "INDEX_ONLY":
+        return list(AI_SYMBOLS)
+    try:
+        indices = [x for x in AI_SYMBOLS if x in INDEX_SYMBOLS]
+        stocks = fo_stock_universe()
+        return list(dict.fromkeys(indices + stocks))
+    except Exception as e:
+        ai_log("ERROR", "AI_UNIVERSE", str(e))
+        return list(AI_SYMBOLS)
+
+
+def ai_scan_batch():
+    """Rotate through the whole F&O universe across cycles.
+    A full universe of ~200 symbols is deliberately not scanned in one loop;
+    each cycle scans a small chunk and advances the cursor. This keeps the
+    engine running during the whole market session while respecting Kite's
+    quote-rate limits."""
+    universe = ai_universe()
+    c = ai_db()
+    row = c.execute("SELECT value FROM ai_settings WHERE key='scan_cursor'").fetchone()
+    cursor = int(float(row["value"])) if row else 0
+    if not universe:
+        return [], 0, 0
+    cursor %= len(universe)
+    batch = [universe[(cursor+i) % len(universe)] for i in range(min(AI_SCAN_CHUNK_SIZE, len(universe)))]
+    new_cursor = (cursor + len(batch)) % len(universe)
+    c.execute("INSERT OR REPLACE INTO ai_settings(key,value) VALUES('scan_cursor',?)", (str(new_cursor),))
+    c.commit(); c.close()
+    return batch, len(universe), new_cursor
+
+def ai_cycle():
+    # The browser tab is NOT involved in this loop. Once the Python process is
+    # running, it operates whenever a valid Zerodha session exists and the NSE
+    # market is open. Outside market hours it simply sleeps and resumes next day.
+    if not ai_market_open() or not require_session():
+        return
+    ai_close_trades()
+    ch=ai_champion()
+    champion_ver=ch["version"] if ch else '1.0'
+    champion_params=ai_params()
+    challenger=None
+    c=ai_db(); row=c.execute("SELECT * FROM ai_versions WHERE status='CHALLENGER' ORDER BY id LIMIT 1").fetchone(); c.close()
+    if row:
+        challenger=dict(row)
+
+    batch,total,cursor=ai_scan_batch()
+    ai_log('SCAN','AI_UNIVERSE',f'Batch {len(batch)} / universe {total}; cursor={cursor}; mode={AI_UNIVERSE_MODE}')
+    open_now=ai_open_trades()
+    for sym in batch:
+        try:
+            # Build one market snapshot, then test the same opportunity against
+            # Champion and Challenger rules. This makes the challenger a real
+            # paper experiment instead of merely a database record.
+            x,err=ai_snapshot(sym, champion_params)
+            if err:
+                ai_log('ERROR','AI_SCAN',f'{sym}: {err}')
+                continue
+            ai_store_market(sym,x)
+            for ver,params,role in [(champion_ver,champion_params,'CHAMPION')]+(
+                    [(challenger['version'],json.loads(challenger['params']),'CHALLENGER')] if challenger else []):
+                approved=x["score"]>=float(params["min_score"]) and x["rr"]>=float(params["min_rr"])
+                reason=f'{role}: score={x["score"]} rr={x["rr"]} threshold={params["min_score"]}'
+                ai_record_decision(ver,x,'APPROVE' if approved else 'REJECT',reason)
+                already=any(t['symbol']==sym and t['version']==ver for t in open_now)
+                if approved and not already and len(open_now)<int(champion_params["max_positions"]):
+                    xp=dict(x)
+                    xp["stop"]=xp["entry"]*(1-float(params["stop_pct"])/100)
+                    xp["target"]=xp["entry"]*(1+float(params["target_pct"])/100)
+                    xp["rr"]=round((xp["target"]-xp["entry"])/max(xp["entry"]-xp["stop"],0.0001),2)
+                    if ai_open_trade(xp,ver):
+                        open_now=ai_open_trades()
+        except Exception as e:
+            ai_log('ERROR','AI_SCAN',f'{sym}: {e}')
+    ai_learn();ai_evaluate_challenger()
+
+def ai_loop():
+    ai_init_db();ai_log('SYSTEM','START','Autonomous AI Evolution engine started; paper mode only')
+    while True:
+        try:
+            if ai_settings().get('enabled',1):ai_cycle()
+        except Exception as e:ai_log('ERROR','AI_ENGINE',str(e))
+        time.sleep(AI_POLL_SECONDS)
+
+@app.route('/api/ai-evolution/status')
+def ai_status():
+    ai_init_db();ch=ai_champion();p=ai_params();m=ai_metrics(ch['version'] if ch else None)
+    universe=ai_universe()
+    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now().isoformat()})
+
+@app.route('/api/ai-evolution/trades')
+def ai_trades_api():
+    c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_trades ORDER BY id DESC LIMIT 200')];c.close();return jsonify(r)
+@app.route('/api/ai-evolution/decisions')
+def ai_decisions_api():
+    c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_decisions ORDER BY id DESC LIMIT 200')];c.close();return jsonify(r)
+@app.route('/api/ai-evolution/changes')
+def ai_changes_api():
+    c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_changes ORDER BY id DESC LIMIT 100')];c.close();return jsonify(r)
+@app.route('/api/ai-evolution/learning')
+def ai_learning_api():
+    c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_learning ORDER BY id DESC LIMIT 100')];c.close();return jsonify(r)
+@app.route('/api/ai-evolution/versions')
+def ai_versions_api():
+    c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_versions ORDER BY id DESC')];c.close();return jsonify(r)
+@app.route('/api/ai-evolution/events')
+def ai_events_api():
+    c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_events ORDER BY id DESC LIMIT 150')];c.close();return jsonify(r)
+@app.route('/api/ai-evolution/cycle',methods=['POST'])
+def ai_force_cycle():
+    ai_cycle();return jsonify({'ok':True})
+
+ai_init_db()
+threading.Thread(target=ai_loop,daemon=True).start()
+
 threading.Thread(target=_autotrade_loop, daemon=True).start()
 threading.Thread(target=_breakout_monitor_loop, daemon=True).start()
 
@@ -7119,15 +7429,6 @@ def index():
     return send_from_directory(os.path.dirname(__file__), "index.html")
 
 
-if __name__ == "__main__":
-    if "PUT_YOUR" in API_KEY or "PUT_YOUR" in API_SECRET:
-        print("!! Set KITE_API_KEY and KITE_API_SECRET (env vars, or edit backend.py) before running.")
-    print(f"Set your Kite app's Redirect URL to: {REDIRECT_URL}")
-    if ALLOW_INSECURE_NEWS:
-        print("!! ALLOW_INSECURE_NEWS is on — news headline fetches will skip TLS verification on failure.")
-    print("Starting server at http://localhost:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False)
-
 
 @app.route("/api/breakout/diagnostics")
 def breakout_diagnostics():
@@ -7136,3 +7437,12 @@ def breakout_diagnostics():
         "thresholds": [4,5,6],
         "option_momentum_included": False
     })
+
+if __name__ == "__main__":
+    if "PUT_YOUR" in API_KEY or "PUT_YOUR" in API_SECRET:
+        print("!! Set KITE_API_KEY and KITE_API_SECRET (env vars, or edit backend.py) before running.")
+    print(f"Set your Kite app's Redirect URL to: {REDIRECT_URL}")
+    if ALLOW_INSECURE_NEWS:
+        print("!! ALLOW_INSECURE_NEWS is on — news headline fetches will skip TLS verification on failure.")
+    print("Starting server at http://localhost:5000")
+    app.run(host="0.0.0.0", port=5000, debug=False)
