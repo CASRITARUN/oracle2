@@ -605,7 +605,7 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 <div class="wrap">
   <div class="panel">
     <h2>🧠 Autonomous AI Evolution Engine</h2>
-    <div class="warn-box" style="margin-top:0;">This engine runs continuously in the Python backend using the same Zerodha/Kite session. It scans, paper-trades, records every decision, learns from completed trades, creates challenger versions and automatically accepts or rolls back changes. <b>Paper trading only — no broker orders are sent by this engine.</b></div>
+    <div class="warn-box" style="margin-top:0;">AI Universe is intentionally limited to <b>NIFTY, BANKNIFTY and FINNIFTY</b>. F&amp;O stocks are disabled for this learning phase. This engine runs continuously in the Python backend using the same Zerodha/Kite session. It scans, paper-trades, records every decision, learns from completed trades, creates challenger versions and automatically accepts or rolls back changes. <b>Paper trading only — no broker orders are sent by this engine.</b></div>
     <div class="row" style="margin-top:14px;align-items:center;gap:10px;">
       <span id="aiModePill" class="pill ok">AUTONOMOUS PAPER</span><span id="aiConnectionPill" class="pill warn">WAITING FOR KITE</span>
       <button class="secondary small-btn" id="aiCycleBtn">Run one cycle now</button><span id="aiStatusText" class="loading"></span>
@@ -618,9 +618,12 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
       <div class="ai-evo-card"><div class="k">Profit Factor</div><div class="v" id="aiPF">—</div></div>
       <div class="ai-evo-card"><div class="k">Open Paper Trades</div><div class="v" id="aiOpen">0</div></div>
       <div class="ai-evo-card"><div class="k">Engine</div><div class="v" id="aiEngine">RUNNING</div></div>
-      <div class="ai-evo-card"><div class="k">F&amp;O Universe</div><div class="v" id="aiUniverse">—</div></div>
+      <div class="ai-evo-card"><div class="k">AI Universe</div><div class="v" id="aiUniverse">Indices Only</div></div>
+      <div class="ai-evo-card"><div class="k">ML Samples</div><div class="v" id="aiMLSamples">0</div></div>
+      <div class="ai-evo-card"><div class="k">ML Accuracy</div><div class="v" id="aiMLAccuracy">—</div></div>
+      <div class="ai-evo-card"><div class="k">ML AUC</div><div class="v" id="aiMLAUC">—</div></div><div class="ai-evo-card"><div class="k">Deep Model</div><div class="v" id="aiDLStatus">NOT TRAINED</div></div><div class="ai-evo-card"><div class="k">DL Samples</div><div class="v" id="aiDLSamples">0</div></div><div class="ai-evo-card"><div class="k">DL Accuracy</div><div class="v" id="aiDLAccuracy">—</div></div><div class="ai-evo-card"><div class="k">DL AUC</div><div class="v" id="aiDLAUC">—</div></div>
       <div class="ai-evo-card"><div class="k">Scan Rotation</div><div class="v" id="aiScanRotation" style="font-size:13px;">—</div></div>
-      <div class="ai-evo-card"><div class="k">Last Update</div><div class="v" id="aiUpdated" style="font-size:13px;">—</div></div>
+      <div class="ai-evo-card"><div class="k">Last AI Cycle (IST)</div><div class="v" id="aiUpdated" style="font-size:13px;">—</div></div>
     </div>
   </div>
 
@@ -628,6 +631,17 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
     <h2>Current AI Setup</h2>
     <div class="ai-evo-score"><div class="ai-evo-ring"><b id="aiScore">—</b><small>/100</small></div><div style="flex:1"><div style="font-size:15px;font-weight:600" id="aiSetupTitle">Waiting for the next autonomous scan…</div><div class="ai-evo-note" id="aiSetupNote">The backend continues scanning even when this tab is not open.</div></div></div>
     <div class="ai-evo-components" style="margin-top:14px"><div><small>Trend</small><b id="aiTrend">—</b></div><div><small>Momentum</small><b id="aiMomentum">—</b></div><div><small>Volatility</small><b id="aiVol">—</b></div><div><small>PCR</small><b id="aiPCR">—</b></div><div><small>IV</small><b id="aiIV">—</b></div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Market-Pattern ML + Deep Sequence Brain</h2>
+    <div class="warn-box" style="margin-top:0;">The system learns from actual market-state sequences and the price path after each paper trade. The transparent ML model uses engineered features; the Deep Sequence model uses the last 20 market states through a real 2-hidden-layer neural network. The old composite score is only one input, not the learning engine. Each model becomes an entry gate only after its minimum sample size is reached.</div>
+    <div class="ai-evo-grid" style="margin-top:14px;">
+      <div class="ai-evo-card"><div class="k">Model Status</div><div class="v" id="aiMLStatus">NOT TRAINED</div></div>
+      <div class="ai-evo-card"><div class="k">Target</div><div class="v" style="font-size:14px;">Target before Stop</div></div>
+      <div class="ai-evo-card"><div class="k">ML Gate</div><div class="v" id="aiMLGate" style="font-size:14px;">Warming</div></div>
+      <div class="ai-evo-card"><div class="k">Last ML Train</div><div class="v" id="aiMLUpdated" style="font-size:12px;">—</div></div><div class="ai-evo-card"><div class="k">Last Deep Train</div><div class="v" id="aiDLUpdated" style="font-size:12px;">—</div></div>
+    </div>
   </div>
 
   <div class="panel">
@@ -643,7 +657,7 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 
   <div class="panel">
     <h2>Paper Transactions — complete audit trail</h2>
-    <div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Time</th><th>Version</th><th>Symbol</th><th>Option</th><th>Side</th><th>Score</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>R</th><th>Status</th><th>Reason</th></tr></thead><tbody id="aiTradesTable"></tbody></table></div>
+    <div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Time</th><th>Version</th><th>Symbol</th><th>Option</th><th>Side</th><th>Score</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>R</th><th>MFE</th><th>MAE</th><th>ML P(success)</th><th>Status</th><th>Reason</th></tr></thead><tbody id="aiTradesTable"></tbody></table></div>
   </div>
 
   <div class="panel">
@@ -2277,17 +2291,17 @@ async function aiGet(url,opt){const r=await fetch(url,opt);const raw=await r.tex
 async function refreshAIEvolution(){
   try{
     const s=await aiGet('/api/ai-evolution/status');
-    aiChampion.textContent=s.champion||'—';aiTrades.textContent=s.metrics.trades;aiWin.textContent=aiFmt(s.metrics.win_rate)+'%';aiAvgR.textContent=aiFmt(s.metrics.avg_r)+'R';aiPF.textContent=aiFmt(s.metrics.profit_factor);aiOpen.textContent=s.open_trades;aiEngine.textContent=!s.connected?'WAITING — KITE':(s.market_open?'RUNNING':'WAITING — MARKET CLOSED');aiUpdated.textContent=new Date(s.timestamp).toLocaleTimeString();
-    aiUniverse.textContent=(s.universe_size||0)+' F&O';
-    aiScanRotation.textContent=(s.poll_seconds||60)+'s / cycle';
+    aiChampion.textContent=s.champion||'—';if(s.ml){aiMLSamples.textContent=s.ml.samples||0;aiMLAccuracy.textContent=s.ml.samples?s.ml.accuracy.toFixed(1)+'%':'—';aiMLAUC.textContent=s.ml.samples?s.ml.auc.toFixed(3):'—';}if(s.deep_learning){aiDLStatus.textContent=s.deep_learning.status||'NOT TRAINED';aiDLSamples.textContent=s.deep_learning.samples||0;aiDLAccuracy.textContent=s.deep_learning.samples?s.deep_learning.accuracy.toFixed(1)+'%':'—';aiDLAUC.textContent=s.deep_learning.samples?s.deep_learning.auc.toFixed(3):'—';aiDLUpdated.textContent=s.deep_learning.updated_at?new Date(s.deep_learning.updated_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';}aiTrades.textContent=s.metrics.trades;aiWin.textContent=aiFmt(s.metrics.win_rate)+'%';aiAvgR.textContent=aiFmt(s.metrics.avg_r)+'R';aiPF.textContent=aiFmt(s.metrics.profit_factor);aiOpen.textContent=s.open_trades;aiEngine.textContent=!s.connected?'WAITING — KITE':(s.market_open?'RUNNING':'WAITING — MARKET CLOSED');aiUpdated.textContent=s.last_activity_at?new Date(s.last_activity_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'Waiting for market/Kite activity';
+    aiUniverse.textContent='NIFTY · BANKNIFTY · FINNIFTY';
+    aiScanRotation.textContent=(s.poll_seconds||60)+'s / cycle · '+(s.last_scan_at?new Date(s.last_scan_at).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'}):'not scanned');
     aiConnectionPill.textContent=s.connected?'KITE CONNECTED':'WAITING FOR KITE';aiConnectionPill.className='pill '+(s.connected?'ok':'warn');
     const dec=await aiGet('/api/ai-evolution/decisions');
-    if(dec[0]){const snap=JSON.parse(dec[0].snapshot||'{}');aiScore.textContent=aiFmt(dec[0].score);aiSetupTitle.textContent=`${dec[0].symbol} — ${dec[0].decision} — ${dec[0].score}/100`;aiSetupNote.textContent=dec[0].reason||'';const c=snap.components||{};aiTrend.textContent=aiFmt(c.trend);aiMomentum.textContent=aiFmt(c.momentum);aiVol.textContent=aiFmt(c.volatility);aiPCR.textContent=aiFmt(snap.pcr);aiIV.textContent=aiFmt(snap.iv)+'%';}
+    if(dec[0]){const snap=JSON.parse(dec[0].snapshot||'{}');aiScore.textContent=aiFmt(dec[0].score);aiSetupTitle.textContent=`${dec[0].symbol} — ${dec[0].decision} — ${dec[0].score}/100`;aiSetupNote.textContent=(dec[0].reason||'')+(snap.ml_probability!=null?` · ML probability ${(Number(snap.ml_probability)*100).toFixed(1)}% · Deep ${(Number(snap.dl_probability??0.5)*100).toFixed(1)}%`: '');const c=snap.components||{};aiTrend.textContent=aiFmt(c.trend);aiMomentum.textContent=aiFmt(c.momentum);aiVol.textContent=aiFmt(c.volatility);aiPCR.textContent=aiFmt(snap.pcr);aiIV.textContent=aiFmt(snap.iv)+'%';}
     const changes=await aiGet('/api/ai-evolution/changes');
     aiChanges.innerHTML=changes.length?changes.map(x=>`<div class="ai-evo-learning"><b>${aiEsc(x.from_version)} → ${aiEsc(x.to_version)}</b> <span class="${aiStatusClass(x.status)}">${aiEsc(x.status)}</span><br>${aiEsc(x.hypothesis)}<br><span class="ai-evo-note">Change: ${aiEsc(x.change_json)} · Before: ${aiEsc(x.before_metrics)} · After: ${aiEsc(x.after_metrics||'awaiting evidence')} · Impact: ${aiEsc(x.impact)}</span></div>`).join(''):'<div class="ai-evo-note">No strategy change yet. The AI is collecting evidence.</div>';
     const learning=await aiGet('/api/ai-evolution/learning');
     aiLearning.innerHTML=learning.length?learning.slice(0,12).map(x=>`<div class="ai-evo-learning"><b>${aiEsc(x.ts)}</b> — ${aiEsc(x.observation)}<br><span class="ai-evo-note">Hypothesis: ${aiEsc(x.hypothesis)}<br>Action: ${aiEsc(x.action)}<br>Evidence: ${aiEsc(x.evidence)}</span></div>`).join(''):'<div class="ai-evo-note">No learning record yet.</div>';
-    const tr=await aiGet('/api/ai-evolution/trades');aiTradesTable.innerHTML=tr.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.version)}</td><td>${aiEsc(x.symbol)}</td><td>${aiEsc(x.option_symbol)}</td><td>${aiEsc(x.side)}</td><td>${aiFmt(x.score)}</td><td>${aiFmt(x.entry)}</td><td>${aiFmt(x.exit)}</td><td class="${Number(x.pnl)>=0?'pnl-pos':'pnl-neg'}">${aiFmt(x.pnl)}</td><td>${aiFmt(x.r_multiple)}</td><td>${aiEsc(x.status)}</td><td>${aiEsc(x.exit_reason||'')}</td></tr>`).join('')||'<tr><td colspan="12">No paper transactions yet.</td></tr>';
+    const tr=await aiGet('/api/ai-evolution/trades');aiTradesTable.innerHTML=tr.map(x=>{let sj={};try{sj=JSON.parse(x.setup_json||'{}')}catch(e){};return `<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.version)}</td><td>${aiEsc(x.symbol)}</td><td>${aiEsc(x.option_symbol)}</td><td>${aiEsc(x.side)}</td><td>${aiFmt(x.score)}</td><td>${aiFmt(x.entry)}</td><td>${aiFmt(x.exit)}</td><td class="${Number(x.pnl)>=0?'pnl-pos':'pnl-neg'}">${aiFmt(x.pnl)}</td><td>${aiFmt(x.r_multiple)}</td><td>${aiFmt(x.mfe)}%</td><td>${aiFmt(x.mae)}%</td><td>${sj.ml_probability!=null?(Number(sj.ml_probability)*100).toFixed(1)+'%':'—'}</td><td>${aiEsc(x.status)}</td><td>${aiEsc(x.exit_reason||'')}</td></tr>`}).join('')||'<tr><td colspan="15">No paper transactions yet.</td></tr>';
     const ds=await aiGet('/api/ai-evolution/decisions');aiDecisionsTable.innerHTML=ds.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.version)}</td><td>${aiEsc(x.symbol)}</td><td>${aiFmt(x.score)}</td><td>${aiEsc(x.decision)}</td><td>${aiEsc(x.reason)}</td></tr>`).join('')||'<tr><td colspan="6">No decisions yet.</td></tr>';
     const vs=await aiGet('/api/ai-evolution/versions');aiVersionsTable.innerHTML=vs.map(x=>`<tr><td>${aiEsc(x.version)}</td><td>${aiEsc(x.parent_version)}</td><td>${aiEsc(x.created_at)}</td><td><span class="${aiStatusClass(x.status)}">${aiEsc(x.status)}</span></td><td>${aiEsc(x.reason)}</td><td>${aiEsc(x.metrics)}</td></tr>`).join('');
     const ev=await aiGet('/api/ai-evolution/events');aiEventsTable.innerHTML=ev.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.level)}</td><td>${aiEsc(x.event)}</td><td>${aiEsc(x.detail)}</td></tr>`).join('');
