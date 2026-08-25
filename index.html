@@ -232,17 +232,6 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 
 .ai-research-strip{display:grid;grid-template-columns:auto 1fr auto 1fr auto 1.5fr;gap:8px;align-items:center;margin-top:8px;padding:9px 10px;border:1px solid #17364a;border-radius:9px;background:#08131d}.ai-research-strip span{font-size:8px;color:#55748a;letter-spacing:.08em;font-weight:900}.ai-research-strip b{font-size:9px;color:#d9eaf2}.ai-research-strip b:nth-of-type(1){color:#49d8ad}.ai-research-strip b:nth-of-type(2){color:#4cd6ef}.ai-research-strip b:nth-of-type(3){color:#9ab4c5}
 @media(max-width:800px){.ai-research-strip{grid-template-columns:1fr 1fr}}
-
-/* Final AI layout correction */
-#tabPageAIEvolution .ai-data-panel,#tabPageAIEvolution .ai-model-panel{width:100%;box-sizing:border-box}
-#tabPageAIEvolution .ai-model-stack{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
-#tabPageAIEvolution .ai-model-row{min-width:0}
-#tabPageAIEvolution .ai-model-metrics{grid-template-columns:repeat(6,minmax(0,1fr))}
-#tabPageAIEvolution .ai-stream{min-height:170px;max-height:210px;overflow:auto}
-#tabPageAIEvolution .ai-stream-line{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-@media(max-width:1200px){#tabPageAIEvolution .ai-model-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:900px){#tabPageAIEvolution .ai-model-stack{grid-template-columns:1fr}#tabPageAIEvolution .ai-data-layout{grid-template-columns:280px 1fr}}
-@media(max-width:700px){#tabPageAIEvolution .ai-data-layout{grid-template-columns:1fr}#tabPageAIEvolution .ai-model-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
 <body>
@@ -719,18 +708,19 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
       <div class="ai-phase" id="aiPhaseChampion"><i>05</i><b>CHAMPION</b><span>Champion / challenger comparison</span></div>
       <div class="ai-phase" id="aiPhaseLive"><i>06</i><b>FUTURE LIVE</b><span>Separate approval + risk controls</span></div>
     </div>
-    <div class="ai-lifecycle-note"><b>Automatic history:</b> when Kite is connected, the backend backfills the maximum configured historical window (Kite maximum available depth for each interval) in safe chunks, resumes missing ranges and deduplicates locally. <b>Important:</b> historical candles train market behaviour; they do not create fake historical option-chain trades. The option-chain archive starts from the moment the collector records live Kite data. The engine remains paper-only until independent evidence and execution controls are satisfied.</div>
+    <div class="ai-lifecycle-note"><b>Important:</b> historical candles train market behaviour; they do not create fake historical option-chain trades. The option-chain archive starts from the moment the collector records live Kite data. The engine remains paper-only until independent evidence and execution controls are satisfied.</div>
   </section>
 
-  <section class="ai-panel ai-data-panel">
+  <section class="ai-two-col">
+    <div class="ai-panel ai-data-panel">
       <div class="ai-section-head"><div><span class="ai-section-label">01 / DATA FABRIC</span><h3>Historical Market Observatory</h3></div><span class="ai-live-label"><span class="ai-dot"></span><span id="aiGlobeLive">COLLECTING</span></span></div>
       <div class="ai-data-layout">
         <div class="ai-globe-card"><canvas id="aiGlobe" width="720" height="620"></canvas><div class="ai-globe-caption"><b>INDEX DATA CORE</b><span>NIFTY · BANKNIFTY · FINNIFTY</span></div></div>
         <div class="ai-data-readout">
           <div class="ai-readout-grid">
             <div><span>Collector</span><b id="aiHistStatus">WAITING</b></div>
-            <div><span>5m Candles</span><b id="aiHistRows">0</b></div><div><span>History Target</span><b id="aiHistTarget">Kite maximum</b></div>
-            <div><span>History Model</span><b id="aiHistModel">—</b></div><div><span>Oldest Stored</span><b id="aiHistOldest">—</b></div>
+            <div><span>5m Candles</span><b id="aiHistRows">0</b></div>
+            <div><span>History Model</span><b id="aiHistModel">—</b></div>
             <div><span>Historical AUC</span><b id="aiHistAUC">—</b></div>
             <div><span>Research Phase</span><b id="aiHistPhase">COLLECTING</b></div>
             <div><span>Backend</span><b id="aiBackendState">—</b></div>
@@ -739,12 +729,9 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
         </div>
       </div>
       <div class="ai-table-wrap"><table class="ai-hist-table"><thead><tr><th>Index</th><th>Bars</th><th>First</th><th>Latest</th><th>Samples</th><th>Validation</th><th>Accuracy</th><th>Status</th></tr></thead><tbody id="aiHistTable"><tr><td colspan="8">Waiting for historical data…</td></tr></tbody></table></div>
-  </section>
-  </section>
+    </div>
 
-
-
-  <section class="ai-panel ai-model-panel">
+    <div class="ai-panel ai-model-panel">
       <div class="ai-section-head"><div><span class="ai-section-label">02 / MODEL LAB</span><h3>Learning & Validation</h3></div><span class="ai-lock">NO SCORE-LEAKAGE</span></div>
       <div class="ai-model-stack">
         <div class="ai-model-row"><div class="ai-model-icon">ML</div><div><b>Market-state ML</b><span>Engineered features · chronological validation</span></div><strong id="aiMLStatus">WARMING</strong></div>
@@ -758,6 +745,7 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
       </div>
       <div class="ai-research-strip"><span>REGIME</span><b id="aiResearchRegime">—</b><span>ENSEMBLE</span><b id="aiResearchEnsembleState">WARMING</b><span>VALIDATION</span><b>CHRONOLOGICAL</b></div>
       <div class="ai-model-warning"><b>Learning rule</b><span>The model learns from future price paths and completed paper outcomes. The 72 mature gate is a decision threshold, not a training target.</span></div>
+    </div>
   </section>
 
   <section class="ai-panel ai-option-memory">
@@ -2412,13 +2400,6 @@ loadExistingPositionIntel();
 let aiUiTimer=null, aiUiInited=false;
 const aiEsc=v=>String(v??'—').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 function aiFmt(v){return v==null?'—':Number(v).toLocaleString('en-IN',{maximumFractionDigits:2});}
-// Explicit DOM references: do not rely on browser-created globals for element IDs.
-const aiEl=id=>document.getElementById(id);
-const aiChampion=aiEl('aiChampion'),aiMLSamples=aiEl('aiMLSamples'),aiMLAccuracy=aiEl('aiMLAccuracy'),aiMLAUC=aiEl('aiMLAUC');
-const aiDLStatus=aiEl('aiDLStatus'),aiDLSamples=aiEl('aiDLSamples'),aiDLAccuracy=aiEl('aiDLAccuracy'),aiDLAUC=aiEl('aiDLAUC'),aiDLUpdated=aiEl('aiDLUpdated');
-const aiLearningStage=aiEl('aiLearningStage'),aiEffectiveGate=aiEl('aiEffectiveGate'),aiLearningProgress=aiEl('aiLearningProgress'),aiTrades=aiEl('aiTrades'),aiWin=aiEl('aiWin'),aiAvgR=aiEl('aiAvgR'),aiPF=aiEl('aiPF'),aiOpen=aiEl('aiOpen'),aiEngine=aiEl('aiEngine'),aiUpdated=aiEl('aiUpdated'),aiUniverse=aiEl('aiUniverse'),aiScanRotation=aiEl('aiScanRotation'),aiConnectionPill=aiEl('aiConnectionPill'),aiStatusText=aiEl('aiStatusText'),aiCycleBtn=aiEl('aiCycleBtn');
-const aiResearchProb=aiEl('aiResearchProb'),aiResearchUncertainty=aiEl('aiResearchUncertainty'),aiResearchAUC=aiEl('aiResearchAUC'),aiResearchRegime=aiEl('aiResearchRegime');
-
 function aiStatusClass(v){return v==='ACCEPTED'?'ai-evo-status ai-evo-ok':(v==='ROLLED_BACK'||v==='REJECTED'?'ai-evo-status ai-evo-bad':'ai-evo-status ai-evo-test');}
 async function aiGet(url,opt){const r=await fetch(url,opt);const raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw Error('Backend returned a non-JSON response ('+r.status+'). Check the Python/Gunicorn process.')}if(!r.ok)throw Error(d.error||d.message||'Request failed');return d;}
 let aiGlobeFrame=0,aiGlobeTimer=null;
@@ -2440,41 +2421,12 @@ function startAIGlobe(){
   }draw();
 }
 function updateAIHistorical(h){
-  const syms=h.symbols||[], m=h.model||{};
-  const total=Number(h.candles||syms.reduce((a,x)=>a+Number(x.n||0),0));
-  const status=h.status||'WAITING FOR KITE';
-  const histStatus=aiEl('aiHistStatus'); if(histStatus)histStatus.textContent=status;
-  const rows=aiEl('aiHistRows'); if(rows)rows.textContent=total.toLocaleString('en-IN');
-  const plan=h.archive_plan||[];
-  const planText=plan.length?plan.map(x=>`${x.interval} ${x.max_days}d max`).join(' · '):'Kite maximum available';
-  const model=aiEl('aiHistModel'); if(model)model.textContent=m.status||'WAITING FOR TRAINING';
-  const targetEl=aiEl('aiHistTarget'); if(targetEl)targetEl.textContent='AUTO BACKFILL · '+planText+' · stops at actual Kite boundary';
-  const oldestEl=aiEl('aiHistOldest'); if(oldestEl)oldestEl.textContent=h.oldest||'—';
-  const auc=aiEl('aiHistAUC'); if(auc)auc.textContent=m.auc!=null&&Number(m.auc)>0?Number(m.auc).toFixed(3):'—';
-  const phase=aiEl('aiHistPhase'); if(phase)phase.textContent=(m.status&&String(m.status).includes('PRETRAIN'))?'PRETRAINED → LIVE REFINEMENT':(total>0?'COLLECTING / TRAINING':'WAITING FOR KITE');
-  const live=aiEl('aiGlobeLive'); if(live)live.textContent=status;
-  const backend=aiEl('aiBackendState'); if(backend)backend.textContent=status==='WAITING FOR KITE'?'WAITING':(status.includes('PARTIAL')?'ONLINE / RETRYING':'ONLINE');
-  const chunk=Number(h.chunk_days||90);
-  const stream=aiEl('aiDataStream');
-  if(stream){
-    const now=new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'});
-    const planText=plan.length?plan.map(x=>`${x.interval}≤${x.max_days}d`).join(' · '):'Kite maximum available';
-    const detail=h.train_detail||'';
-    const archiveState=status.includes('ERROR')?'ERROR — CHECK DETAIL':(status.includes('PARTIAL')?'RETRYING FAILED WINDOWS':(status.includes('TRAINING')?'TRAINING':'ARCHIVE READY'));
-    const lines=[
-      `<span class="blue">${now}</span>  DATA-FABRIC · ${archiveState}`,
-      `<span class="ok">COLLECT</span>  Kite archive online · ${planText}`,
-      `<span class="blue">STORE</span>  ${total.toLocaleString('en-IN')} 5m candles · deduplicated local archive`,
-      `<span class="blue">MODEL</span>  historical index → 20-state GRU → chronological 80/20 validation`,
-      `<span class="ok">SAFE</span>  historical collection is read-only · no broker orders`,
-      detail?`<span class="warn">DETAIL</span>  ${aiEsc(detail)}`:`<span class="blue">STATUS</span>  waiting for next collector/training step`
-    ];
-    stream.innerHTML=lines.map(x=>`<div class="ai-stream-line">${x}</div>`).join('');
-  }
-  const tb=aiEl('aiHistTable');
-  if(tb){
-    tb.innerHTML=syms.map(x=>`<tr><td><b>${aiEsc(x.symbol)}</b></td><td>${Number(x.n||0).toLocaleString('en-IN')}</td><td>${aiEsc(x.first_ts||'—')}</td><td>${aiEsc(x.last_ts||'—')}</td><td>${Number(m.samples||0).toLocaleString('en-IN')}</td><td>${Number(m.validation_samples||0).toLocaleString('en-IN')}</td><td>${m.accuracy?Number(m.accuracy).toFixed(1)+'%':'—'}</td><td class="${String(status).includes('PRETRAIN')?'ai-hist-ready':'ai-hist-wait'}">${aiEsc(status)}</td></tr>`).join('')||'<tr><td colspan="8">Waiting for Zerodha historical data…</td></tr>';
-  }
+  startAIGlobe(); const syms=h.symbols||[];const total=syms.reduce((a,x)=>a+Number(x.n||0),0);document.getElementById('aiHistRows').textContent=total.toLocaleString('en-IN');
+  const st=h.status||'WAITING';document.getElementById('aiHistStatus').textContent=st.split(' — ')[0];document.getElementById('aiGlobeLive').textContent=st.includes('PRETRAINED')?'LEARNING ONLINE':(st.includes('COLLECTING')?'COLLECTING DATA':'STANDBY');
+  const m=h.model||{};document.getElementById('aiHistModel').textContent=m.status||'—';document.getElementById('aiHistAUC').textContent=(m.auc!=null&&m.samples)?Number(m.auc).toFixed(3):'—';const phase=document.getElementById('aiHistPhase');if(phase)phase.textContent=st.includes('TRAINING')||st.includes('BUILDING')?'TRAINING':st.includes('PRETRAINED')?'PRETRAINED · ONLINE LEARNING':st.includes('READY')?'READY':'COLLECTING';
+  const modelSamples=m.samples||0, val=m.validation_samples||0;
+  document.getElementById('aiHistTable').innerHTML=syms.map(x=>`<tr><td><b>${aiEsc(x.symbol)}</b></td><td>${Number(x.n||0).toLocaleString('en-IN')}</td><td>${aiEsc(x.first_ts||'—')}</td><td>${aiEsc(x.last_ts||'—')}</td><td>${modelSamples.toLocaleString('en-IN')}</td><td>${val.toLocaleString('en-IN')}</td><td>${m.accuracy?Number(m.accuracy).toFixed(1)+'%':'—'}</td><td class="${st.includes('PRETRAINED')?'ai-hist-ready':'ai-hist-wait'}">${aiEsc(st)}</td></tr>`).join('')||'<tr><td colspan="8">Waiting for Zerodha historical data…</td></tr>';
+  const stream=document.getElementById('aiDataStream');const now=new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'});const lines=[`<span class="blue">${now}</span>  DATA-FABRIC  heartbeat`, `<span class="ok">OK</span>  historical ${h.interval||'5minute'} candles synchronized`, `<span class="blue">SCAN</span> ${syms.map(x=>x.symbol+'='+x.n).join('  ')||'awaiting symbols'}`, `<span class="ok">MODEL</span> chronological 80/20 validation active`, `<span class="blue">BRAIN</span> index pre-training → live paper refinement`, `<span class="ok">SAFE</span> no broker orders from historical collector`];stream.innerHTML=lines.concat(lines).map(x=>`<div class="ai-stream-line">${x}</div>`).join('');
 }
 
 async function updateAIOptionHistory(){
@@ -2511,7 +2463,7 @@ async function refreshAIEvolution(){
 }
 function updateAIInstitutionalLifecycle(s){
   const ls=s.learning||{}; const progress=Number(ls.progress||0); const ml=Number((s.ml||{}).samples||0); const dl=Number((s.deep_learning||{}).samples||0);
-  const hist= s.historical||{}; const histRows=Number(hist.candles||((hist.symbols||[]).reduce((a,x)=>a+Number(x.n||0),0)));
+  const histRows=Number(((s.historical||{}).candles)||0);
   const set=(id,cls)=>{const e=document.getElementById(id);if(e)e.className='ai-phase '+cls;};
   set('aiPhaseCollect',histRows>0?'complete':'active');
   set('aiPhaseTrain',(ml>=40||dl>=80)?'complete':(histRows>0?'active':''));
