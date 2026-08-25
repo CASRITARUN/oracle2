@@ -7128,10 +7128,18 @@ AI_SCAN_CHUNK_SIZE = int(os.environ.get("AI_SCAN_CHUNK_SIZE", "8"))
 AI_LOCK = threading.Lock()
 
 AI_DEFAULTS = {
+    # Mature AI gate. This remains deliberately strict once both learned models
+    # have enough evidence to become entry gates.
     "min_score": 72.0, "min_rr": 1.5, "stop_pct": 0.75, "target_pct": 1.50,
     "risk_per_trade_pct": 1.0, "max_positions": 6, "learning_min_trades": 40,
     "challenger_min_trades": 30, "enabled": 1, "ml_min_samples": 40, "ml_min_probability": 0.58,
-    "ml_learning_rate": 0.08, "ml_epochs": 180, "dl_min_samples": 80, "dl_probability_weight": 0.50, "dl_hidden1": 32, "dl_hidden2": 16, "dl_epochs": 90, "dl_learning_rate": 0.01
+    "ml_learning_rate": 0.08, "ml_epochs": 180, "dl_min_samples": 80, "dl_probability_weight": 0.50,
+    "dl_hidden1": 32, "dl_hidden2": 16, "dl_epochs": 90, "dl_learning_rate": 0.01,
+    # Bootstrap gate: while either learned model is still warming, the engine
+    # paper-trades qualifying setups so that there is real price-path evidence
+    # to learn from. The gate rises smoothly from 55 to the mature 72 as both
+    # ML and Deep-learning sample requirements are approached.
+    "bootstrap_min_score": 55.0
 }
 
 def ai_db():
@@ -7529,7 +7537,8 @@ def ai_close_trades():
             q=kite_quote_bulk([f'NFO:{t["option_symbol"]}']).get(f'NFO:{t["option_symbol"]}')
             price=extract_price(q) if q else None
             if price is None:continue
-            spot_q=kite_quote_bulk([INDEX_SYMBOLS.get(t["symbol"],f"NSE:{t["symbol"]}")]).get(INDEX_SYMBOLS.get(t["symbol"],f"NSE:{t["symbol"]}"))
+            spot_key = INDEX_SYMBOLS.get(t["symbol"], "NSE:" + t["symbol"])
+            spot_q = kite_quote_bulk([spot_key]).get(spot_key)
             spot=extract_price(spot_q) if spot_q else None
             setup=json.loads(t.get("setup_json") or "{}")
             if spot is not None:
@@ -7629,6 +7638,49 @@ def ai_scan_batch():
     c.commit(); c.close()
     return batch, len(universe), new_cursor
 
+def ai_learning_state():
+    """Return the autonomous learning stage and the effective paper-trading gate.
+
+    Bootstrap is intentionally data-generating: before ML and Deep Sequence have
+    enough completed paper trades, the old 72/100 gate must not prevent the
+    engine from creating the very samples those models need. The effective gate
+    ramps from bootstrap_min_score (55) to the mature min_score (72) according
+    to the weaker of the two model sample-progress ratios.
+    """
+    p = ai_params()
+    ml = ai_ml_model()
+    dl = ai_dl_model()
+    ml_need = max(1, int(p.get("ml_min_samples", 40)))
+    dl_need = max(1, int(p.get("dl_min_samples", 80)))
+    ml_samples = int(ml.get("samples", 0))
+    dl_samples = int(dl.get("samples", 0))
+    ml_progress = min(1.0, ml_samples / ml_need)
+    dl_progress = min(1.0, dl_samples / dl_need)
+    progress = min(ml_progress, dl_progress)
+    mature_score = float(p.get("min_score", 72.0))
+    bootstrap_score = float(p.get("bootstrap_min_score", 55.0))
+    effective_score = bootstrap_score + (mature_score - bootstrap_score) * progress
+    ml_ready = ml_samples >= ml_need
+    dl_ready = dl_samples >= dl_need
+    mature = ml_ready and dl_ready
+    return {
+        "stage": "MATURE AI" if mature else "AUTONOMOUS BOOTSTRAP",
+        "bootstrap": not mature,
+        "ml_ready": ml_ready,
+        "dl_ready": dl_ready,
+        "ml_samples": ml_samples,
+        "dl_samples": dl_samples,
+        "ml_required": ml_need,
+        "dl_required": dl_need,
+        "ml_progress": round(ml_progress * 100, 1),
+        "dl_progress": round(dl_progress * 100, 1),
+        "progress": round(progress * 100, 1),
+        "bootstrap_score": round(bootstrap_score, 2),
+        "mature_score": round(mature_score, 2),
+        "effective_score": round(effective_score, 2),
+    }
+
+
 def ai_cycle():
     c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('last_cycle_at',?)",(datetime.now(IST).isoformat(),)); c.commit(); c.close()
     # The browser tab is NOT involved in this loop. Once the Python process is
@@ -7662,14 +7714,24 @@ def ai_cycle():
             ai_store_market(sym,x)
             for ver,params,role in [(champion_ver,champion_params,'CHAMPION')]+(
                     [(challenger['version'],json.loads(challenger['params']),'CHALLENGER')] if challenger else []):
-                ml_ready=int(x.get("ml_samples",0))>=int(params.get("ml_min_samples",40))
+                # Use the current version's model thresholds, but the learning stage is
+                # global because the samples are produced by the same paper-trade engine.
+                ls = ai_learning_state()
+                ml_ready=ls["ml_ready"]
+                dl_ready=ls["dl_ready"]
                 ml_prob=float(x.get("ml_probability",0.5))
-                ml_ok=(not ml_ready) or ml_prob>=float(params.get("ml_min_probability",0.58))
-                dl_ready=int(x.get("dl_samples",0))>=int(params.get("dl_min_samples",80))
                 dl_prob=float(x.get("dl_probability",0.5))
-                dl_ok=(not dl_ready) or dl_prob>=float(params.get("ml_min_probability",0.58))
-                approved=x["score"]>=float(params["min_score"]) and x["rr"]>=float(params["min_rr"]) and ml_ok and dl_ok
-                reason=f'{role}: score={x["score"]} rr={x["rr"]} ML={ml_prob:.3f} ({"active" if ml_ready else "warming"}) DL={dl_prob:.3f} ({"active" if dl_ready else "warming"}) threshold={params["min_score"]}'
+                if ls["bootstrap"]:
+                    effective_threshold=max(float(params.get("bootstrap_min_score",55.0)), ls["effective_score"])
+                    approved=(x["score"]>=effective_threshold and x["rr"]>=float(params["min_rr"]))
+                    gate_label=f'bootstrap gate={effective_threshold:.1f}'
+                else:
+                    effective_threshold=float(params["min_score"])
+                    ml_ok=ml_prob>=float(params.get("ml_min_probability",0.58))
+                    dl_ok=dl_prob>=float(params.get("ml_min_probability",0.58))
+                    approved=(x["score"]>=effective_threshold and x["rr"]>=float(params["min_rr"]) and ml_ok and dl_ok)
+                    gate_label=f'mature gate={effective_threshold:.1f}'
+                reason=f'{role}: {ls["stage"]} score={x["score"]} rr={x["rr"]} ML={ml_prob:.3f} ({"active" if ml_ready else "warming"}) DL={dl_prob:.3f} ({"active" if dl_ready else "warming"}) {gate_label}'
                 ai_record_decision(ver,x,'APPROVE' if approved else 'REJECT',reason)
                 already=any(t['symbol']==sym and t['version']==ver for t in open_now)
                 if approved and not already and len(open_now)<int(champion_params["max_positions"]):
@@ -7696,7 +7758,8 @@ def ai_status():
     ai_init_db();ch=ai_champion();p=ai_params();m=ai_metrics(ch['version'] if ch else None)
     universe=ai_universe()
     c=ai_db(); rt={r['key']:r['value'] for r in c.execute('SELECT key,value FROM ai_runtime').fetchall()}; c.close(); ml=ai_ml_model()
-    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now(IST).isoformat(),'last_cycle_at':rt.get('last_cycle_at'),'last_activity_at':rt.get('last_activity_at'),'last_scan_at':rt.get('last_scan_at'),'ml':ml,'deep_learning':ai_dl_model()})
+    learning=ai_learning_state()
+    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now(IST).isoformat(),'last_cycle_at':rt.get('last_cycle_at'),'last_activity_at':rt.get('last_activity_at'),'last_scan_at':rt.get('last_scan_at'),'ml':ml,'deep_learning':ai_dl_model(),'learning':learning})
 
 @app.route('/api/ai-evolution/trades')
 def ai_trades_api():
