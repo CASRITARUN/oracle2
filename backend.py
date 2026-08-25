@@ -8100,11 +8100,22 @@ def _hist_sync_symbol_interval(symbol, interval, max_days, chunk_days):
         (symbol, interval)).fetchone(); c.close()
 
     def parse_ts(v):
+        """Normalize archived timestamps to the same naive IST convention as now_ist().
+
+        SQLite stores Kite timestamps as text and older rows may contain either
+        offset-aware ISO timestamps (e.g. +05:30) or naive timestamps. Comparing
+        those two Python datetime types raises: "can't compare offset-naive and
+        offset-aware datetimes". Historical collection is a research/archive
+        operation, so normalize both forms to wall-clock IST before comparisons.
+        """
         if not v: return None
         try:
             dt=datetime.fromisoformat(str(v).replace("Z","+00:00"))
-            return dt if dt.tzinfo else dt.replace(tzinfo=IST)
-        except Exception: return None
+            if dt.tzinfo is not None:
+                dt=dt.astimezone(IST).replace(tzinfo=None)
+            return dt
+        except Exception:
+            return None
 
     first,last=parse_ts(r["first_ts"] if r else None),parse_ts(r["last_ts"] if r else None)
     ranges=[]
@@ -8435,13 +8446,22 @@ def ai_hist_sync_symbol(symbol):
     c=ai_db()
     r=c.execute("SELECT MIN(ts) first_ts, MAX(ts) last_ts FROM ai_hist_candles WHERE symbol=? AND interval=?",(symbol,AI_HIST_INTERVAL)).fetchone()
     c.close()
-    try:
-        existing_first=datetime.fromisoformat(str(r["first_ts"]).replace("Z","+00:00")) if r and r["first_ts"] else None
-        existing_last=datetime.fromisoformat(str(r["last_ts"]).replace("Z","+00:00")) if r and r["last_ts"] else None
-        if existing_first and existing_first.tzinfo is None: existing_first=existing_first.replace(tzinfo=IST)
-        if existing_last and existing_last.tzinfo is None: existing_last=existing_last.replace(tzinfo=IST)
-    except Exception:
-        existing_first=existing_last=None
+
+    # Normalize BOTH legacy naive and newer offset-aware archive timestamps to
+    # naive IST because now_ist() deliberately returns naive IST for Kite.
+    # This prevents the collector from crashing on mixed-format archives.
+    def _archive_dt(v):
+        if not v: return None
+        try:
+            dt=datetime.fromisoformat(str(v).replace("Z","+00:00"))
+            if dt.tzinfo is not None:
+                dt=dt.astimezone(IST).replace(tzinfo=None)
+            return dt
+        except Exception:
+            return None
+
+    existing_first=_archive_dt(r["first_ts"] if r else None)
+    existing_last=_archive_dt(r["last_ts"] if r else None)
 
     ranges=[]
     # First run: full maximum-history backfill. Existing database: only fetch missing
@@ -8479,6 +8499,8 @@ def ai_hist_sync_symbol(symbol):
 
     status="OK" if not errors else ("PARTIAL" if chunks_ok else "ERROR")
     detail=f"range={AI_HIST_LOOKBACK_DAYS}d, chunk={AI_HIST_CHUNK_DAYS}d, chunks={chunks_ok}/{len(ranges)}, fetched={total_fetched}, added={total_added}"
+    if not ranges:
+        detail += "; archive already covers configured 5m window / no missing interval"
     if errors: detail += " | " + " ; ".join(errors[:3])
     c=ai_db();c.execute("INSERT INTO ai_hist_runs(ts,symbol,interval,rows_added,status,detail) VALUES(?,?,?,?,?,?)",
                         (datetime.now(IST).isoformat(),symbol,AI_HIST_INTERVAL,total_added,status,detail));c.commit();c.close()
