@@ -176,263 +176,62 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 .ai-globe-live{position:absolute;right:14px;top:13px;display:flex;gap:6px;align-items:center;font-size:9px;color:#218653;font-weight:800}.ai-globe-live i{width:7px;height:7px;border-radius:50%;background:#34c77b;box-shadow:0 0 0 4px rgba(52,199,123,.12);animation:aiPulse 1.6s infinite}
 @keyframes aiPulse{0%,100%{transform:scale(.8);opacity:.7}50%{transform:scale(1.2);opacity:1}}
 .ai-data-side{display:flex;flex-direction:column;gap:12px}.ai-data-status{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.ai-data-stat{background:#fff;border:1px solid #e2e6eb;border-radius:11px;padding:12px}.ai-data-stat .k{font-size:8px;color:#667085;text-transform:uppercase;letter-spacing:.12em;font-weight:900}.ai-data-stat .v{font-size:18px;font-weight:850;color:#20252b;margin-top:5px}.ai-stream{flex:1;min-height:180px;background:#10151c;border-radius:12px;padding:12px 14px;color:#b8c2cf;overflow:hidden;position:relative}.ai-stream:after{content:"";position:absolute;left:0;right:0;bottom:0;height:45px;background:linear-gradient(transparent,#10151c);pointer-events:none}.ai-stream-line{font:10px ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.8;white-space:nowrap;opacity:.88}.ai-stream-line b{color:#ff8a68}.ai-stream-line .ok{color:#67d69b}.ai-stream-line .blue{color:#8db8ff}
-.ai-provenance{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;padding:10px 12px;border:1px solid #e2e6eb;border-radius:9px;background:#f8fafc;color:#667085;font-size:10px}.ai-provenance span{padding:5px 8px;background:#fff;border:1px solid #e6e9ed;border-radius:999px}.ai-provenance b{color:#344054}.ai-provenance i{font-style:normal;color:#ff6338;font-weight:800}.ai-score-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:5px}.ai-score-badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#fff3ee;border:1px solid #f0c8ba;color:#b84a2f;font-size:9px;font-weight:900;letter-spacing:.06em}.ai-score-explain{font-size:10px;color:#667085}.ai-table-note{margin:8px 0 10px;padding:9px 11px;border-left:3px solid #ff6338;background:#fff8f4;color:#667085;font-size:10px;line-height:1.5}.ai-evo-scroll table{min-width:900px}.ai-hist-table{min-width:850px}
 .ai-hist-table{width:100%;border-collapse:collapse;font-size:10px;background:#fff}.ai-hist-table th,.ai-hist-table td{padding:8px;border-bottom:1px solid #e6e9ed;text-align:left}.ai-hist-table th{font-size:8px;color:#667085;background:#f3f5f7;text-transform:uppercase;letter-spacing:.06em}.ai-hist-ready{color:#218653;font-weight:800}.ai-hist-wait{color:#b84a2f;font-weight:800}
 @media(max-width:900px){.ai-data-observatory{grid-template-columns:1fr}.ai-data-status{grid-template-columns:1fr 1fr}}
 
+</style>
+<style id="ai-premium-theme">
+#tabPageAIEvolution{background:#070b12;color:#dbe7f5;min-height:100vh}
+#tabPageAIEvolution .wrap{max-width:1500px}
+#tabPageAIEvolution .panel{background:linear-gradient(145deg,#0b1420,#09111b);border:1px solid #1d3348;border-radius:18px;box-shadow:0 18px 60px rgba(0,0,0,.28);color:#dbe7f5}
+#tabPageAIEvolution h2{color:#eaf4ff;letter-spacing:.08em}
+#tabPageAIEvolution .ai-evo-card{background:linear-gradient(145deg,#0e1a27,#0a141f);border:1px solid #213a51;color:#dbe7f5;box-shadow:0 8px 28px rgba(0,0,0,.22)}
+#tabPageAIEvolution .ai-evo-card:before{background:linear-gradient(#20d6ff,transparent)}
+#tabPageAIEvolution .ai-evo-card .k{color:#7290aa}
+#tabPageAIEvolution .ai-evo-card .v{color:#f2f8ff}
+#tabPageAIEvolution .warn-box{background:linear-gradient(135deg,#101c2a,#0c1723)!important;border-color:#23455f!important;color:#a9bfd4!important}
+#tabPageAIEvolution .ai-evo-note{color:#7f98ae}
+#tabPageAIEvolution .ai-globe-card{background:radial-gradient(circle at 50% 42%,#102c43 0%,#081722 48%,#050c13 100%);border-color:#1b607f;box-shadow:inset 0 0 70px rgba(22,197,255,.09),0 0 35px rgba(22,197,255,.06)}
+#tabPageAIEvolution .ai-globe-label{color:#83a7c4}
+#tabPageAIEvolution .ai-data-stat{background:linear-gradient(145deg,#0e1a27,#09131e);border-color:#1f3a50}
+#tabPageAIEvolution .ai-data-stat .k{color:#6f8aa2}
+#tabPageAIEvolution .ai-data-stat .v{color:#e9f5ff}
+#tabPageAIEvolution .ai-stream{background:#04090f;border-color:#193247;box-shadow:inset 0 0 35px rgba(0,0,0,.35)}
+#tabPageAIEvolution .ai-hist-table,#tabPageAIEvolution .ai-evo-table{color:#cfe0ef}
+#tabPageAIEvolution table th{background:#0c1a27;color:#6f94b2;border-color:#20394d}
+#tabPageAIEvolution table td{border-color:#172b3c}
+#tabPageAIEvolution .ai-hist-ready{color:#36e0a1}
+#tabPageAIEvolution .ai-hist-wait{color:#ffc857}
+#tabPageAIEvolution .ai-research-pipeline{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-top:16px}
+#tabPageAIEvolution .ai-pipe{position:relative;padding:12px 9px;border:1px solid #1c3a51;border-radius:12px;background:linear-gradient(160deg,#0d1b29,#09131d);text-align:center;overflow:hidden}
+#tabPageAIEvolution .ai-pipe:after{content:"";position:absolute;left:100%;top:50%;width:8px;height:1px;background:#2bc9ef;box-shadow:0 0 8px #2bc9ef}
+#tabPageAIEvolution .ai-pipe:last-child:after{display:none}
+#tabPageAIEvolution .ai-pipe b{display:block;color:#edf8ff;font-size:12px}.ai-pipe small{display:block;color:#6e90aa;margin-top:4px;font-size:9px;letter-spacing:.08em}
+@media(max-width:1000px){#tabPageAIEvolution .ai-research-pipeline{grid-template-columns:repeat(2,1fr)}#tabPageAIEvolution .ai-pipe:after{display:none}}
+</style>
 
-/* ============================================================
-   AI EVOLUTION — DARK PREMIUM QUANT TERMINAL THEME
-   Scoped to the AI Evolution tab only.
-   ============================================================ */
-body.ai-evolution-mode{
-  background:#05080d !important;
-  color:#dbe7f5 !important;
-}
-body.ai-evolution-mode header{
-  background:rgba(5,8,13,.96) !important;
-  border-bottom:1px solid #182536 !important;
-}
-body.ai-evolution-mode header h1{color:#f4f8ff !important}
-body.ai-evolution-mode header .sub,
-body.ai-evolution-mode header .subtitle{color:#7f93aa !important}
-body.ai-evolution-mode .top-tabs{
-  background:#070b11 !important;
-  border-bottom:1px solid #182536 !important;
-}
-body.ai-evolution-mode .top-tab-btn{color:#72859d !important}
-body.ai-evolution-mode .top-tab-btn:hover{color:#dceaff !important}
-body.ai-evolution-mode .top-tab-btn.active{
-  color:#6ee7ff !important;
-  border-bottom-color:#39d5ff !important;
-}
+<style id="ai-institutional-v2">
+#tabPageAIEvolution{background:#060b12!important;color:#d8e5f1!important;padding:0!important;min-height:calc(100vh - 92px)!important;border-radius:0!important}
+#tabPageAIEvolution>.wrap{display:block!important;max-width:none!important;margin:0!important;padding:0!important}
+#tabPageAIEvolution .panel{background:transparent!important;border:0!important;box-shadow:none!important;padding:0!important}
+#tabPageAIEvolution>.wrap>.panel{display:none!important}
+.ai-institutional{max-width:1540px;margin:0 auto;padding:20px 22px 60px;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.ai-hero{position:relative;overflow:hidden;border:1px solid #18344a;border-radius:20px;padding:24px 26px;background:radial-gradient(circle at 80% 20%,rgba(25,184,255,.10),transparent 34%),linear-gradient(135deg,#0b1723,#071019 70%);box-shadow:0 18px 60px rgba(0,0,0,.28)}
+.ai-hero:after{content:"";position:absolute;inset:auto -10% -80px -10%;height:130px;background:linear-gradient(90deg,transparent,rgba(33,208,255,.06),transparent);transform:rotate(-3deg);animation:aiSweep 7s linear infinite}
+@keyframes aiSweep{from{transform:translateX(-35%) rotate(-3deg)}to{transform:translateX(35%) rotate(-3deg)}}
+.ai-hero-top{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}.ai-eyebrow,.ai-section-label{font-size:10px;letter-spacing:.19em;font-weight:900;color:#5f88a6}.ai-hero h2{margin:6px 0 5px;font-size:32px;letter-spacing:-.03em;color:#f2f8fc}.ai-hero p{margin:0;color:#7894aa;font-size:13px}.ai-hero-status{display:flex;align-items:center;gap:8px;border:1px solid #21435a;background:#091723;padding:10px 13px;border-radius:999px;color:#8fa9bc;font-size:10px;font-weight:800;white-space:nowrap}.ai-hero-status b{color:#35dba1}.ai-dot{width:7px;height:7px;border-radius:50%;background:#32d99b;box-shadow:0 0 0 4px rgba(50,217,155,.10),0 0 14px rgba(50,217,155,.5);display:inline-block;animation:aiPulse2 1.8s infinite}@keyframes aiPulse2{50%{opacity:.55;transform:scale(.75)}}
+.ai-controlbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:20px;padding-top:16px;border-top:1px solid #163044}.ai-mode,.ai-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.ai-badge{display:inline-flex;align-items:center;border-radius:999px;padding:6px 9px;font-size:9px;font-weight:900;letter-spacing:.07em}.ai-badge.safe{background:#092b22;border:1px solid #1a6b53;color:#4ee2ae}.ai-badge.neutral{background:#0d1a26;border:1px solid #244257;color:#7895aa}.ai-run-btn{background:#12a9d8;border:1px solid #2cd4ff;color:#00131c;font-weight:900;border-radius:9px;padding:9px 13px;cursor:pointer}.ai-run-btn:hover{filter:brightness(1.12)}.ai-status-text{font-size:10px;color:#7894aa}
+.ai-kpi-grid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px;margin:12px 0}.ai-kpi{background:linear-gradient(145deg,#0b1722,#08111a);border:1px solid #17344a;border-radius:12px;padding:13px 12px;min-height:83px}.ai-kpi span{display:block;font-size:8px;letter-spacing:.13em;color:#65839b;font-weight:900}.ai-kpi strong{display:block;color:#eef7fd;font-size:19px;margin-top:7px}.ai-kpi small{display:block;color:#587187;font-size:8px;margin-top:4px;line-height:1.3}.ai-kpi-primary{border-color:#1c6b83;background:linear-gradient(145deg,#0c202b,#08131c)}
+.ai-panel{margin-top:12px!important;padding:17px 18px!important;border:1px solid #16344a!important;border-radius:16px!important;background:linear-gradient(145deg,#0a141e,#071019)!important;box-shadow:0 12px 35px rgba(0,0,0,.18)!important}.ai-section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}.ai-section-head h3{margin:4px 0 0;color:#edf6fb;font-size:17px}.ai-lock{padding:6px 9px;border-radius:999px;background:#271a0b;border:1px solid #705020;color:#ffc65a;font-size:8px;font-weight:900;letter-spacing:.09em}.ai-lock.red{background:#2a1115;border-color:#71303a;color:#ff7b84}.ai-lifecycle{display:grid;grid-template-columns:repeat(6,1fr);gap:7px}.ai-phase{position:relative;padding:12px 10px;border:1px solid #17374c;background:#08141e;border-radius:11px;min-height:90px}.ai-phase:after{content:"→";position:absolute;right:-10px;top:34px;color:#2aaed0;font-weight:900}.ai-phase:last-child:after{display:none}.ai-phase i{font-style:normal;color:#3d718f;font-size:8px;font-weight:900}.ai-phase b{display:block;color:#9bb4c7;font-size:11px;margin-top:5px}.ai-phase span{display:block;color:#607b90;font-size:8px;line-height:1.45;margin-top:4px}.ai-phase.active{border-color:#147b95;background:linear-gradient(145deg,#0b202b,#09151e);box-shadow:inset 0 0 25px rgba(24,196,236,.06)}.ai-phase.active b{color:#45d9f4}.ai-phase.complete{border-color:#1b604c}.ai-phase.complete b{color:#4fe0ad}.ai-lifecycle-note,.ai-note-line{margin-top:12px;padding:10px 12px;border-left:2px solid #1b92b3;background:#08131c;color:#6e8ba0;font-size:10px;line-height:1.55}.ai-lifecycle-note b{color:#a9c3d4}
+.ai-two-col{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(360px,.8fr);gap:12px}.ai-data-layout{display:grid;grid-template-columns:330px 1fr;gap:12px}.ai-globe-card{height:300px!important;min-height:300px!important;border:1px solid #16475e!important;border-radius:14px!important;background:radial-gradient(circle at 50% 45%,#103248,#07141e 55%,#050b11)!important;position:relative;overflow:hidden}.ai-globe-card canvas{width:100%;height:100%}.ai-globe-caption{position:absolute;bottom:13px;left:15px;right:15px;display:flex;justify-content:space-between;font-size:8px;color:#5c89a2;letter-spacing:.09em}.ai-globe-caption b{color:#8eb5ca}.ai-data-readout{display:flex;flex-direction:column;gap:10px}.ai-readout-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.ai-readout-grid.five{grid-template-columns:repeat(5,1fr)}.ai-readout-grid>div{padding:10px;border:1px solid #17374b;border-radius:10px;background:#09141e;min-height:54px}.ai-readout-grid span{display:block;color:#5d7b90;font-size:8px;text-transform:uppercase;letter-spacing:.08em;font-weight:800}.ai-readout-grid b{display:block;color:#e7f3f9;font-size:13px;margin-top:5px}.ai-stream{flex:1;min-height:155px;background:#03080d!important;border:1px solid #132d3e;border-radius:10px;padding:10px 12px!important}.ai-table-wrap{overflow:auto;margin-top:10px;border:1px solid #17344a;border-radius:10px}.ai-hist-table{background:#08121b!important;color:#b9cedc!important}.ai-hist-table th{background:#0c1c29!important;color:#6489a1!important;border-color:#17364a!important}.ai-hist-table td{border-color:#122a3b!important;color:#a9bfce!important}.ai-hist-table tr:hover td{background:#0c1b27!important}
+.ai-model-stack{display:flex;flex-direction:column;gap:7px}.ai-model-row{display:grid;grid-template-columns:42px 1fr auto;align-items:center;gap:10px;padding:11px;border:1px solid #17364a;border-radius:10px;background:#09141e}.ai-model-icon{width:32px;height:32px;display:grid;place-items:center;border-radius:8px;background:#0c3850;color:#40d8f4;font-size:9px;font-weight:900}.ai-model-icon.deep{background:#2c1c45;color:#c88cff}.ai-model-icon.ens{background:#123b2f;color:#4ee0ad}.ai-model-row b{display:block;color:#e7f2f8;font-size:11px}.ai-model-row span{display:block;color:#5f7d91;font-size:8px;margin-top:3px}.ai-model-row>strong{font-size:9px;color:#ffc65a}.ai-model-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:9px}.ai-model-metrics div{padding:9px;border:1px solid #17344a;border-radius:9px}.ai-model-metrics span{font-size:8px;color:#5f7d91}.ai-model-metrics b{display:block;color:#e9f5fb;font-size:13px;margin-top:4px}.ai-model-warning{margin-top:10px;padding:10px;border:1px solid #5b4420;background:#19140b;border-radius:9px}.ai-model-warning b{display:block;color:#ffc85a;font-size:9px}.ai-model-warning span{display:block;color:#89785d;font-size:9px;line-height:1.45;margin-top:3px}
+.ai-option-memory{margin-top:12px!important}.ai-decision-row{margin-top:12px}.ai-score-board{display:flex;align-items:center;gap:18px;padding:16px;border:1px solid #183b50;border-radius:13px;background:radial-gradient(circle at 10% 50%,rgba(21,180,220,.08),transparent 45%),#09141e}.ai-score-ring{width:105px;height:105px;flex:0 0 105px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;border:7px solid #20c4ea;border-right-color:#17617a;border-bottom-color:#173444;box-shadow:0 0 25px rgba(24,198,237,.12)}.ai-score-ring b{font-size:28px;color:#effaff}.ai-score-ring small{color:#67859a}.ai-score-title{font-size:16px;font-weight:900;color:#edf7fc}.ai-score-board p{font-size:9px;color:#668399;line-height:1.55;margin:6px 0 0}.ai-factor-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:9px}.ai-factor-grid div{padding:10px;border:1px solid #17364a;border-radius:9px;background:#09141e}.ai-factor-grid span{font-size:8px;color:#5d7a90}.ai-factor-grid b{display:block;color:#2ed0ef;font-size:13px;margin-top:4px}.ai-readiness-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}.ai-readiness-grid>div{padding:11px;border:1px solid #17364a;border-radius:10px;background:#09141e}.ai-readiness-grid span{display:block;color:#5f7d91;font-size:8px;text-transform:uppercase;letter-spacing:.08em}.ai-readiness-grid b{display:block;font-size:12px;margin-top:5px;color:#dfeef5}.ai-readiness-grid small{display:block;color:#5a7487;font-size:8px;margin-top:4px}.green-text{color:#4ee0ad!important}.red-text{color:#ff7b84!important}.ai-execution-roadmap{display:flex;align-items:center;gap:5px;margin-top:12px;flex-wrap:wrap}.ai-execution-roadmap span{padding:5px 7px;border-radius:999px;background:#0c1924;border:1px solid #1b384b;color:#7894a8;font-size:8px;font-weight:800}.ai-execution-roadmap i{width:12px;height:1px;background:#27566b}
+.ai-memory-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.ai-memory-grid>div{border:1px solid #17364a;border-radius:11px;padding:12px;background:#09141e}.ai-memory-grid h4,.ai-subsection h4{margin:0 0 8px;color:#8eabc0;font-size:10px;text-transform:uppercase;letter-spacing:.11em}.ai-evo-learning{padding:9px 0!important;border-bottom:1px solid #142c3d!important;color:#b8ccd8!important}.ai-evo-learning b{color:#e5f1f6!important}.ai-evo-note{color:#648096!important;font-size:9px!important;line-height:1.5}.ai-subsection{margin-top:14px}.ai-subsection:first-of-type{margin-top:0}.ai-evo-scroll{max-height:330px!important;overflow:auto;border:1px solid #17364a;border-radius:9px}.ai-evo-table{background:#08121b!important;color:#b9cedc!important}.ai-evo-table th{background:#0c1c29!important;color:#6489a1!important;border-color:#17364a!important}.ai-evo-table td{border-color:#122a3b!important;color:#a9bfce!important}.ai-evo-table tr:hover td{background:#0c1b27!important}
+@media(max-width:1200px){.ai-kpi-grid{grid-template-columns:repeat(4,1fr)}.ai-lifecycle{grid-template-columns:repeat(3,1fr)}.ai-two-col{grid-template-columns:1fr}}
+@media(max-width:800px){.ai-institutional{padding:12px}.ai-hero-top,.ai-controlbar{flex-direction:column;align-items:flex-start}.ai-kpi-grid{grid-template-columns:repeat(2,1fr)}.ai-lifecycle{grid-template-columns:1fr 1fr}.ai-phase:after{display:none}.ai-data-layout,.ai-memory-grid{grid-template-columns:1fr}.ai-readout-grid,.ai-readout-grid.five{grid-template-columns:1fr 1fr}.ai-factor-grid{grid-template-columns:repeat(2,1fr)}}
 
-/* Main AI canvas */
-#tabPageAIEvolution{
-  position:relative;
-  isolation:isolate;
-  background:
-    radial-gradient(circle at 12% 8%,rgba(38,126,255,.13),transparent 28%),
-    radial-gradient(circle at 88% 12%,rgba(139,92,246,.10),transparent 26%),
-    radial-gradient(circle at 50% 100%,rgba(0,217,255,.06),transparent 34%),
-    linear-gradient(180deg,#05080d 0%,#070c13 48%,#05080d 100%) !important;
-  color:#dbe7f5 !important;
-  border-radius:0 !important;
-  padding:18px 0 42px !important;
-  min-height:calc(100vh - 90px);
-}
-#tabPageAIEvolution:before{
-  content:"";
-  position:absolute;
-  inset:0;
-  z-index:-1;
-  pointer-events:none;
-  opacity:.22;
-  background-image:
-    linear-gradient(rgba(73,126,180,.09) 1px,transparent 1px),
-    linear-gradient(90deg,rgba(73,126,180,.09) 1px,transparent 1px);
-  background-size:44px 44px;
-  mask-image:linear-gradient(to bottom,black,transparent 92%);
-}
-
-/* Panels */
-#tabPageAIEvolution .panel{
-  background:linear-gradient(145deg,rgba(13,21,32,.96),rgba(8,14,23,.96)) !important;
-  border:1px solid #1b2b3d !important;
-  border-radius:16px !important;
-  padding:20px !important;
-  box-shadow:
-    0 18px 50px rgba(0,0,0,.30),
-    inset 0 1px 0 rgba(255,255,255,.025) !important;
-  backdrop-filter:blur(8px);
-}
-#tabPageAIEvolution .panel:first-child{
-  background:
-    radial-gradient(circle at 15% 15%,rgba(42,191,255,.08),transparent 35%),
-    linear-gradient(145deg,#0d1723,#08111b) !important;
-  border-color:#23405a !important;
-}
-#tabPageAIEvolution .panel h2{
-  color:#7891aa !important;
-  letter-spacing:.17em !important;
-}
-#tabPageAIEvolution .panel:first-child h2{
-  color:#e7f4ff !important;
-}
-#tabPageAIEvolution .panel:first-child h2:first-letter{color:#52dcff !important}
-
-/* Status cards */
-#tabPageAIEvolution .ai-evo-card{
-  background:linear-gradient(145deg,#0e1926,#0a121c) !important;
-  border:1px solid #1b2e43 !important;
-  border-radius:12px !important;
-  box-shadow:0 8px 24px rgba(0,0,0,.22) !important;
-}
-#tabPageAIEvolution .ai-evo-card:before{
-  width:2px !important;
-  background:linear-gradient(#39d5ff,rgba(123,92,246,.15)) !important;
-}
-#tabPageAIEvolution .ai-evo-card .k{color:#7088a1 !important}
-#tabPageAIEvolution .ai-evo-card .v{color:#e8f4ff !important}
-
-/* Score */
-#tabPageAIEvolution .ai-evo-score{
-  background:linear-gradient(145deg,#0c1723,#09111a) !important;
-  border:1px solid #1d3449 !important;
-}
-#tabPageAIEvolution .ai-evo-ring{
-  border-color:#35d9ff !important;
-  border-right-color:#7d72ff !important;
-  border-bottom-color:#1a2c3e !important;
-  box-shadow:0 0 30px rgba(53,217,255,.12) !important;
-}
-#tabPageAIEvolution .ai-evo-ring b{color:#effaff !important}
-#tabPageAIEvolution .ai-evo-ring small{color:#71879f !important}
-#tabPageAIEvolution .ai-evo-components>div{
-  background:#0b1622 !important;
-  border-color:#1a2d41 !important;
-}
-#tabPageAIEvolution .ai-evo-components small{color:#7288a0 !important}
-#tabPageAIEvolution .ai-evo-components b{color:#55ddff !important}
-
-/* Tables */
-#tabPageAIEvolution .ai-evo-table,
-#tabPageAIEvolution .ai-hist-table{
-  background:#09111a !important;
-  color:#d8e5f1 !important;
-}
-#tabPageAIEvolution .ai-evo-table th,
-#tabPageAIEvolution .ai-hist-table th{
-  background:#0d1a27 !important;
-  color:#728ba5 !important;
-  border-bottom-color:#1d3145 !important;
-}
-#tabPageAIEvolution .ai-evo-table td,
-#tabPageAIEvolution .ai-hist-table td{
-  border-bottom-color:#17293b !important;
-}
-#tabPageAIEvolution .ai-evo-table tr:hover td{background:#0e2030 !important}
-#tabPageAIEvolution .ai-evo-scroll,
-#tabPageAIEvolution .ai-hist-table{
-  border-color:#1b3044 !important;
-}
-#tabPageAIEvolution .ai-evo-note,
-#tabPageAIEvolution .ai-score-explain{color:#7d91a7 !important}
-#tabPageAIEvolution .ai-table-note{
-  background:rgba(27,145,191,.08) !important;
-  border-left-color:#39d5ff !important;
-  color:#8499af !important;
-}
-
-/* Learning/warning */
-#tabPageAIEvolution .warn-box{
-  background:linear-gradient(90deg,rgba(255,170,64,.08),rgba(255,90,90,.035)) !important;
-  border-color:#5a4327 !important;
-  color:#d8ad6b !important;
-}
-#tabPageAIEvolution .pill.ok{
-  background:rgba(45,211,128,.10) !important;
-  color:#55e39a !important;
-  border-color:#235d48 !important;
-}
-#tabPageAIEvolution .pill.warn{
-  background:rgba(255,169,64,.08) !important;
-  color:#ffbd68 !important;
-  border-color:#5a4327 !important;
-}
-#tabPageAIEvolution .secondary.small-btn{
-  background:#0c1723 !important;
-  border-color:#263d53 !important;
-  color:#b9cee2 !important;
-}
-#tabPageAIEvolution .secondary.small-btn:hover{
-  border-color:#39d5ff !important;
-  color:#6ee7ff !important;
-  background:#0d1d2b !important;
-}
-#tabPageAIEvolution input,
-#tabPageAIEvolution select{
-  background:#0b1622 !important;
-  border-color:#243a50 !important;
-  color:#dbe8f5 !important;
-}
-
-/* Historical observatory */
-#tabPageAIEvolution .ai-globe-card{
-  background:
-    radial-gradient(circle at 50% 42%,rgba(44,201,255,.13) 0%,rgba(15,33,50,.78) 34%,#07101a 72%),
-    #07101a !important;
-  border-color:#23465f !important;
-  box-shadow:
-    inset 0 0 70px rgba(39,198,255,.08),
-    0 16px 40px rgba(0,0,0,.28) !important;
-}
-#tabPageAIEvolution .ai-globe-label{color:#7793ad !important}
-#tabPageAIEvolution .ai-globe-live{color:#54e59a !important}
-#tabPageAIEvolution .ai-globe-live i{
-  background:#48e69a !important;
-  box-shadow:0 0 0 4px rgba(72,230,154,.10),0 0 16px rgba(72,230,154,.65) !important;
-}
-#tabPageAIEvolution .ai-data-stat{
-  background:linear-gradient(145deg,#0d1926,#09121c) !important;
-  border-color:#1c3247 !important;
-}
-#tabPageAIEvolution .ai-data-stat .k{color:#7089a3 !important}
-#tabPageAIEvolution .ai-data-stat .v{color:#e7f5ff !important}
-#tabPageAIEvolution .ai-stream{
-  background:
-    radial-gradient(circle at 90% 0%,rgba(107,92,255,.08),transparent 30%),
-    #050b12 !important;
-  border:1px solid #182b3e;
-  box-shadow:inset 0 0 35px rgba(0,0,0,.35);
-}
-#tabPageAIEvolution .ai-stream:after{background:linear-gradient(transparent,#050b12) !important}
-#tabPageAIEvolution .ai-stream-line{color:#91a7bc !important}
-#tabPageAIEvolution .ai-stream-line b{color:#62ddff !important}
-#tabPageAIEvolution .ai-stream-line .ok{color:#5ae6a0 !important}
-#tabPageAIEvolution .ai-stream-line .blue{color:#9b9cff !important}
-#tabPageAIEvolution .ai-provenance{
-  background:#09131e !important;
-  border-color:#1b3044 !important;
-  color:#778da4 !important;
-}
-#tabPageAIEvolution .ai-provenance span{
-  background:#0d1926 !important;
-  border-color:#21384e !important;
-}
-#tabPageAIEvolution .ai-provenance b{color:#b7cde0 !important}
-#tabPageAIEvolution .ai-provenance i{color:#5fdfff !important}
-#tabPageAIEvolution .ai-score-badge{
-  background:rgba(53,217,255,.08) !important;
-  border-color:#24526a !important;
-  color:#64dcff !important;
-}
-#tabPageAIEvolution .ai-hist-ready{color:#5ce5a0 !important}
-#tabPageAIEvolution .ai-hist-wait{color:#ffb45f !important}
-
-/* Subtle scan-line animation */
-#tabPageAIEvolution .panel{
-  overflow:hidden;
-}
-#tabPageAIEvolution .panel:first-child:after{
-  content:"";
-  position:absolute;
-  pointer-events:none;
-  left:0;right:0;top:-120%;
-  height:70%;
-  background:linear-gradient(to bottom,transparent,rgba(65,215,255,.025),transparent);
-  animation:aiScan 8s linear infinite;
-}
-@keyframes aiScan{
-  0%{transform:translateY(0)}
-  100%{transform:translateY(330%)}
-}
-
-/* Mobile */
-@media(max-width:900px){
-  #tabPageAIEvolution{padding-left:8px !important;padding-right:8px !important}
-}
-
+.ai-research-strip{display:grid;grid-template-columns:auto 1fr auto 1fr auto 1.5fr;gap:8px;align-items:center;margin-top:8px;padding:9px 10px;border:1px solid #17364a;border-radius:9px;background:#08131d}.ai-research-strip span{font-size:8px;color:#55748a;letter-spacing:.08em;font-weight:900}.ai-research-strip b{font-size:9px;color:#d9eaf2}.ai-research-strip b:nth-of-type(1){color:#49d8ad}.ai-research-strip b:nth-of-type(2){color:#4cd6ef}.ai-research-strip b:nth-of-type(3){color:#9ab4c5}
+@media(max-width:800px){.ai-research-strip{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
@@ -451,9 +250,13 @@ body.ai-evolution-mode .top-tab-btn.active{
 <div class="top-tabs">
   <button class="top-tab-btn active" id="tabBtnCondor" onclick="switchTopTab('condor')">Option Selling — Condor / Strangle</button>
   <button class="top-tab-btn" id="tabBtnNiftyBreakout" onclick="switchTopTab('niftyBreakout')">🎯 NIFTY Bullish Breakout</button>
-  <button class="top-tab-btn" id="tabBtnAIEvolution" onclick="switchTopTab('aiEvolution')">🧠 AI Evolution Engine</button>
+  
+<button class="top-tab-btn" id="tabBtnAIEvolution" onclick="switchTopTab('aiEvolution')">🧠 AI Evolution Engine</button>
   
 </div>
+
+
+
 
 <div class="tab-page active" id="tabPageCondor">
 <div class="wrap">
@@ -867,110 +670,124 @@ body.ai-evolution-mode .top-tab-btn.active{
 </div><!-- /tabPageNiftyBreakout -->
 
 <div class="tab-page" id="tabPageAIEvolution">
-<div class="wrap">
-  <div class="panel">
-    <h2>🧠 Autonomous AI Evolution Engine</h2>
-    <div class="warn-box" style="margin-top:0;">AI Universe is intentionally limited to <b>NIFTY, BANKNIFTY and FINNIFTY</b>. F&amp;O stocks are disabled for this learning phase. This engine runs continuously in the Python backend using the same Zerodha/Kite session. It scans, paper-trades, records every decision, learns from completed trades, creates challenger versions and automatically accepts or rolls back changes. <b>Paper trading only — no broker orders are sent by this engine.</b></div>
-    <div class="row" style="margin-top:14px;align-items:center;gap:10px;">
-      <span id="aiModePill" class="pill ok">AUTONOMOUS PAPER</span><span id="aiConnectionPill" class="pill warn">WAITING FOR KITE</span>
-      <button class="secondary small-btn" id="aiCycleBtn">Run one cycle now</button><span id="aiStatusText" class="loading"></span>
-    </div>
-    <div class="ai-evo-grid">
-      <div class="ai-evo-card"><div class="k">Champion</div><div class="v" id="aiChampion">—</div></div>
-      <div class="ai-evo-card"><div class="k">Closed Trades</div><div class="v" id="aiTrades">0</div></div>
-      <div class="ai-evo-card"><div class="k">Win Rate</div><div class="v" id="aiWin">—</div></div>
-      <div class="ai-evo-card"><div class="k">Avg R</div><div class="v" id="aiAvgR">—</div></div>
-      <div class="ai-evo-card"><div class="k">Profit Factor</div><div class="v" id="aiPF">—</div></div>
-      <div class="ai-evo-card"><div class="k">Open Paper Trades</div><div class="v" id="aiOpen">0</div></div>
-      <div class="ai-evo-card"><div class="k">Engine</div><div class="v" id="aiEngine">RUNNING</div></div>
-      <div class="ai-evo-card"><div class="k">AI Universe</div><div class="v" id="aiUniverse">Indices Only</div></div>
-      <div class="ai-evo-card"><div class="k">Learning Stage</div><div class="v" id="aiLearningStage">BOOTSTRAP</div></div>
-      <div class="ai-evo-card"><div class="k">Effective Entry Gate</div><div class="v" id="aiEffectiveGate">55/100</div></div>
-      <div class="ai-evo-card"><div class="k">Learning Progress</div><div class="v" id="aiLearningProgress">0%</div></div>
-      <div class="ai-evo-card"><div class="k">ML Samples</div><div class="v" id="aiMLSamples">0</div></div>
-      <div class="ai-evo-card"><div class="k">ML Accuracy</div><div class="v" id="aiMLAccuracy">—</div></div>
-      <div class="ai-evo-card"><div class="k">ML AUC</div><div class="v" id="aiMLAUC">—</div></div><div class="ai-evo-card"><div class="k">Deep Model</div><div class="v" id="aiDLStatus">NOT TRAINED</div></div><div class="ai-evo-card"><div class="k">DL Samples</div><div class="v" id="aiDLSamples">0</div></div><div class="ai-evo-card"><div class="k">DL Accuracy</div><div class="v" id="aiDLAccuracy">—</div></div><div class="ai-evo-card"><div class="k">DL AUC</div><div class="v" id="aiDLAUC">—</div></div>
-      <div class="ai-evo-card"><div class="k">Research P(success)</div><div class="v" id="aiResearchProb">—</div></div>
-      <div class="ai-evo-card"><div class="k">Research Uncertainty</div><div class="v" id="aiResearchUncertainty">—</div></div>
-      <div class="ai-evo-card"><div class="k">Market Regime</div><div class="v" id="aiResearchRegime">—</div></div>
-      <div class="ai-evo-card"><div class="k">Research AUC</div><div class="v" id="aiResearchAUC">—</div></div>
-      <div class="ai-evo-card"><div class="k">Scan Rotation</div><div class="v" id="aiScanRotation" style="font-size:13px;">—</div></div>
-      <div class="ai-evo-card"><div class="k">Last AI Cycle (IST)</div><div class="v" id="aiUpdated" style="font-size:13px;">—</div></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h2>🌐 Historical Market Data Observatory</h2>
-    <div class="ai-data-observatory">
-      <div class="ai-globe-card"><div class="ai-globe-label">INDEX MARKET DATA FABRIC</div><div class="ai-globe-live"><i></i><span id="aiGlobeLive">COLLECTOR ONLINE</span></div><canvas id="aiGlobe" width="720" height="620"></canvas></div>
-      <div class="ai-data-side">
-        <div class="ai-data-status">
-          <div class="ai-data-stat"><div class="k">Collector</div><div class="v" id="aiHistStatus">WAITING</div></div>
-          <div class="ai-data-stat"><div class="k">5m Candles</div><div class="v" id="aiHistRows">0</div></div>
-          <div class="ai-data-stat"><div class="k">History Model</div><div class="v" id="aiHistModel">—</div></div>
-          <div class="ai-data-stat"><div class="k">Historical AUC</div><div class="v" id="aiHistAUC">—</div></div>
-        </div>
-        <div class="ai-stream" id="aiDataStream"></div>
+<div class="ai-institutional">
+  <section class="ai-hero">
+    <div class="ai-hero-top">
+      <div>
+        <div class="ai-eyebrow">AI EVOLUTION / MARKET RESEARCH PLATFORM</div>
+        <h2>Autonomous Quant Intelligence</h2>
+        <p>Historical index pre-training → live market memory → recurrent learning → paper execution → evidence-based validation.</p>
       </div>
+      <div class="ai-hero-status"><span class="ai-dot"></span><span id="aiConnectionPillText">KITE / BACKEND</span><b id="aiEngineHero">PAPER MODE</b></div>
     </div>
-    <div style="margin-top:14px;overflow:auto"><table class="ai-hist-table"><thead><tr><th>Index</th><th>Bars Stored</th><th>First Data</th><th>Latest Data</th><th>Model Samples</th><th>Validation</th><th>Accuracy</th><th>Status</th></tr></thead><tbody id="aiHistTable"><tr><td colspan="8">Waiting for Zerodha historical data…</td></tr></tbody></table></div>
-    <div class="ai-evo-note">Historical index candles are used to pre-train market-behaviour patterns. They are not treated as historical option-chain data. Live option-specific learning continues separately from the paper-trade price paths.</div>
-  </div>
 
-  <div class="panel">
-    <h2>Current AI Setup</h2>
-    <div class="ai-evo-score"><div class="ai-evo-ring"><b id="aiScore">—</b><small>/100</small></div><div style="flex:1"><div style="font-size:15px;font-weight:600" id="aiSetupTitle">Waiting for the next autonomous scan…</div><div class="ai-evo-note" id="aiSetupNote">The backend continues scanning even when this tab is not open.</div></div></div>
-    <div class="ai-evo-components" style="margin-top:14px"><div><small>Trend</small><b id="aiTrend">—</b></div><div><small>Momentum</small><b id="aiMomentum">—</b></div><div><small>Volatility</small><b id="aiVol">—</b></div><div><small>PCR</small><b id="aiPCR">—</b></div><div><small>IV</small><b id="aiIV">—</b></div></div>
-    <div class="ai-provenance"><span><b>Score</b> current market decision</span><span><b>Gate</b> <i id="aiGateText">—</i></span><span><b>Model</b> <i id="aiModelText">BOOTSTRAP</i></span><span><b>Data</b> index candles + live Kite</span></div>
-  </div>
-
-  <div class="panel">
-    <h2>Market-Pattern ML + Deep Sequence Brain</h2>
-    <div class="warn-box" style="margin-top:0;">The number shown as <b>AI Score</b> is a decision score for the latest market setup — it is <b>not the 72 mature gate</b>. While the system is in <b>Autonomous Bootstrap</b>, the effective entry gate starts at 55 and rises toward 72 only as real evidence accumulates. ML / Deep Sequence / Ensemble gates become authoritative only after their minimum training evidence is available. This engine is <b>paper trading only</b>. Historical training uses index candles; it does not fabricate historical option-chain data.</div>
-    <div class="ai-evo-grid" style="margin-top:14px;">
-      <div class="ai-evo-card"><div class="k">Model Status</div><div class="v" id="aiMLStatus">NOT TRAINED</div></div>
-      <div class="ai-evo-card"><div class="k">Target</div><div class="v" style="font-size:14px;">Target before Stop</div></div>
-      <div class="ai-evo-card"><div class="k">ML Gate</div><div class="v" id="aiMLGate" style="font-size:14px;">Warming</div></div>
-      <div class="ai-evo-card"><div class="k">Last ML Train</div><div class="v" id="aiMLUpdated" style="font-size:12px;">—</div></div><div class="ai-evo-card"><div class="k">Last Deep Train</div><div class="v" id="aiDLUpdated" style="font-size:12px;">—</div></div>
+    <div class="ai-controlbar">
+      <div class="ai-mode"><span class="ai-badge safe">PAPER ONLY</span><span class="ai-badge neutral">NIFTY · BANKNIFTY · FINNIFTY</span><span class="ai-badge neutral">NO BROKER ORDERS</span></div>
+      <div class="ai-controls"><span id="aiStatusText" class="ai-status-text">Backend state loading…</span><button class="ai-run-btn" id="aiCycleBtn">Run research cycle</button></div>
     </div>
-  </div>
+  </section>
 
-  <div class="panel">
-    <h2>AI Research Architecture</h2>
-    <div class="ai-evo-note">This engine is now a layered research system: engineered market state → online ML → Deep Sequence model → 5-model ensemble → regime/uncertainty filter → realistic bid/ask paper execution → price-path outcome → walk-forward validation → Champion/Challenger. The models learn from market paths and outcomes, not from the 72 score itself.</div>
-    <div class="ai-evo-components" style="margin-top:14px"><div><small>ML</small><b>Market-state classifier</b></div><div><small>Deep</small><b>20-state sequence brain</b></div><div><small>Ensemble</small><b>5 learners</b></div><div><small>Validation</small><b>Chronological 80/20</b></div><div><small>Regime</small><b>Trend / Range / Vol</b></div><div><small>Execution</small><b>Bid / Ask / Volume</b></div></div>
-  </div>
+  <section class="ai-kpi-grid">
+    <div class="ai-kpi ai-kpi-primary"><span>CHAMPION</span><strong id="aiChampion">—</strong><small>Current production research version</small></div>
+    <div class="ai-kpi"><span>LEARNING STAGE</span><strong id="aiLearningStage">BOOTSTRAP</strong><small id="aiLearningProgress">0% evidence progress</small></div>
+    <div class="ai-kpi"><span>EFFECTIVE ENTRY GATE</span><strong id="aiEffectiveGate">55/100</strong><small>Matures toward the research gate</small></div>
+    <div class="ai-kpi"><span>OPEN PAPER TRADES</span><strong id="aiOpen">0</strong><small>Simulated positions only</small></div>
+    <div class="ai-kpi"><span>CLOSED OUTCOMES</span><strong id="aiTrades">0</strong><small>Completed price-path observations</small></div>
+    <div class="ai-kpi"><span>WIN RATE</span><strong id="aiWin">—</strong><small>Closed paper trades</small></div>
+    <div class="ai-kpi"><span>AVG R</span><strong id="aiAvgR">—</strong><small>Risk-normalised outcome</small></div>
+    <div class="ai-kpi"><span>PROFIT FACTOR</span><strong id="aiPF">—</strong><small>Research metric, not a guarantee</small></div>
+  </section>
 
-  <div class="panel">
-    <h2>What the AI has changed — and what happened after the change</h2>
-    <div class="ai-evo-note">Every change has a permanent before/after record. A challenger does not overwrite the Champion. It runs independently in paper mode until enough evidence exists.</div>
-    <div id="aiChanges" style="margin-top:12px"></div>
-  </div>
+  <section class="ai-panel ai-lifecycle-panel">
+    <div class="ai-section-head"><div><span class="ai-section-label">AUTONOMOUS RESEARCH LIFECYCLE</span><h3>How the engine becomes execution-ready</h3></div><span class="ai-lock">LIVE EXECUTION: LOCKED</span></div>
+    <div class="ai-lifecycle">
+      <div class="ai-phase active" id="aiPhaseCollect"><i>01</i><b>COLLECT</b><span>Index candles + live option memory</span></div>
+      <div class="ai-phase" id="aiPhaseTrain"><i>02</i><b>TRAIN</b><span>ML + true GRU sequence model</span></div>
+      <div class="ai-phase" id="aiPhaseValidate"><i>03</i><b>VALIDATE</b><span>Chronological / walk-forward evidence</span></div>
+      <div class="ai-phase" id="aiPhasePaper"><i>04</i><b>PAPER</b><span>Bid/ask + volume realistic simulation</span></div>
+      <div class="ai-phase" id="aiPhaseChampion"><i>05</i><b>CHAMPION</b><span>Champion / challenger comparison</span></div>
+      <div class="ai-phase" id="aiPhaseLive"><i>06</i><b>FUTURE LIVE</b><span>Separate approval + risk controls</span></div>
+    </div>
+    <div class="ai-lifecycle-note"><b>Automatic history:</b> when Kite is connected, the backend backfills the maximum configured historical window (default 3 years of 5-minute index candles) in safe chunks, resumes missing ranges and deduplicates locally. <b>Important:</b> historical candles train market behaviour; they do not create fake historical option-chain trades. The option-chain archive starts from the moment the collector records live Kite data. The engine remains paper-only until independent evidence and execution controls are satisfied.</div>
+  </section>
 
-  <div class="panel">
-    <h2>What the AI has learned</h2>
-    <div id="aiLearning"></div>
-  </div>
+  <section class="ai-two-col">
+    <div class="ai-panel ai-data-panel">
+      <div class="ai-section-head"><div><span class="ai-section-label">01 / DATA FABRIC</span><h3>Historical Market Observatory</h3></div><span class="ai-live-label"><span class="ai-dot"></span><span id="aiGlobeLive">COLLECTING</span></span></div>
+      <div class="ai-data-layout">
+        <div class="ai-globe-card"><canvas id="aiGlobe" width="720" height="620"></canvas><div class="ai-globe-caption"><b>INDEX DATA CORE</b><span>NIFTY · BANKNIFTY · FINNIFTY</span></div></div>
+        <div class="ai-data-readout">
+          <div class="ai-readout-grid">
+            <div><span>Collector</span><b id="aiHistStatus">WAITING</b></div>
+            <div><span>5m Candles</span><b id="aiHistRows">0</b></div><div><span>History Target</span><b id="aiHistTarget">3.0 years</b></div>
+            <div><span>History Model</span><b id="aiHistModel">—</b></div><div><span>Oldest Stored</span><b id="aiHistOldest">—</b></div>
+            <div><span>Historical AUC</span><b id="aiHistAUC">—</b></div>
+            <div><span>Research Phase</span><b id="aiHistPhase">COLLECTING</b></div>
+            <div><span>Backend</span><b id="aiBackendState">—</b></div>
+          </div>
+          <div class="ai-stream" id="aiDataStream"></div>
+        </div>
+      </div>
+      <div class="ai-table-wrap"><table class="ai-hist-table"><thead><tr><th>Index</th><th>Bars</th><th>First</th><th>Latest</th><th>Samples</th><th>Validation</th><th>Accuracy</th><th>Status</th></tr></thead><tbody id="aiHistTable"><tr><td colspan="8">Waiting for historical data…</td></tr></tbody></table></div>
+    </div>
 
-  <div class="panel">
-    <h2>Paper Transactions — complete audit trail</h2><div class="ai-table-note"><b>Important:</b> these are AI paper trades, not broker orders. Entry/exit prices come from executable bid/ask quotes when available. Volume is recorded separately for audit.</div>
-    <div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Time</th><th>Version</th><th>Symbol</th><th>Option</th><th>Side</th><th>Score</th><th>Entry</th><th>Exit</th><th>Entry Vol</th><th>Exit Vol</th><th>Entry Bid/Ask</th><th>Exit Bid/Ask</th><th>P&amp;L</th><th>R</th><th>MFE</th><th>MAE</th><th>ML P(success)</th><th>Liquidity</th><th>Status</th><th>Reason</th></tr></thead><tbody id="aiTradesTable"></tbody></table></div>
-  </div>
+    <div class="ai-panel ai-model-panel">
+      <div class="ai-section-head"><div><span class="ai-section-label">02 / MODEL LAB</span><h3>Learning & Validation</h3></div><span class="ai-lock">NO SCORE-LEAKAGE</span></div>
+      <div class="ai-model-stack">
+        <div class="ai-model-row"><div class="ai-model-icon">ML</div><div><b>Market-state ML</b><span>Engineered features · chronological validation</span></div><strong id="aiMLStatus">WARMING</strong></div>
+        <div class="ai-model-row"><div class="ai-model-icon deep">DL</div><div><b>True recurrent deep sequence</b><span id="aiDLArchitecture">GRU-32 · 20 sequential market states</span></div><strong id="aiDLStatus">NOT TRAINED</strong></div>
+        <div class="ai-model-row"><div class="ai-model-icon ens">EN</div><div><b>Research ensemble</b><span>Independent learners + uncertainty filter</span></div><strong id="aiResearchState">WARMING</strong></div>
+      </div>
+      <div class="ai-model-metrics">
+        <div><span>ML samples</span><b id="aiMLSamples">0</b></div><div><span>ML accuracy</span><b id="aiMLAccuracy">—</b></div><div><span>ML AUC</span><b id="aiMLAUC">—</b></div>
+        <div><span>DL samples</span><b id="aiDLSamples">0</b></div><div><span>DL accuracy</span><b id="aiDLAccuracy">—</b></div><div><span>DL AUC</span><b id="aiDLAUC">—</b></div>
+        <div><span>Ensemble P(success)</span><b id="aiResearchProb">—</b></div><div><span>Uncertainty</span><b id="aiResearchUncertainty">—</b></div><div><span>Research AUC</span><b id="aiResearchAUC">—</b></div>
+      </div>
+      <div class="ai-research-strip"><span>REGIME</span><b id="aiResearchRegime">—</b><span>ENSEMBLE</span><b id="aiResearchEnsembleState">WARMING</b><span>VALIDATION</span><b>CHRONOLOGICAL</b></div>
+      <div class="ai-model-warning"><b>Learning rule</b><span>The model learns from future price paths and completed paper outcomes. The 72 mature gate is a decision threshold, not a training target.</span></div>
+    </div>
+  </section>
 
-  <div class="panel">
-    <h2>AI Decisions</h2><div class="ai-table-note"><b>How to read this table:</b> Score is the setup score. Decision is the gate result. Scores below the current effective gate are expected during bootstrap and are not failed ML predictions.</div>
-    <div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Time</th><th>Version</th><th>Symbol</th><th>Score</th><th>Decision</th><th>Reason</th></tr></thead><tbody id="aiDecisionsTable"></tbody></table></div>
-  </div>
+  <section class="ai-panel ai-option-memory">
+    <div class="ai-section-head"><div><span class="ai-section-label">03 / LIVE OPTION MEMORY</span><h3>Real Option-Chain Archive</h3></div><span class="ai-badge safe">RECORDING FOR FUTURE TRAINING</span></div>
+    <div class="ai-readout-grid five">
+      <div><span>Collector</span><b id="aiOptStatus">WAITING</b></div><div><span>Snapshots</span><b id="aiOptRows">0</b></div><div><span>Contracts</span><b id="aiOptContracts">0</b></div><div><span>Last Capture</span><b id="aiOptLast">—</b></div><div><span>Next Capture</span><b id="aiOptNext">Every 5 min</b></div>
+    </div>
+    <div class="ai-note-line">This archive is built from genuine live Kite observations. It is not reconstructed historical option data. Each capture becomes future training material for option-specific liquidity, IV, OI, delta, bid/ask and price-path behaviour.</div>
+    <div class="ai-table-wrap"><table class="ai-hist-table"><thead><tr><th>Index</th><th>Snapshots</th><th>Contracts</th><th>First Capture</th><th>Latest Capture</th></tr></thead><tbody id="aiOptTable"><tr><td colspan="5">Waiting for live option-chain capture…</td></tr></tbody></table></div>
+  </section>
 
-  <div class="panel">
-    <h2>Strategy Versions — Champion vs Challenger</h2>
-    <div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Version</th><th>Parent</th><th>Created</th><th>Status</th><th>Reason</th><th>Metrics</th></tr></thead><tbody id="aiVersionsTable"></tbody></table></div>
-  </div>
+  <section class="ai-two-col ai-decision-row">
+    <div class="ai-panel">
+      <div class="ai-section-head"><div><span class="ai-section-label">04 / CURRENT INTELLIGENCE</span><h3>Latest Market Decision</h3></div><span class="ai-badge neutral">RESEARCH OUTPUT</span></div>
+      <div class="ai-score-board"><div class="ai-score-ring"><b id="aiScore">—</b><small>/100</small></div><div><div class="ai-score-title" id="aiSetupTitle">Waiting for the next autonomous scan…</div><p id="aiSetupNote">The backend continues scanning when this page is closed.</p></div></div>
+      <div class="ai-factor-grid"><div><span>Trend</span><b id="aiTrend">—</b></div><div><span>Momentum</span><b id="aiMomentum">—</b></div><div><span>Volatility</span><b id="aiVol">—</b></div><div><span>PCR</span><b id="aiPCR">—</b></div><div><span>IV</span><b id="aiIV">—</b></div></div>
+    </div>
+    <div class="ai-panel">
+      <div class="ai-section-head"><div><span class="ai-section-label">05 / EXECUTION CONTROL</span><h3>Future Execution Readiness</h3></div><span class="ai-lock red">LOCKED</span></div>
+      <div class="ai-readiness-grid">
+        <div><span>Broker orders</span><b class="red-text">DISABLED</b><small>AI engine does not place orders</small></div>
+        <div><span>Paper execution</span><b class="green-text">ACTIVE</b><small>Bid / ask / volume simulation</small></div>
+        <div><span>Model maturity</span><b id="aiReadyModel">BUILDING</b><small>Requires trained + validated models</small></div>
+        <div><span>Risk gate</span><b id="aiReadyRisk">NOT CLEARED</b><small>Independent risk controls required</small></div>
+      </div>
+      <div class="ai-execution-roadmap"><span>Evidence</span><i></i><span>Walk-forward</span><i></i><span>Paper stability</span><i></i><span>Risk approval</span><i></i><span>Only then live</span></div>
+      <p class="ai-note-line">The future live stage is deliberately separate from research. A high AI score alone will never be treated as permission to trade real money.</p>
+    </div>
+  </section>
 
-  <div class="panel">
-    <h2>System Log</h2>
-    <div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Time</th><th>Level</th><th>Event</th><th>Detail</th></tr></thead><tbody id="aiEventsTable"></tbody></table></div>
-  </div>
+  <section class="ai-panel">
+    <div class="ai-section-head"><div><span class="ai-section-label">06 / RESEARCH MEMORY</span><h3>What changed, what was learned, and why</h3></div><span class="ai-badge neutral">AUDITABLE</span></div>
+    <div class="ai-memory-grid"><div><h4>Strategy evolution</h4><div id="aiChanges"></div></div><div><h4>Learned observations</h4><div id="aiLearning"></div></div></div>
+  </section>
+
+  <section class="ai-panel">
+    <div class="ai-section-head"><div><span class="ai-section-label">07 / AUDIT TRAIL</span><h3>Paper Trades & AI Decisions</h3></div><span class="ai-badge neutral">NO BROKER ORDERS</span></div>
+    <div class="ai-subsection"><h4>Paper Transactions</h4><div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Time</th><th>Version</th><th>Symbol</th><th>Option</th><th>Side</th><th>Score</th><th>Entry</th><th>Exit</th><th>Entry Vol</th><th>Exit Vol</th><th>Entry Bid/Ask</th><th>Exit Bid/Ask</th><th>P&amp;L</th><th>R</th><th>MFE</th><th>MAE</th><th>ML P(success)</th><th>Liquidity</th><th>Status</th><th>Reason</th></tr></thead><tbody id="aiTradesTable"></tbody></table></div></div>
+    <div class="ai-subsection"><h4>AI Decisions</h4><div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Time</th><th>Version</th><th>Symbol</th><th>Score</th><th>Decision</th><th>Reason</th></tr></thead><tbody id="aiDecisionsTable"></tbody></table></div></div>
+    <div class="ai-subsection"><h4>Champion / Challenger</h4><div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Version</th><th>Parent</th><th>Created</th><th>Status</th><th>Reason</th><th>Metrics</th></tr></thead><tbody id="aiVersionsTable"></tbody></table></div></div>
+    <div class="ai-subsection"><h4>Backend System Log</h4><div class="ai-evo-scroll"><table class="ai-evo-table"><thead><tr><th>Time</th><th>Level</th><th>Event</th><th>Detail</th></tr></thead><tbody id="aiEventsTable"></tbody></table></div></div>
+  </section>
 </div>
 </div><!-- /tabPageAIEvolution -->
 
@@ -2583,52 +2400,89 @@ loadExistingPositionIntel();
 let aiUiTimer=null, aiUiInited=false;
 const aiEsc=v=>String(v??'—').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 function aiFmt(v){return v==null?'—':Number(v).toLocaleString('en-IN',{maximumFractionDigits:2});}
+// Explicit DOM references: do not rely on browser-created globals for element IDs.
+const aiEl=id=>document.getElementById(id);
+const aiChampion=aiEl('aiChampion'),aiMLSamples=aiEl('aiMLSamples'),aiMLAccuracy=aiEl('aiMLAccuracy'),aiMLAUC=aiEl('aiMLAUC');
+const aiDLStatus=aiEl('aiDLStatus'),aiDLSamples=aiEl('aiDLSamples'),aiDLAccuracy=aiEl('aiDLAccuracy'),aiDLAUC=aiEl('aiDLAUC'),aiDLUpdated=aiEl('aiDLUpdated');
+const aiLearningStage=aiEl('aiLearningStage'),aiEffectiveGate=aiEl('aiEffectiveGate'),aiLearningProgress=aiEl('aiLearningProgress'),aiTrades=aiEl('aiTrades'),aiWin=aiEl('aiWin'),aiAvgR=aiEl('aiAvgR'),aiPF=aiEl('aiPF'),aiOpen=aiEl('aiOpen'),aiEngine=aiEl('aiEngine'),aiUpdated=aiEl('aiUpdated'),aiUniverse=aiEl('aiUniverse'),aiScanRotation=aiEl('aiScanRotation'),aiConnectionPill=aiEl('aiConnectionPill'),aiStatusText=aiEl('aiStatusText'),aiCycleBtn=aiEl('aiCycleBtn');
+const aiResearchProb=aiEl('aiResearchProb'),aiResearchUncertainty=aiEl('aiResearchUncertainty'),aiResearchAUC=aiEl('aiResearchAUC'),aiResearchRegime=aiEl('aiResearchRegime');
+
 function aiStatusClass(v){return v==='ACCEPTED'?'ai-evo-status ai-evo-ok':(v==='ROLLED_BACK'||v==='REJECTED'?'ai-evo-status ai-evo-bad':'ai-evo-status ai-evo-test');}
 async function aiGet(url,opt){const r=await fetch(url,opt);const raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw Error('Backend returned a non-JSON response ('+r.status+'). Check the Python/Gunicorn process.')}if(!r.ok)throw Error(d.error||d.message||'Request failed');return d;}
 let aiGlobeFrame=0,aiGlobeTimer=null;
-// Explicit references for optional research metrics. Keeping these references
-// here prevents one missing/late DOM element from stopping the whole AI refresh.
-const aiResearchProb=document.getElementById('aiResearchProb');
-const aiResearchUncertainty=document.getElementById('aiResearchUncertainty');
-const aiResearchRegime=document.getElementById('aiResearchRegime');
-const aiResearchAUC=document.getElementById('aiResearchAUC');
-function aiSet(el,value){if(el)el.textContent=value;}
 function startAIGlobe(){
   if(aiGlobeTimer)return; const c=document.getElementById('aiGlobe'); if(!c)return; const ctx=c.getContext('2d');
   function draw(){
     const w=c.width,h=c.height,cx=w/2,cy=h/2,r=Math.min(w,h)*.31;ctx.clearRect(0,0,w,h);
-    const g=ctx.createRadialGradient(cx-r*.35,cy-r*.45,5,cx,cy,r*1.2);g.addColorStop(0,'#17344a');g.addColorStop(.45,'#0d2234');g.addColorStop(1,'#06101a');ctx.fillStyle=g;ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fill();
-    ctx.save();ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.clip();ctx.strokeStyle='rgba(72,211,255,.20)';ctx.lineWidth=1.5;
+    const g=ctx.createRadialGradient(cx-r*.35,cy-r*.45,5,cx,cy,r*1.2);g.addColorStop(0,'#fffdfb');g.addColorStop(.7,'#edf3f7');g.addColorStop(1,'#dfe7ee');ctx.fillStyle=g;ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fill();
+    ctx.save();ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.clip();ctx.strokeStyle='rgba(255,99,56,.18)';ctx.lineWidth=2;
     for(let k=-2;k<=2;k++){ctx.beginPath();ctx.ellipse(cx,cy,r*(.95-Math.abs(k)*.12),r,0,0,Math.PI*2);ctx.stroke();}
     for(let k=-2;k<=2;k++){ctx.beginPath();ctx.ellipse(cx,cy,r,r*(.95-Math.abs(k)*.14),0,0,Math.PI*2);ctx.stroke();}
     ctx.restore();
     const nodes=[[-.55,-.12],[-.28,.38],[.05,-.42],[.38,.18],[.63,-.05],[.18,.52]];const rot=(aiGlobeFrame%360)*Math.PI/180;
     const pts=nodes.map(([x,y])=>{const X=x*Math.cos(rot)-.08*Math.sin(rot);return [cx+X*r,cy+y*r]});
-    ctx.lineWidth=1;for(let i=0;i<pts.length;i++)for(let j=i+1;j<pts.length;j++){ctx.strokeStyle='rgba(72,211,255,.16)';ctx.beginPath();ctx.moveTo(...pts[i]);ctx.lineTo(...pts[j]);ctx.stroke();}
-    pts.forEach((p,i)=>{ctx.fillStyle=i%2?'#8d7cff':'#55ddff';ctx.shadowBlur=12;ctx.shadowColor='#55ddff';ctx.beginPath();ctx.arc(p[0],p[1],4,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0});
-    ctx.fillStyle='#86a4be';ctx.font='700 11px system-ui';ctx.textAlign='center';ctx.fillText('NIFTY  ·  BANKNIFTY  ·  FINNIFTY',cx,cy+r+28);ctx.font='10px system-ui';ctx.fillText('INDEX CANDLES  →  SEQUENCE LEARNING',cx,cy+r+45);
+    ctx.lineWidth=1;for(let i=0;i<pts.length;i++)for(let j=i+1;j<pts.length;j++){ctx.strokeStyle='rgba(255,99,56,.16)';ctx.beginPath();ctx.moveTo(...pts[i]);ctx.lineTo(...pts[j]);ctx.stroke();}
+    pts.forEach((p,i)=>{ctx.fillStyle=i%2?'#ff8a68':'#ff6338';ctx.shadowBlur=10;ctx.shadowColor='#ff6338';ctx.beginPath();ctx.arc(p[0],p[1],4,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0});
+    ctx.fillStyle='#667085';ctx.font='700 11px system-ui';ctx.textAlign='center';ctx.fillText('NIFTY  ·  BANKNIFTY  ·  FINNIFTY',cx,cy+r+28);ctx.font='10px system-ui';ctx.fillText('historical candles → sequence learning',cx,cy+r+45);
     aiGlobeFrame++;aiGlobeTimer=requestAnimationFrame(draw);
   }draw();
 }
 function updateAIHistorical(h){
-  startAIGlobe(); const syms=h.symbols||[];const total=syms.reduce((a,x)=>a+Number(x.n||0),0);document.getElementById('aiHistRows').textContent=total.toLocaleString('en-IN');
-  const st=h.status||'WAITING';document.getElementById('aiHistStatus').textContent=st.split(' — ')[0];document.getElementById('aiGlobeLive').textContent=st.includes('PRETRAINED')?'LEARNING ONLINE':(st.includes('COLLECTING')?'COLLECTING DATA':'STANDBY');
-  const m=h.model||{};document.getElementById('aiHistModel').textContent=m.status||'—';document.getElementById('aiHistAUC').textContent=m.auc?Number(m.auc).toFixed(3):'—';
-  const modelSamples=m.samples||0, val=m.validation_samples||0;
-  document.getElementById('aiHistTable').innerHTML=syms.map(x=>`<tr><td><b>${aiEsc(x.symbol)}</b></td><td>${Number(x.n||0).toLocaleString('en-IN')}</td><td>${aiEsc(x.first_ts||'—')}</td><td>${aiEsc(x.last_ts||'—')}</td><td>${modelSamples.toLocaleString('en-IN')}</td><td>${val.toLocaleString('en-IN')}</td><td>${m.accuracy?Number(m.accuracy).toFixed(1)+'%':'—'}</td><td class="${st.includes('PRETRAINED')?'ai-hist-ready':'ai-hist-wait'}">${aiEsc(st)}</td></tr>`).join('')||'<tr><td colspan="8">Waiting for Zerodha historical data…</td></tr>';
-  const stream=document.getElementById('aiDataStream');const now=new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'});const lines=[`<span class="blue">${now}</span>  DATA-FABRIC  heartbeat`, `<span class="ok">OK</span>  historical ${h.interval||'5minute'} candles synchronized`, `<span class="blue">SCAN</span> ${syms.map(x=>x.symbol+'='+x.n).join('  ')||'awaiting symbols'}`, `<span class="ok">MODEL</span> chronological 80/20 validation active`, `<span class="blue">BRAIN</span> index pre-training → live paper refinement`, `<span class="ok">SAFE</span> no broker orders from historical collector`];stream.innerHTML=lines.concat(lines).map(x=>`<div class="ai-stream-line">${x}</div>`).join('');
+  const syms=h.symbols||[], m=h.model||{};
+  const total=Number(h.candles||syms.reduce((a,x)=>a+Number(x.n||0),0));
+  const status=h.status||'WAITING FOR KITE';
+  const histStatus=aiEl('aiHistStatus'); if(histStatus)histStatus.textContent=status;
+  const rows=aiEl('aiHistRows'); if(rows)rows.textContent=total.toLocaleString('en-IN');
+  const targetYears=Number(h.max_years||3).toFixed(1);
+  const model=aiEl('aiHistModel'); if(model)model.textContent=m.status||'—';
+  const targetEl=aiEl('aiHistTarget'); if(targetEl)targetEl.textContent=targetYears+' years target';
+  const oldestEl=aiEl('aiHistOldest'); if(oldestEl)oldestEl.textContent=h.oldest||'—';
+  const auc=aiEl('aiHistAUC'); if(auc)auc.textContent=m.auc!=null&&Number(m.auc)>0?Number(m.auc).toFixed(3):'—';
+  const phase=aiEl('aiHistPhase'); if(phase)phase.textContent=(m.status&&String(m.status).includes('PRETRAIN'))?'PRETRAINED → LIVE REFINEMENT':(total>0?'COLLECTING / TRAINING':'WAITING FOR KITE');
+  const live=aiEl('aiGlobeLive'); if(live)live.textContent=status;
+  const backend=aiEl('aiBackendState'); if(backend)backend.textContent=status==='WAITING FOR KITE'?'WAITING':(status.includes('PARTIAL')?'ONLINE / RETRYING':'ONLINE');
+  const chunk=Number(h.chunk_days||90);
+  const stream=aiEl('aiDataStream');
+  if(stream){
+    const now=new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'});
+    const lines=[
+      `<span class="blue">${now}</span>  DATA-FABRIC  heartbeat`,
+      `<span class="ok">OK</span>  Kite historical ${h.interval||'5minute'} collector active`,
+      `<span class="blue">BACKFILL</span> target up to ${targetYears} years · ${chunk}-day request chunks`,
+      `<span class="ok">STORE</span> ${total.toLocaleString('en-IN')} candles · local deduplicated archive`,
+      `<span class="blue">MODEL</span> chronological 80/20 validation · historical → GRU pre-training`,
+      `<span class="ok">SAFE</span> no broker orders from historical collector`
+    ];
+    stream.innerHTML=lines.concat(lines.slice(2,5)).map(x=>`<div class="ai-stream-line">${x}</div>`).join('');
+  }
+  const tb=aiEl('aiHistTable');
+  if(tb){
+    tb.innerHTML=syms.map(x=>`<tr><td><b>${aiEsc(x.symbol)}</b></td><td>${Number(x.n||0).toLocaleString('en-IN')}</td><td>${aiEsc(x.first_ts||'—')}</td><td>${aiEsc(x.last_ts||'—')}</td><td>${Number(m.samples||0).toLocaleString('en-IN')}</td><td>${Number(m.validation_samples||0).toLocaleString('en-IN')}</td><td>${m.accuracy?Number(m.accuracy).toFixed(1)+'%':'—'}</td><td class="${String(status).includes('PRETRAIN')?'ai-hist-ready':'ai-hist-wait'}">${aiEsc(status)}</td></tr>`).join('')||'<tr><td colspan="8">Waiting for Zerodha historical data…</td></tr>';
+  }
+}
+
+async function updateAIOptionHistory(){
+  try{
+    const o=await aiGet('/api/ai-evolution/options');
+    const status=document.getElementById('aiOptStatus'); if(status) status.textContent=o.status||'WAITING';
+    const rows=document.getElementById('aiOptRows'); if(rows) rows.textContent=Number(o.rows||0).toLocaleString('en-IN');
+    const syms=o.symbols||[]; const contracts=syms.reduce((a,x)=>a+Number(x.contracts||0),0);
+    const ce=document.getElementById('aiOptContracts'); if(ce) ce.textContent=contracts.toLocaleString('en-IN');
+    const last=document.getElementById('aiOptLast'); if(last) last.textContent=o.last_capture_at?new Date(o.last_capture_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';
+    const tb=document.getElementById('aiOptTable'); if(tb) tb.innerHTML=syms.map(x=>`<tr><td><b>${aiEsc(x.symbol)}</b></td><td>${Number(x.n||0).toLocaleString('en-IN')}</td><td>${Number(x.contracts||0).toLocaleString('en-IN')}</td><td>${aiEsc(x.first_ts||'—')}</td><td>${aiEsc(x.last_ts||'—')}</td></tr>`).join('')||'<tr><td colspan="5">Waiting for live option-chain capture…</td></tr>';
+  }catch(e){const el=document.getElementById('aiOptStatus');if(el)el.textContent='ERROR';}
 }
 
 async function refreshAIEvolution(){
   try{
-    const s=await aiGet('/api/ai-evolution/status'); if(s.historical) updateAIHistorical(s.historical);
-    aiChampion.textContent=s.champion||'—';if(s.ml){aiMLSamples.textContent=s.ml.samples||0;aiMLAccuracy.textContent=s.ml.samples?s.ml.accuracy.toFixed(1)+'%':'—';aiMLAUC.textContent=s.ml.samples?s.ml.auc.toFixed(3):'—';}if(s.deep_learning){aiDLStatus.textContent=s.deep_learning.status||'NOT TRAINED';aiDLSamples.textContent=s.deep_learning.samples||0;aiDLAccuracy.textContent=s.deep_learning.samples?s.deep_learning.accuracy.toFixed(1)+'%':'—';aiDLAUC.textContent=s.deep_learning.samples?s.deep_learning.auc.toFixed(3):'—';aiDLUpdated.textContent=s.deep_learning.updated_at?new Date(s.deep_learning.updated_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';}const rs=s.research||{};aiSet(aiResearchProb,rs.probability!=null?(Number(rs.probability)*100).toFixed(1)+'%':'—');aiSet(aiResearchUncertainty,rs.uncertainty!=null?(Number(rs.uncertainty)*100).toFixed(1)+'%':'—');aiSet(aiResearchRegime,rs.regime||'—');aiSet(aiResearchAUC,rs.auc!=null?Number(rs.auc).toFixed(3):'—');const ls=s.learning||{};aiLearningStage.textContent=ls.stage||'AUTONOMOUS BOOTSTRAP';aiEffectiveGate.textContent=(ls.effective_score!=null?Number(ls.effective_score).toFixed(1):'55.0')+'/100';aiLearningProgress.textContent=(ls.progress!=null?Number(ls.progress).toFixed(1):'0')+'%';aiTrades.textContent=s.metrics.trades;aiWin.textContent=aiFmt(s.metrics.win_rate)+'%';aiAvgR.textContent=aiFmt(s.metrics.avg_r)+'R';aiPF.textContent=aiFmt(s.metrics.profit_factor);aiOpen.textContent=s.open_trades;aiEngine.textContent=!s.connected?'WAITING — KITE':(s.market_open?'RUNNING':'WAITING — MARKET CLOSED');aiUpdated.textContent=s.last_activity_at?new Date(s.last_activity_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'Waiting for market/Kite activity';
+    const s=await aiGet('/api/ai-evolution/status'); updateAIInstitutionalLifecycle(s); if(s.historical) updateAIHistorical(s.historical);
+    updateAIOptionHistory();
+    aiChampion.textContent=s.champion||'—';if(s.ml){aiMLSamples.textContent=s.ml.samples||0;aiMLAccuracy.textContent=s.ml.samples?s.ml.accuracy.toFixed(1)+'%':'—';aiMLAUC.textContent=s.ml.samples?s.ml.auc.toFixed(3):'—';}if(s.deep_learning){aiDLStatus.textContent=s.deep_learning.status||'NOT TRAINED';const arch=document.getElementById('aiDLArchitecture');if(arch)arch.textContent=s.deep_learning.architecture||'GRU-32';aiDLSamples.textContent=s.deep_learning.samples||0;aiDLAccuracy.textContent=s.deep_learning.samples?s.deep_learning.accuracy.toFixed(1)+'%':'—';aiDLAUC.textContent=s.deep_learning.samples?s.deep_learning.auc.toFixed(3):'—';aiDLUpdated.textContent=s.deep_learning.updated_at?new Date(s.deep_learning.updated_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';}const rs=s.research||{};const rpEl=document.getElementById('aiResearchProb'),ruEl=document.getElementById('aiResearchUncertainty'),rrEl=document.getElementById('aiResearchRegime'),raEl=document.getElementById('aiResearchAUC');if(rpEl)rpEl.textContent=rs.probability!=null?(Number(rs.probability)*100).toFixed(1)+'%':'—';if(ruEl)ruEl.textContent=rs.uncertainty!=null?(Number(rs.uncertainty)*100).toFixed(1)+'%':'—';if(rrEl)rrEl.textContent=rs.regime||'—';if(raEl)raEl.textContent=rs.auc?Number(rs.auc).toFixed(3):'—';const reEl=document.getElementById('aiResearchEnsembleState');if(reEl)reEl.textContent=rs.status||'WARMING';const ls=s.learning||{};aiLearningStage.textContent=ls.stage||'AUTONOMOUS BOOTSTRAP';aiEffectiveGate.textContent=(ls.effective_score!=null?Number(ls.effective_score).toFixed(1):'55.0')+'/100';aiLearningProgress.textContent=(ls.progress!=null?Number(ls.progress).toFixed(1):'0')+'%';aiTrades.textContent=s.metrics.trades;aiWin.textContent=aiFmt(s.metrics.win_rate)+'%';aiAvgR.textContent=aiFmt(s.metrics.avg_r)+'R';aiPF.textContent=aiFmt(s.metrics.profit_factor);aiOpen.textContent=s.open_trades;aiEngine.textContent=!s.connected?'WAITING — KITE':(s.market_open?'RUNNING':'WAITING — MARKET CLOSED');aiUpdated.textContent=s.last_activity_at?new Date(s.last_activity_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'Waiting for market/Kite activity';
     aiUniverse.textContent='NIFTY · BANKNIFTY · FINNIFTY';
     aiScanRotation.textContent=(s.poll_seconds||60)+'s / cycle · '+(s.last_scan_at?new Date(s.last_scan_at).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'}):'not scanned');
     aiConnectionPill.textContent=s.connected?'KITE CONNECTED':'WAITING FOR KITE';aiConnectionPill.className='pill '+(s.connected?'ok':'warn');
     const dec=await aiGet('/api/ai-evolution/decisions');
-    const sem=s.score_semantics||{};const gate=Number(sem.effective_gate??ls.effective_score??55);document.getElementById('aiGateText').textContent=gate.toFixed(1)+'/100';document.getElementById('aiModelText').textContent=sem.models_trained?'MATURE / TRAINED':(ls.stage||'BOOTSTRAP');
-    if(dec[0]){let snap={};try{snap=JSON.parse(dec[0].snapshot||'{}')}catch(e){};const score=Number(dec[0].score||0);aiScore.textContent=aiFmt(score);aiSetupTitle.innerHTML=`${aiEsc(dec[0].symbol)} — ${aiEsc(dec[0].decision)} — ${score.toFixed(2)}/100`;aiSetupNote.innerHTML=`<span class="ai-score-badge">DECISION SCORE</span> <span class="ai-score-explain">This score is compared with the current ${gate.toFixed(1)}/100 entry gate. A 72/100 value is only the mature gate.</span><br>${aiEsc(dec[0].reason||'')} · ${aiEsc(ls.stage||'AUTONOMOUS BOOTSTRAP')} · effective gate ${gate.toFixed(1)}`+(snap.ml_probability!=null?` · ML ${(Number(snap.ml_probability)*100).toFixed(1)}% · Deep ${(Number(snap.dl_probability??0.5)*100).toFixed(1)}% · Ensemble ${(Number(snap.research_probability??0.5)*100).toFixed(1)}% ± ${(Number(snap.research_uncertainty??0.5)*100).toFixed(1)}% · ${aiEsc(snap.market_regime||'UNKNOWN')}`: '');const c=snap.components||{};aiTrend.textContent=aiFmt(c.trend);aiMomentum.textContent=aiFmt(c.momentum);aiVol.textContent=aiFmt(c.volatility);aiPCR.textContent=aiFmt(snap.pcr);aiIV.textContent=aiFmt(snap.iv)+'%';}else{aiScore.textContent='—';aiSetupTitle.textContent='No autonomous decision yet';aiSetupNote.textContent='Waiting for a live scan. No score is being generated from an absent market snapshot.';}
+    if(dec[0]){const snap=JSON.parse(dec[0].snapshot||'{}');aiScore.textContent=aiFmt(dec[0].score);aiSetupTitle.textContent=`${dec[0].symbol} — ${dec[0].decision} — ${dec[0].score}/100`;aiSetupNote.textContent=(dec[0].reason||'')+(ls.stage?` · ${ls.stage} · effective gate ${Number(ls.effective_score??72).toFixed(1)}`:'')+(snap.ml_probability!=null?` · ML ${(Number(snap.ml_probability)*100).toFixed(1)}% · Deep ${(Number(snap.dl_probability??0.5)*100).toFixed(1)}% · Ensemble ${(Number(snap.research_probability??0.5)*100).toFixed(1)}% ± ${(Number(snap.research_uncertainty??0.5)*100).toFixed(1)}% · ${aiEsc(snap.market_regime||'UNKNOWN')}`: '');const c=snap.components||{};aiTrend.textContent=aiFmt(c.trend);aiMomentum.textContent=aiFmt(c.momentum);aiVol.textContent=aiFmt(c.volatility);aiPCR.textContent=aiFmt(snap.pcr);aiIV.textContent=aiFmt(snap.iv)+'%';}
     const changes=await aiGet('/api/ai-evolution/changes');
     aiChanges.innerHTML=changes.length?changes.map(x=>`<div class="ai-evo-learning"><b>${aiEsc(x.from_version)} → ${aiEsc(x.to_version)}</b> <span class="${aiStatusClass(x.status)}">${aiEsc(x.status)}</span><br>${aiEsc(x.hypothesis)}<br><span class="ai-evo-note">Change: ${aiEsc(x.change_json)} · Before: ${aiEsc(x.before_metrics)} · After: ${aiEsc(x.after_metrics||'awaiting evidence')} · Impact: ${aiEsc(x.impact)}</span></div>`).join(''):'<div class="ai-evo-note">No strategy change yet. The AI is collecting evidence.</div>';
     const learning=await aiGet('/api/ai-evolution/learning');
@@ -2637,8 +2491,26 @@ async function refreshAIEvolution(){
     const ds=await aiGet('/api/ai-evolution/decisions');aiDecisionsTable.innerHTML=ds.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.version)}</td><td>${aiEsc(x.symbol)}</td><td>${aiFmt(x.score)}</td><td>${aiEsc(x.decision)}</td><td>${aiEsc(x.reason)}</td></tr>`).join('')||'<tr><td colspan="6">No decisions yet.</td></tr>';
     const vs=await aiGet('/api/ai-evolution/versions');aiVersionsTable.innerHTML=vs.map(x=>`<tr><td>${aiEsc(x.version)}</td><td>${aiEsc(x.parent_version)}</td><td>${aiEsc(x.created_at)}</td><td><span class="${aiStatusClass(x.status)}">${aiEsc(x.status)}</span></td><td>${aiEsc(x.reason)}</td><td>${aiEsc(x.metrics)}</td></tr>`).join('');
     const ev=await aiGet('/api/ai-evolution/events');aiEventsTable.innerHTML=ev.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.level)}</td><td>${aiEsc(x.event)}</td><td>${aiEsc(x.detail)}</td></tr>`).join('');
-  }catch(e){const el=document.getElementById('aiStatusText');if(el)el.textContent='AI status: '+e.message;}
+  }catch(e){aiStatusText.textContent='AI status: '+e.message;}
 }
+function updateAIInstitutionalLifecycle(s){
+  const ls=s.learning||{}; const progress=Number(ls.progress||0); const ml=Number((s.ml||{}).samples||0); const dl=Number((s.deep_learning||{}).samples||0);
+  const hist= s.historical||{}; const histRows=Number(hist.candles||((hist.symbols||[]).reduce((a,x)=>a+Number(x.n||0),0)));
+  const set=(id,cls)=>{const e=document.getElementById(id);if(e)e.className='ai-phase '+cls;};
+  set('aiPhaseCollect',histRows>0?'complete':'active');
+  set('aiPhaseTrain',(ml>=40||dl>=80)?'complete':(histRows>0?'active':''));
+  set('aiPhaseValidate',(s.ml&&Number(s.ml.auc||0)>0)?'complete':(ml>=40?'active':''));
+  set('aiPhasePaper',Number(s.metrics?.trades||0)>0?'complete':'active');
+  set('aiPhaseChampion',s.champion&&s.champion!=='—'?'complete':'active');
+  set('aiPhaseLive','');
+  const backend=document.getElementById('aiBackendState');if(backend)backend.textContent=s.connected?(s.market_open?'ONLINE / MARKET OPEN':'ONLINE / MARKET CLOSED'):'WAITING';
+  const ready=document.getElementById('aiReadyModel');if(ready)ready.textContent=(ml>=40&&dl>=80)?'TRAINED':'BUILDING';
+  const risk=document.getElementById('aiReadyRisk');if(risk)risk.textContent=(Number(s.metrics?.trades||0)>=80)?'EVIDENCE BUILDING':'NOT CLEARED';
+  const rs=document.getElementById('aiResearchState');if(rs)rs.textContent=s.research?.probability!=null?'ACTIVE':'WARMING';
+  const hero=document.getElementById('aiEngineHero');if(hero)hero.textContent=s.connected?'PAPER MODE':'WAITING FOR KITE';
+  const cp=document.getElementById('aiConnectionPillText');if(cp)cp.textContent=s.connected?'KITE / BACKEND ONLINE':'KITE CONNECTION REQUIRED';
+}
+
 function initAIEvolutionTab(){if(aiUiInited)return;aiUiInited=true;aiCycleBtn.onclick=async()=>{aiStatusText.textContent='Running one cycle…';try{await aiGet('/api/ai-evolution/cycle',{method:'POST'});await refreshAIEvolution();aiStatusText.textContent='Cycle complete.'}catch(e){aiStatusText.textContent=e.message}};refreshAIEvolution();aiUiTimer=setInterval(refreshAIEvolution,10000);}
 // Override only the top-level router, preserving the existing Condor and NIFTY Breakout tabs.
 const __originalSwitchTopTab = window.switchTopTab;
