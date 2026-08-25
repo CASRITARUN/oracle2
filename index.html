@@ -2434,8 +2434,10 @@ function updateAIHistorical(h){
   const histStatus=aiEl('aiHistStatus'); if(histStatus)histStatus.textContent=status;
   const rows=aiEl('aiHistRows'); if(rows)rows.textContent=total.toLocaleString('en-IN');
   const targetYears=Number(h.max_years||3).toFixed(1);
-  const model=aiEl('aiHistModel'); if(model)model.textContent=m.status||'—';
-  const targetEl=aiEl('aiHistTarget'); if(targetEl)targetEl.textContent=targetYears+' years target';
+  const plan=h.archive_plan||[];
+  const planText=plan.length?plan.map(x=>`${x.interval} ${x.max_days}d`).join(' · '):'Kite maximum available';
+  const model=aiEl('aiHistModel'); if(model)model.textContent=m.status||'WAITING FOR TRAINING';
+  const targetEl=aiEl('aiHistTarget'); if(targetEl)targetEl.textContent='AUTO BACKFILL · '+planText+' · stops at oldest Kite data';
   const oldestEl=aiEl('aiHistOldest'); if(oldestEl)oldestEl.textContent=h.oldest||'—';
   const auc=aiEl('aiHistAUC'); if(auc)auc.textContent=m.auc!=null&&Number(m.auc)>0?Number(m.auc).toFixed(3):'—';
   const phase=aiEl('aiHistPhase'); if(phase)phase.textContent=(m.status&&String(m.status).includes('PRETRAIN'))?'PRETRAINED → LIVE REFINEMENT':(total>0?'COLLECTING / TRAINING':'WAITING FOR KITE');
@@ -2445,15 +2447,18 @@ function updateAIHistorical(h){
   const stream=aiEl('aiDataStream');
   if(stream){
     const now=new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'});
+    const planText=plan.length?plan.map(x=>`${x.interval}≤${x.max_days}d`).join(' · '):'Kite maximum available';
+    const archiveState=status.includes('PARTIAL')?'RETRYING MISSING WINDOWS':(status.includes('TRAINING')?'TRAINING':'ARCHIVE READY');
     const lines=[
-      `<span class="blue">${now}</span>  DATA-FABRIC  heartbeat`,
-      `<span class="ok">OK</span>  Kite historical ${h.interval||'5minute'} collector active`,
-      `<span class="blue">BACKFILL</span> target up to ${targetYears} years · ${chunk}-day request chunks`,
-      `<span class="ok">STORE</span> ${total.toLocaleString('en-IN')} candles · local deduplicated archive`,
-      `<span class="blue">MODEL</span> chronological 80/20 validation · historical → GRU pre-training`,
-      `<span class="ok">SAFE</span> no broker orders from historical collector`
+      `<span class="blue">${now}</span>  DATA-FABRIC  heartbeat · ${archiveState}`,
+      `<span class="ok">COLLECT</span>  Kite historical archive online · ${planText} · stop at oldest available data`,
+      `<span class="blue">5M</span>  recent intraday window retained at maximum available depth`,
+      `<span class="blue">LONG</span>  15m / 60m / day windows fill the older research archive`,
+      `<span class="ok">STORE</span> ${total.toLocaleString('en-IN')} 5m candles · local deduplicated archive`,
+      `<span class="blue">MODEL</span> 20-state GRU · chronological 80/20 validation · no future leakage`,
+      `<span class="ok">SAFE</span> historical collection is read-only · no broker orders`
     ];
-    stream.innerHTML=lines.concat(lines.slice(2,5)).map(x=>`<div class="ai-stream-line">${x}</div>`).join('');
+    stream.innerHTML=lines.concat(lines.slice(1,6)).map(x=>`<div class="ai-stream-line">${x}</div>`).join('');
   }
   const tb=aiEl('aiHistTable');
   if(tb){
