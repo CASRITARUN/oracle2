@@ -890,6 +890,10 @@ body.ai-evolution-mode .top-tab-btn.active{
       <div class="ai-evo-card"><div class="k">ML Samples</div><div class="v" id="aiMLSamples">0</div></div>
       <div class="ai-evo-card"><div class="k">ML Accuracy</div><div class="v" id="aiMLAccuracy">—</div></div>
       <div class="ai-evo-card"><div class="k">ML AUC</div><div class="v" id="aiMLAUC">—</div></div><div class="ai-evo-card"><div class="k">Deep Model</div><div class="v" id="aiDLStatus">NOT TRAINED</div></div><div class="ai-evo-card"><div class="k">DL Samples</div><div class="v" id="aiDLSamples">0</div></div><div class="ai-evo-card"><div class="k">DL Accuracy</div><div class="v" id="aiDLAccuracy">—</div></div><div class="ai-evo-card"><div class="k">DL AUC</div><div class="v" id="aiDLAUC">—</div></div>
+      <div class="ai-evo-card"><div class="k">Research P(success)</div><div class="v" id="aiResearchProb">—</div></div>
+      <div class="ai-evo-card"><div class="k">Research Uncertainty</div><div class="v" id="aiResearchUncertainty">—</div></div>
+      <div class="ai-evo-card"><div class="k">Market Regime</div><div class="v" id="aiResearchRegime">—</div></div>
+      <div class="ai-evo-card"><div class="k">Research AUC</div><div class="v" id="aiResearchAUC">—</div></div>
       <div class="ai-evo-card"><div class="k">Scan Rotation</div><div class="v" id="aiScanRotation" style="font-size:13px;">—</div></div>
       <div class="ai-evo-card"><div class="k">Last AI Cycle (IST)</div><div class="v" id="aiUpdated" style="font-size:13px;">—</div></div>
     </div>
@@ -2582,6 +2586,13 @@ function aiFmt(v){return v==null?'—':Number(v).toLocaleString('en-IN',{maximum
 function aiStatusClass(v){return v==='ACCEPTED'?'ai-evo-status ai-evo-ok':(v==='ROLLED_BACK'||v==='REJECTED'?'ai-evo-status ai-evo-bad':'ai-evo-status ai-evo-test');}
 async function aiGet(url,opt){const r=await fetch(url,opt);const raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw Error('Backend returned a non-JSON response ('+r.status+'). Check the Python/Gunicorn process.')}if(!r.ok)throw Error(d.error||d.message||'Request failed');return d;}
 let aiGlobeFrame=0,aiGlobeTimer=null;
+// Explicit references for optional research metrics. Keeping these references
+// here prevents one missing/late DOM element from stopping the whole AI refresh.
+const aiResearchProb=document.getElementById('aiResearchProb');
+const aiResearchUncertainty=document.getElementById('aiResearchUncertainty');
+const aiResearchRegime=document.getElementById('aiResearchRegime');
+const aiResearchAUC=document.getElementById('aiResearchAUC');
+function aiSet(el,value){if(el)el.textContent=value;}
 function startAIGlobe(){
   if(aiGlobeTimer)return; const c=document.getElementById('aiGlobe'); if(!c)return; const ctx=c.getContext('2d');
   function draw(){
@@ -2611,7 +2622,7 @@ function updateAIHistorical(h){
 async function refreshAIEvolution(){
   try{
     const s=await aiGet('/api/ai-evolution/status'); if(s.historical) updateAIHistorical(s.historical);
-    aiChampion.textContent=s.champion||'—';if(s.ml){aiMLSamples.textContent=s.ml.samples||0;aiMLAccuracy.textContent=s.ml.samples?s.ml.accuracy.toFixed(1)+'%':'—';aiMLAUC.textContent=s.ml.samples?s.ml.auc.toFixed(3):'—';}if(s.deep_learning){aiDLStatus.textContent=s.deep_learning.status||'NOT TRAINED';aiDLSamples.textContent=s.deep_learning.samples||0;aiDLAccuracy.textContent=s.deep_learning.samples?s.deep_learning.accuracy.toFixed(1)+'%':'—';aiDLAUC.textContent=s.deep_learning.samples?s.deep_learning.auc.toFixed(3):'—';aiDLUpdated.textContent=s.deep_learning.updated_at?new Date(s.deep_learning.updated_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';}const rs=s.research||{};aiResearchProb.textContent=rs.probability!=null?(Number(rs.probability)*100).toFixed(1)+'%':'—';aiResearchUncertainty.textContent=rs.uncertainty!=null?(Number(rs.uncertainty)*100).toFixed(1)+'%':'—';aiResearchRegime.textContent=rs.regime||'—';aiResearchAUC.textContent=rs.auc?Number(rs.auc).toFixed(3):'—';const ls=s.learning||{};aiLearningStage.textContent=ls.stage||'AUTONOMOUS BOOTSTRAP';aiEffectiveGate.textContent=(ls.effective_score!=null?Number(ls.effective_score).toFixed(1):'55.0')+'/100';aiLearningProgress.textContent=(ls.progress!=null?Number(ls.progress).toFixed(1):'0')+'%';aiTrades.textContent=s.metrics.trades;aiWin.textContent=aiFmt(s.metrics.win_rate)+'%';aiAvgR.textContent=aiFmt(s.metrics.avg_r)+'R';aiPF.textContent=aiFmt(s.metrics.profit_factor);aiOpen.textContent=s.open_trades;aiEngine.textContent=!s.connected?'WAITING — KITE':(s.market_open?'RUNNING':'WAITING — MARKET CLOSED');aiUpdated.textContent=s.last_activity_at?new Date(s.last_activity_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'Waiting for market/Kite activity';
+    aiChampion.textContent=s.champion||'—';if(s.ml){aiMLSamples.textContent=s.ml.samples||0;aiMLAccuracy.textContent=s.ml.samples?s.ml.accuracy.toFixed(1)+'%':'—';aiMLAUC.textContent=s.ml.samples?s.ml.auc.toFixed(3):'—';}if(s.deep_learning){aiDLStatus.textContent=s.deep_learning.status||'NOT TRAINED';aiDLSamples.textContent=s.deep_learning.samples||0;aiDLAccuracy.textContent=s.deep_learning.samples?s.deep_learning.accuracy.toFixed(1)+'%':'—';aiDLAUC.textContent=s.deep_learning.samples?s.deep_learning.auc.toFixed(3):'—';aiDLUpdated.textContent=s.deep_learning.updated_at?new Date(s.deep_learning.updated_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';}const rs=s.research||{};aiSet(aiResearchProb,rs.probability!=null?(Number(rs.probability)*100).toFixed(1)+'%':'—');aiSet(aiResearchUncertainty,rs.uncertainty!=null?(Number(rs.uncertainty)*100).toFixed(1)+'%':'—');aiSet(aiResearchRegime,rs.regime||'—');aiSet(aiResearchAUC,rs.auc!=null?Number(rs.auc).toFixed(3):'—');const ls=s.learning||{};aiLearningStage.textContent=ls.stage||'AUTONOMOUS BOOTSTRAP';aiEffectiveGate.textContent=(ls.effective_score!=null?Number(ls.effective_score).toFixed(1):'55.0')+'/100';aiLearningProgress.textContent=(ls.progress!=null?Number(ls.progress).toFixed(1):'0')+'%';aiTrades.textContent=s.metrics.trades;aiWin.textContent=aiFmt(s.metrics.win_rate)+'%';aiAvgR.textContent=aiFmt(s.metrics.avg_r)+'R';aiPF.textContent=aiFmt(s.metrics.profit_factor);aiOpen.textContent=s.open_trades;aiEngine.textContent=!s.connected?'WAITING — KITE':(s.market_open?'RUNNING':'WAITING — MARKET CLOSED');aiUpdated.textContent=s.last_activity_at?new Date(s.last_activity_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'Waiting for market/Kite activity';
     aiUniverse.textContent='NIFTY · BANKNIFTY · FINNIFTY';
     aiScanRotation.textContent=(s.poll_seconds||60)+'s / cycle · '+(s.last_scan_at?new Date(s.last_scan_at).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'}):'not scanned');
     aiConnectionPill.textContent=s.connected?'KITE CONNECTED':'WAITING FOR KITE';aiConnectionPill.className='pill '+(s.connected?'ok':'warn');
@@ -2626,7 +2637,7 @@ async function refreshAIEvolution(){
     const ds=await aiGet('/api/ai-evolution/decisions');aiDecisionsTable.innerHTML=ds.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.version)}</td><td>${aiEsc(x.symbol)}</td><td>${aiFmt(x.score)}</td><td>${aiEsc(x.decision)}</td><td>${aiEsc(x.reason)}</td></tr>`).join('')||'<tr><td colspan="6">No decisions yet.</td></tr>';
     const vs=await aiGet('/api/ai-evolution/versions');aiVersionsTable.innerHTML=vs.map(x=>`<tr><td>${aiEsc(x.version)}</td><td>${aiEsc(x.parent_version)}</td><td>${aiEsc(x.created_at)}</td><td><span class="${aiStatusClass(x.status)}">${aiEsc(x.status)}</span></td><td>${aiEsc(x.reason)}</td><td>${aiEsc(x.metrics)}</td></tr>`).join('');
     const ev=await aiGet('/api/ai-evolution/events');aiEventsTable.innerHTML=ev.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.level)}</td><td>${aiEsc(x.event)}</td><td>${aiEsc(x.detail)}</td></tr>`).join('');
-  }catch(e){aiStatusText.textContent='AI status: '+e.message;}
+  }catch(e){const el=document.getElementById('aiStatusText');if(el)el.textContent='AI status: '+e.message;}
 }
 function initAIEvolutionTab(){if(aiUiInited)return;aiUiInited=true;aiCycleBtn.onclick=async()=>{aiStatusText.textContent='Running one cycle…';try{await aiGet('/api/ai-evolution/cycle',{method:'POST'});await refreshAIEvolution();aiStatusText.textContent='Cycle complete.'}catch(e){aiStatusText.textContent=e.message}};refreshAIEvolution();aiUiTimer=setInterval(refreshAIEvolution,10000);}
 // Override only the top-level router, preserving the existing Condor and NIFTY Breakout tabs.
