@@ -7137,6 +7137,9 @@ AI_HIST_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 # impossible 3-year 5m window. This removes the misleading "3 years of 5m" claim.
 AI_HIST_INTERVAL = os.environ.get("AI_HIST_INTERVAL", "5minute")
 AI_HIST_MAX_YEARS = float(os.environ.get("AI_HIST_MAX_YEARS", "3"))
+# Kite historical API request/retention limits. These are maximum practical
+# windows, not promises of availability; the collector stops at the actual
+# oldest candle returned by Kite.
 AI_HIST_LOOKBACK_DAYS = int(os.environ.get("AI_HIST_LOOKBACK_DAYS", "100"))
 AI_HIST_CHUNK_DAYS = int(os.environ.get("AI_HIST_CHUNK_DAYS", "90"))
 AI_HIST_REQUEST_STAGGER_SECONDS = float(os.environ.get("AI_HIST_REQUEST_STAGGER_SECONDS", "0.55"))
@@ -7147,12 +7150,14 @@ AI_HIST_MIN_TRAIN = int(os.environ.get("AI_HIST_MIN_TRAIN", "300"))
 # Maximum request/retention windows used by Kite's historical API. The archive
 # walks these windows and stops naturally at the oldest data Kite returns.
 AI_HIST_ARCHIVE_PLAN = [
-    # max_days is an archive horizon, NOT the per-request API limit. The collector
-    # walks backwards in legal chunks and stops when Kite no longer returns data.
-    ("5minute", 12 * 365, 90),
-    ("15minute", 12 * 365, 180),
-    ("60minute", 12 * 365, 360),
-    ("day", 25 * 365, 1800),
+    # max_days = practical Kite retention horizon; chunk_days = maximum legal
+    # request span used by this collector. The collector walks BACKWARDS from
+    # today, so an empty older window correctly means the available history has
+    # been reached.
+    ("5minute", 100, 90),
+    ("15minute", 200, 180),
+    ("60minute", 400, 360),
+    ("day", 2000, 1800),
 ]
 AI_HIST_TRAIN_INTERVALS = tuple(x[0] for x in AI_HIST_ARCHIVE_PLAN)
 AI_OPTION_CAPTURE_MINUTES = int(os.environ.get("AI_OPTION_CAPTURE_MINUTES", "5"))
@@ -7205,6 +7210,20 @@ def ai_init_db():
     CREATE INDEX IF NOT EXISTS idx_ai_option_snapshots_contract_ts ON ai_option_snapshots(tradingsymbol,ts);
     CREATE TABLE IF NOT EXISTS ai_research_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,models TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,probability REAL,uncertainty REAL,status TEXT,regime TEXT);
     """)
+    # Existing installations may have an older ai_evolution.db schema.
+    # CREATE TABLE IF NOT EXISTS does not add newly introduced columns, so
+    # migrate them explicitly instead of allowing historical training to fail
+    # after successfully collecting thousands of candles.
+    migrations = {
+        "ai_hist_model": {"lookback_days":"INTEGER"},
+        "ai_dl_model": {},
+        "ai_research_model": {},
+    }
+    for table, cols in migrations.items():
+        existing={row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
+        for col,typ in cols.items():
+            if col not in existing:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
     for k,v in AI_DEFAULTS.items(): c.execute("INSERT OR IGNORE INTO ai_settings VALUES(?,?)",(k,str(v)))
     if not c.execute("SELECT 1 FROM ai_versions LIMIT 1").fetchone():
         c.execute("INSERT INTO ai_versions(version,parent_version,created_at,status,reason,params,metrics) VALUES(?,?,?,?,?,?,?)",
@@ -8064,54 +8083,99 @@ def _hist_archive_plan():
     return [(str(i), int(days), int(chunk)) for i, days, chunk in AI_HIST_ARCHIVE_PLAN]
 
 def _hist_sync_symbol_interval(symbol, interval, max_days, chunk_days):
-    """Collect the maximum legal history for one symbol/interval and resume safely."""
+    """Collect all history Kite will actually return, safely and chronologically.
+
+    The previous implementation walked FORWARD from the oldest target date.
+    Because the first old window can legitimately be empty, it stopped before
+    reaching the recent data and made a 3-year target look like a training failure.
+    This version walks BACKWARD from now in legal chunks. It therefore finds the
+    newest data first and stops only when an older contiguous window is unavailable.
+    """
     token, err = resolve_token_for_symbol(symbol)
     if err:
         return {"symbol":symbol,"interval":interval,"status":"ERROR","detail":err,"rows_added":0,"fetched":0,"chunks":0,"requested_chunks":0}
     now = now_ist(); target_start = now - timedelta(days=max_days)
-    c = ai_db(); r = c.execute("SELECT MIN(ts) first_ts, MAX(ts) last_ts FROM ai_hist_candles WHERE symbol=? AND interval=?", (symbol, interval)).fetchone(); c.close()
+    c = ai_db(); r = c.execute(
+        "SELECT MIN(ts) first_ts, MAX(ts) last_ts FROM ai_hist_candles WHERE symbol=? AND interval=?",
+        (symbol, interval)).fetchone(); c.close()
+
     def parse_ts(v):
         if not v: return None
         try:
             dt=datetime.fromisoformat(str(v).replace("Z","+00:00"))
             return dt if dt.tzinfo else dt.replace(tzinfo=IST)
         except Exception: return None
+
     first,last=parse_ts(r["first_ts"] if r else None),parse_ts(r["last_ts"] if r else None)
     ranges=[]
-    if not first:
-        cursor=target_start
+    # Always repair the recent tail first. This also makes the collector recover
+    # cleanly after a server restart or a missed market day.
+    tail_start = max(target_start, (last + timedelta(seconds=1)) if last else target_start)
+    if tail_start < now:
+        cursor=tail_start
         while cursor < now:
-            end=min(cursor+timedelta(days=chunk_days),now); ranges.append((cursor,end,"BACKFILL")); cursor=end+timedelta(seconds=1)
+            end=min(cursor+timedelta(days=chunk_days),now)
+            ranges.append((cursor,end,"INCREMENTAL" if last else "BACKFILL"))
+            cursor=end+timedelta(seconds=1)
+
+    # Then walk backward from the oldest stored point until the actual Kite
+    # retention boundary or configured maximum is reached.
+    if AI_HIST_BACKFILL_ENABLED and first and first > target_start + timedelta(minutes=5):
+        cursor=first-timedelta(seconds=1)
+        while cursor > target_start:
+            start=max(target_start,cursor-timedelta(days=chunk_days))
+            ranges.append((start,cursor,"BACKFILL"))
+            cursor=start-timedelta(seconds=1)
+    elif AI_HIST_BACKFILL_ENABLED and not first:
+        # First run: fetch recent-to-oldest. We reverse the generated ranges so
+        # the first empty response is the true retention boundary.
+        ranges=[]
+        cursor=now
+        while cursor > target_start:
+            start=max(target_start,cursor-timedelta(days=chunk_days))
+            ranges.append((start,cursor,"BACKFILL"))
+            cursor=start-timedelta(seconds=1)
+
+    # Deduplicate overlapping ranges while preserving chronological execution order.
+    seen=set(); clean=[]
+    for item in ranges:
+        key=(item[0].isoformat(),item[1].isoformat(),item[2])
+        if key not in seen: seen.add(key); clean.append(item)
+    ranges=clean
+
+    added_total=fetched_total=ok=0; errors=[]; oldest_empty=False
+    # For a first run, process newest first. Once an older chunk is empty, older
+    # chunks are not useful and are not requested further.
+    if not first:
+        ranges.sort(key=lambda x:x[1], reverse=True)
     else:
-        if AI_HIST_BACKFILL_ENABLED and first > target_start + timedelta(minutes=5):
-            cursor=target_start; limit=first-timedelta(minutes=1)
-            while cursor < limit:
-                end=min(cursor+timedelta(days=chunk_days),limit); ranges.append((cursor,end,"BACKFILL")); cursor=end+timedelta(seconds=1)
-        tail=(last+timedelta(minutes=1)) if last else target_start
-        if tail < now:
-            ranges.append((tail,now,"INCREMENTAL"))
-    added_total=fetched_total=ok=0; errors=[]; empty_backfill=0
+        ranges.sort(key=lambda x:x[0])
+
     for start,end,kind in ranges:
         candles,fetch_err=_hist_fetch_chunk_for_interval(token,start,end,interval)
         if fetch_err:
             errors.append(f"{kind} {start.date()}→{end.date()}: {fetch_err}")
             continue
         if not candles:
-            empty_backfill += 1
-            ai_log("DATA","HISTORICAL_EMPTY",f"{symbol} {interval} {kind} {start.date()}→{end.date()} returned no candles")
-            if kind == "BACKFILL":
-                # Once an older contiguous window is empty, Kite has reached the
-                # available history boundary for this instrument/interval.
+            ai_log("DATA","HISTORICAL_EMPTY",f"{symbol} {interval} {kind} {start.date()}→{end.date()} no candles; Kite boundary/restricted window")
+            if kind=="BACKFILL" and not first:
+                oldest_empty=True
                 break
+            if kind=="BACKFILL" and first:
+                oldest_empty=True
+                continue
             continue
-        empty_backfill = 0
-        added=_hist_insert_candles_interval(symbol,interval,candles); added_total+=added; fetched_total+=len(candles); ok+=1
+        added=_hist_insert_candles_interval(symbol,interval,candles)
+        added_total+=added; fetched_total+=len(candles); ok+=1
         ai_log("DATA","HISTORICAL_CHUNK",f"{symbol} {interval} {kind} {start.date()}→{end.date()} fetched={len(candles)} added={added}")
         time.sleep(AI_HIST_REQUEST_STAGGER_SECONDS)
+
     status="OK" if not errors else ("PARTIAL" if ok else "ERROR")
-    detail=f"{interval}: archive target={max_days}d; request chunk={chunk_days}d; chunks={ok}/{len(ranges)}, fetched={fetched_total}, added={added_total}; stops at Kite history boundary"
+    boundary="; reached Kite retention boundary" if oldest_empty else ""
+    detail=f"{interval}: max={max_days}d request={chunk_days}d chunks_ok={ok}/{len(ranges)} fetched={fetched_total} added={added_total}{boundary}"
     if errors: detail += " | " + " ; ".join(errors[:2])
-    c=ai_db(); c.execute("INSERT INTO ai_hist_runs(ts,symbol,interval,rows_added,status,detail) VALUES(?,?,?,?,?,?)",(datetime.now(IST).isoformat(),symbol,interval,added_total,status,detail)); c.commit(); c.close()
+    c=ai_db(); c.execute("INSERT INTO ai_hist_runs(ts,symbol,interval,rows_added,status,detail) VALUES(?,?,?,?,?,?)",
+                        (datetime.now(IST).isoformat(),symbol,interval,added_total,status,detail)); c.commit(); c.close()
     return {"symbol":symbol,"interval":interval,"status":status,"rows_added":added_total,"fetched":fetched_total,"chunks":ok,"requested_chunks":len(ranges),"detail":detail,"errors":errors[:3]}
 
 def _hist_fetch_chunk_for_interval(token,start,end,interval):
@@ -8293,6 +8357,11 @@ def ai_hist_train_deep(force=False):
             _hist_set_status("READY — TARGET CLASS INSUFFICIENT",detail);return ai_hist_status()
 
         X=np.asarray(allx,dtype=float);Y=np.asarray(ally,dtype=float)
+        finite=np.isfinite(X).all(axis=(1,2)) & np.isfinite(Y)
+        X=X[finite];Y=Y[finite]
+        if len(X)<AI_HIST_MIN_TRAIN:
+            detail=f"finite GRU sequences={len(X)} need={AI_HIST_MIN_TRAIN}"
+            _hist_set_status("READY — WAITING FOR CLEAN TRAINING DATA",detail);ai_log("LEARNING","HISTORICAL_GRU_WAIT",detail);return ai_hist_status()
         if len(X)>DL_MAX_TRAIN_SAMPLES:
             # Preserve chronology within the retained research window.
             X=X[-DL_MAX_TRAIN_SAMPLES:];Y=Y[-DL_MAX_TRAIN_SAMPLES:]
@@ -8424,7 +8493,10 @@ def ai_hist_sync():
         for interval,max_days,chunk_days in _hist_archive_plan():
             results.append(_hist_sync_symbol_interval(sym,interval,max_days,chunk_days))
     five=[x for x in results if x["interval"]=="5minute"]
-    overall="ARCHIVE COMPLETE — TRAINING" if all(x.get("status")=="OK" for x in results) else "ARCHIVE PARTIAL — RETRYING"
+    # An interval reaching its natural Kite boundary is normal. Only actual
+    # request failures are PARTIAL/RETRYING.
+    failed=[x for x in results if x.get("status")=="ERROR"]
+    overall="ARCHIVE COMPLETE — TRAINING" if not failed else "ARCHIVE PARTIAL — RETRYING"
     now=datetime.now(IST).isoformat(); c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_sync_at',?)",(now,)); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",(overall,)); c.commit(); c.close()
     if any(x.get("status") in ("OK","PARTIAL") for x in five): ai_hist_train_deep()
     return {"results":results,**ai_hist_status()}
