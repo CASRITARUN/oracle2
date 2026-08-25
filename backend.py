@@ -7127,6 +7127,16 @@ AI_UNIVERSE_MODE = "INDEX_ONLY"  # AI Evolution starts with indices only; F&O st
 AI_SCAN_CHUNK_SIZE = int(os.environ.get("AI_SCAN_CHUNK_SIZE", "8"))
 AI_LOCK = threading.Lock()
 
+# Historical index pre-training: builds market-behaviour data before option-specific
+# paper trades have accumulated. This never places orders and is independent of the
+# existing Iron Condor / Calendar / Breakout engines.
+AI_HIST_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+AI_HIST_INTERVAL = os.environ.get("AI_HIST_INTERVAL", "5minute")
+AI_HIST_LOOKBACK_DAYS = int(os.environ.get("AI_HIST_LOOKBACK_DAYS", "90"))
+AI_HIST_SYNC_HOURS = float(os.environ.get("AI_HIST_SYNC_HOURS", "6"))
+AI_HIST_HORIZON_BARS = int(os.environ.get("AI_HIST_HORIZON_BARS", "6"))
+AI_HIST_MIN_TRAIN = int(os.environ.get("AI_HIST_MIN_TRAIN", "300"))
+
 AI_DEFAULTS = {
     # Mature AI gate. This remains deliberately strict once both learned models
     # have enough evidence to become entry gates.
@@ -7139,7 +7149,12 @@ AI_DEFAULTS = {
     # paper-trades qualifying setups so that there is real price-path evidence
     # to learn from. The gate rises smoothly from 55 to the mature 72 as both
     # ML and Deep-learning sample requirements are approached.
-    "bootstrap_min_score": 55.0
+    "bootstrap_min_score": 55.0,
+    # Research-grade ensemble layer. It remains advisory during warm-up and becomes a
+    # gate only after a chronological holdout has enough observations.
+    "research_min_samples": 120, "research_models": 5, "research_epochs": 120,
+    "research_learning_rate": 0.05, "research_min_probability": 0.60,
+    "research_max_uncertainty": 0.16
 }
 
 def ai_db():
@@ -7161,6 +7176,10 @@ def ai_init_db():
     CREATE TABLE IF NOT EXISTS ai_dl_samples(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,trade_id INTEGER,version TEXT,symbol TEXT,sequence TEXT,label INTEGER,outcome_r REAL,horizon_sec REAL);\n    CREATE TABLE IF NOT EXISTS ai_dl_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,w1 TEXT,b1 TEXT,w2 TEXT,b2 TEXT,w3 TEXT,b3 REAL,samples INTEGER,accuracy REAL,auc REAL,status TEXT);
     CREATE TABLE IF NOT EXISTS ai_trade_path(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,trade_id INTEGER,symbol TEXT,option_price REAL,spot REAL,option_return_pct REAL,spot_return_pct REAL,features TEXT);
     CREATE TABLE IF NOT EXISTS ai_runtime(key TEXT PRIMARY KEY,value TEXT);
+    CREATE TABLE IF NOT EXISTS ai_hist_candles(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,interval TEXT,open REAL,high REAL,low REAL,close REAL,volume REAL,oi REAL,UNIQUE(symbol,interval,ts));
+    CREATE TABLE IF NOT EXISTS ai_hist_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,interval TEXT,rows_added INTEGER,status TEXT,detail TEXT);
+    CREATE TABLE IF NOT EXISTS ai_hist_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,symbols TEXT,interval TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,status TEXT,lookback_days INTEGER);
+    CREATE TABLE IF NOT EXISTS ai_research_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,models TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,probability REAL,uncertainty REAL,status TEXT,regime TEXT);
     """)
     for k,v in AI_DEFAULTS.items(): c.execute("INSERT OR IGNORE INTO ai_settings VALUES(?,?)",(k,str(v)))
     if not c.execute("SELECT 1 FROM ai_versions LIMIT 1").fetchone():
@@ -7227,19 +7246,41 @@ def ai_snapshot(symbol, params=None):
     ml_prob,ml_model=ai_ml_predict(ml_features)
     dl_seq=ai_dl_sequence(symbol, ml_features)
     dl_prob,dl_model=ai_dl_predict_sequence(dl_seq)
+    research=ai_research_predict(ml_features)
     side="LONG" if trend+momentum+pcr_score>=32 else "SHORT"
     option_type="CE" if side=="LONG" else "PE"
     candidates=[x for x in chain if x.get("instrument_type")==option_type and x.get("delta") is not None]
     if not candidates: return None,{"error":"No option candidates"}
     target=min(candidates,key=lambda x:abs(abs(float(x.get("delta",0)))-0.50))
-    entry=float(target.get("mid") or target.get("ltp") or 0)
+    # Paper trades must use an executable side of the live order book, not the midpoint/LTP.
+    # LONG entry = best ask; SHORT entry = best bid.  If the required side is unavailable,
+    # reject the setup rather than creating a synthetic profit from a stale/illiquid quote.
+    bid=target.get("bid"); ask=target.get("ask"); ltp=target.get("ltp")
+    option_volume=int(target.get("volume") or 0)
+    spread_pct=target.get("spread_pct")
+    entry_source="ASK" if side=="LONG" else "BID"
+    entry_raw=ask if side=="LONG" else bid
+    if option_volume <= 0:
+        return None,{"error":f"No traded volume for {target.get('tradingsymbol')}","liquidity":"NO_TRADE_VOLUME"}
+    if entry_raw is None or float(entry_raw)<=0:
+        return None,{"error":f"No executable {entry_source.lower()} for {target.get('tradingsymbol')}","liquidity":"NO_EXECUTABLE_QUOTE"}
+    if spread_pct is not None and float(spread_pct)>10.0:
+        return None,{"error":f"Bid/ask spread {float(spread_pct):.1f}% too wide for {target.get('tradingsymbol')}","liquidity":"SPREAD_TOO_WIDE"}
+    entry=float(entry_raw)
     lot=int(data.get("lot_size") or target.get("lot_size") or 1)
-    stop=entry*(1-float(params["stop_pct"])/100); target_price=entry*(1+float(params["target_pct"])/100)
+    if side=="LONG":
+        stop=entry*(1-float(params["stop_pct"])/100); target_price=entry*(1+float(params["target_pct"])/100)
+    else:
+        stop=entry*(1+float(params["stop_pct"])/100); target_price=entry*(1-float(params["target_pct"])/100)
     return {"symbol":symbol,"spot":spot,"score":round(score,2),"side":side,"option_type":option_type,
             "option_symbol":target.get("tradingsymbol"),"token":int(target.get("instrument_token")),"entry":entry,
+            "entry_price_source":entry_source,"option_ltp":ltp,"option_bid":bid,"option_ask":ask,
+            "option_volume":option_volume,"option_oi":int(target.get("oi") or 0),
+            "spread_pct":spread_pct,"bid_qty":int(target.get("bid_qty") or 0),"ask_qty":int(target.get("ask_qty") or 0),
+            "liquidity_status":"EXECUTABLE",
             "stop":stop,"target":target_price,"lot_size":lot,"iv":iv,"pcr":pcr,"volume":vol,
             "trend":trend,"momentum":momentum,"volatility":volatility,"components":{"trend":round(trend,2),"momentum":round(momentum,2),"volatility":round(vol_score,2),"pcr":round(pcr_score,2),"iv":round(iv_score,2)},
-            "rr":round((target_price-entry)/max(entry-stop,0.0001),2), "ml_features":ml_features, "ml_probability":round(float(ml_prob),4), "dl_probability":round(float(dl_prob),4), "dl_samples":int(dl_model.get("samples",0)), "ml_samples":int(ml_model.get("samples",0)), "dl_sequence":dl_seq},None
+            "rr":round(abs(target_price-entry)/max(abs(entry-stop),0.0001),2), "ml_features":ml_features, "ml_probability":round(float(ml_prob),4), "dl_probability":round(float(dl_prob),4), "research_probability":round(float(research.get("probability",0.5)),4), "research_uncertainty":round(float(research.get("uncertainty",0.5)),4), "market_regime":research.get("regime","UNKNOWN"), "research_auc":float(research.get("auc",0)), "research_samples":int(research.get("samples",0)), "dl_samples":int(dl_model.get("samples",0)), "ml_samples":int(ml_model.get("samples",0)), "dl_sequence":dl_seq},None
 
 # ---------------------------------------------------------------------------
 # Market-pattern ML layer
@@ -7473,6 +7514,88 @@ def ai_ml_record_sample(trade_id, version, symbol, features, label, outcome_r, h
     c=ai_db(); c.execute("INSERT INTO ai_ml_samples(ts,trade_id,version,symbol,features,label,outcome_r,horizon_sec) VALUES(?,?,?,?,?,?,?,?)",(datetime.now(IST).isoformat(),trade_id,version,symbol,json.dumps(ai_ml_features(features)),int(label),float(outcome_r),float(horizon_sec))); c.commit(); c.close()
     ai_ml_train()
 
+
+# ---------------------------------------------------------------------------
+# Research-grade ensemble / regime layer
+# ---------------------------------------------------------------------------
+# This is deliberately dependency-light: five independently initialized logistic
+# learners are trained on the same chronological feature store. The last 20% of
+# observations is a walk-forward-style holdout and is NEVER used for fitting.
+# The ensemble produces a probability and disagreement (uncertainty). A simple
+# market-regime classifier is derived from the same state variables. This is a
+# meaningful upgrade over a single score, but it is still a compact research
+# engine, not an institutional Bloomberg-scale platform.
+
+def _research_model():
+    c=ai_db(); r=c.execute("SELECT * FROM ai_research_model WHERE id=1").fetchone(); c.close()
+    if not r:
+        return {"status":"WARMING","samples":0,"train_samples":0,"validation_samples":0,"accuracy":0.0,"auc":0.0,"probability":0.5,"uncertainty":0.5,"regime":"UNKNOWN","models":[]}
+    try: models=json.loads(r["models"] or "[]")
+    except Exception: models=[]
+    return {"status":r["status"] or "WARMING","samples":int(r["samples"] or 0),"train_samples":int(r["train_samples"] or 0),"validation_samples":int(r["validation_samples"] or 0),"accuracy":float(r["accuracy"] or 0),"auc":float(r["auc"] or 0),"probability":float(r["probability"] or 0.5),"uncertainty":float(r["uncertainty"] or 0.5),"regime":r["regime"] or "UNKNOWN","models":models,"updated_at":r["updated_at"]}
+
+def _research_regime(features):
+    f=features or {}
+    vol=float(f.get("volatility_10",0) or 0); ret=float(f.get("ret_20",0) or 0)
+    trend=float(f.get("trend_score",12.5) or 12.5); mom=float(f.get("momentum_score",12.5) or 12.5)
+    if vol>=2.0 and abs(ret)>=1.5: return "HIGH_VOL_TREND"
+    if vol>=1.25: return "HIGH_VOL_RANGE"
+    if trend>=18 and mom>=17: return "TRENDING_UP"
+    if trend<=7 and mom<=8: return "TRENDING_DOWN"
+    if abs(ret)<0.35 and vol<0.8: return "LOW_VOL_RANGE"
+    return "TRANSITION"
+
+def _research_predict_from_models(models, x):
+    probs=[]
+    for m in models:
+        w=m.get("w",[]); b=float(m.get("b",0))
+        if len(w)!=len(x): continue
+        probs.append(_sigmoid(b+sum(a*v for a,v in zip(w,x))))
+    if not probs: return 0.5,0.5
+    return float(sum(probs)/len(probs)), float(np.std(probs))
+
+def ai_research_predict(features):
+    m=_research_model(); x=ai_ml_features(features)
+    p,u=_research_predict_from_models(m.get("models",[]),x)
+    if not m.get("models"):
+        return {**m,"probability":0.5,"uncertainty":0.5,"regime":_research_regime(features)}
+    return {**m,"probability":p,"uncertainty":u,"regime":_research_regime(features)}
+
+def ai_research_train():
+    c=ai_db(); rows=c.execute("SELECT features,label FROM ai_ml_samples ORDER BY id").fetchall(); c.close()
+    X=[];Y=[]
+    for r in rows:
+        try:
+            f=json.loads(r["features"] or "[]")
+            if len(f)==len(ML_FEATURE_NAMES): X.append([float(v) for v in f]); Y.append(int(r["label"]))
+        except Exception: pass
+    p=ai_settings(); min_samples=int(p.get("research_min_samples",120))
+    if len(X)<max(20,min_samples): return _research_model()
+    X=np.asarray(X,dtype=float); Y=np.asarray(Y,dtype=int)
+    cut=max(10,int(len(X)*0.8)); cut=min(cut,len(X)-1)
+    Xtr,Ytr=X[:cut],Y[:cut]; Xv,Yv=X[cut:],Y[cut:]
+    if len(set(Ytr.tolist()))<2 or len(set(Yv.tolist()))<2: return _research_model()
+    rng=np.random.default_rng(20260825); models=[]
+    epochs=int(p.get("research_epochs",120)); lr=float(p.get("research_learning_rate",0.05)); nmodels=int(p.get("research_models",5))
+    for k in range(nmodels):
+        idx=rng.integers(0,len(Xtr),size=len(Xtr))
+        xb,yb=Xtr[idx],Ytr[idx]
+        w=rng.normal(0,0.05,len(ML_FEATURE_NAMES)); b=0.0
+        for _ in range(epochs):
+            gw=np.zeros_like(w); gb=0.0
+            for x,y in zip(xb,yb):
+                pr=_sigmoid(b+float(np.dot(w,x))); err=pr-y; gw += err*x; gb += err
+            scale=1.0/max(len(xb),1); w-=lr*gw*scale; b-=lr*gb*scale
+        models.append({"w":w.tolist(),"b":float(b)})
+    pv=[]
+    for x in Xv:
+        pr,_=_research_predict_from_models(models,x); pv.append(pr)
+    pv=np.asarray(pv); acc=float(np.mean((pv>=0.5)==(Yv>=0.5))*100); auc=_dl_auc(Yv,pv)
+    current=_research_model(); updated=datetime.now(IST).isoformat()
+    c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_research_model(id,updated_at,models,samples,train_samples,validation_samples,accuracy,auc,probability,uncertainty,status,regime) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(updated,json.dumps(models),len(X),len(Xtr),len(Xv),acc,auc,float(np.mean(pv)),float(np.std(pv)),"TRAINED","VALIDATION")); c.commit(); c.close()
+    ai_log("LEARNING","RESEARCH_RETRAIN",f"ensemble={len(models)} samples={len(X)} train={len(Xtr)} validation={len(Xv)} accuracy={acc:.1f}% auc={auc:.3f}")
+    return {"status":"TRAINED","samples":len(X),"train_samples":len(Xtr),"validation_samples":len(Xv),"accuracy":acc,"auc":auc,"probability":float(np.mean(pv)),"uncertainty":float(np.std(pv)),"regime":"VALIDATION","models":models,"updated_at":updated}
+
 def ai_market_pattern_features(symbol, spot, iv, pcr, volume, trend_score, momentum_score):
     hist=ai_market_history(symbol,120)
     prices=[float(x["spot"]) for x in hist if x.get("spot") is not None]
@@ -7526,21 +7649,43 @@ def ai_open_trade(x,ver):
     p=ai_params()
     if "dl_sequence" not in x:
         x["dl_sequence"] = ai_dl_sequence(x["symbol"], x.get("ml_features") or {})
+    # Never open a paper trade without the side of the order book that would actually execute.
+    if x.get("entry") is None or float(x.get("entry") or 0)<=0 or x.get("liquidity_status")!="EXECUTABLE":
+        ai_log("TRADE","PAPER_REJECTED_LIQUIDITY",f'{x.get("symbol")} {x.get("option_symbol")} no executable entry quote')
+        return False
     if len(ai_open_trades())>=int(p["max_positions"]):return False
     c=ai_db();c.execute("INSERT INTO ai_trades(version,ts,symbol,option_symbol,token,side,entry,stop,target,qty,score,setup_json,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      (ver,datetime.now(IST).isoformat(),x["symbol"],x["option_symbol"],x["token"],x["side"],x["entry"],x["stop"],x["target"],x["lot_size"],x["score"],json.dumps(x),"OPEN"));c.commit();c.close();ai_log("TRADE","AUTO_PAPER_OPEN",f'{x["symbol"]} {x["option_symbol"]} score={x["score"]} ML={x.get("ml_probability",0):.3f}');return True
+      (ver,datetime.now(IST).isoformat(),x["symbol"],x["option_symbol"],x["token"],x["side"],x["entry"],x["stop"],x["target"],x["lot_size"],x["score"],json.dumps(x),"OPEN"));c.commit();c.close();ai_log("TRADE","AUTO_PAPER_OPEN",f'{x["symbol"]} {x["option_symbol"]} score={x["score"]} entry={x["entry"]:.2f} {x.get("entry_price_source")} vol={x.get("option_volume",0)} ML={x.get("ml_probability",0):.3f}');return True
 
 def ai_close_trades():
     if not require_session():return
     for t in ai_open_trades():
         try:
             q=kite_quote_bulk([f'NFO:{t["option_symbol"]}']).get(f'NFO:{t["option_symbol"]}')
-            price=extract_price(q) if q else None
-            if price is None:continue
+            st=quote_stats(q)
+            # Closing side must also be executable: LONG closes at bid, SHORT closes at ask.
+            close_side="BID" if t["side"]=="LONG" else "ASK"
+            close_raw=st.get("bid") if t["side"]=="LONG" else st.get("ask")
+            if close_raw is None or float(close_raw)<=0:
+                ai_log("TRADE","PAPER_WAIT_LIQUIDITY",f'id={t["id"]} {t["option_symbol"]} missing close {close_side.lower()}')
+                continue
+            price=float(close_raw)
             spot_key = INDEX_SYMBOLS.get(t["symbol"], "NSE:" + t["symbol"])
             spot_q = kite_quote_bulk([spot_key]).get(spot_key)
             spot=extract_price(spot_q) if spot_q else None
             setup=json.loads(t.get("setup_json") or "{}")
+            setup.update({
+                "exit_ltp": q.get("last_price") if q else None,
+                "exit_bid": st.get("bid"), "exit_ask": st.get("ask"),
+                "exit_volume": st.get("volume",0), "exit_oi": st.get("oi",0),
+                "exit_bid_qty": st.get("bid_qty",0), "exit_ask_qty": st.get("ask_qty",0),
+                "exit_price": price, "exit_price_source": close_side,
+                "exit_spread_pct": st.get("spread_pct"),
+                "exit_liquidity_status":"EXECUTABLE"
+            })
+            # Preserve the original entry quote and append the exit quote so every paper trade
+            # contains a complete market-data audit trail.
+            c=ai_db();c.execute("UPDATE ai_trades SET setup_json=? WHERE id=?",(json.dumps(setup),t["id"]));c.commit();c.close()
             if spot is not None:
                 path_features=ai_market_pattern_features(t["symbol"],spot,setup.get("iv",0),setup.get("pcr",1),setup.get("volume",0),setup.get("trend",0),setup.get("momentum",0))
                 ai_path_record(t,price,spot,path_features)
@@ -7656,13 +7801,18 @@ def ai_learning_state():
     dl_samples = int(dl.get("samples", 0))
     ml_progress = min(1.0, ml_samples / ml_need)
     dl_progress = min(1.0, dl_samples / dl_need)
-    progress = min(ml_progress, dl_progress)
+    research = _research_model()
+    research_need = max(1, int(p.get("research_min_samples",120)))
+    research_samples = int(research.get("samples",0))
+    research_progress = min(1.0, research_samples / research_need)
+    progress = min(ml_progress, dl_progress, research_progress)
     mature_score = float(p.get("min_score", 72.0))
     bootstrap_score = float(p.get("bootstrap_min_score", 55.0))
     effective_score = bootstrap_score + (mature_score - bootstrap_score) * progress
     ml_ready = ml_samples >= ml_need
     dl_ready = dl_samples >= dl_need
-    mature = ml_ready and dl_ready
+    research_ready = research_samples >= research_need and research.get("status") == "TRAINED"
+    mature = ml_ready and dl_ready and research_ready
     return {
         "stage": "MATURE AI" if mature else "AUTONOMOUS BOOTSTRAP",
         "bootstrap": not mature,
@@ -7674,6 +7824,8 @@ def ai_learning_state():
         "dl_required": dl_need,
         "ml_progress": round(ml_progress * 100, 1),
         "dl_progress": round(dl_progress * 100, 1),
+        "research_ready": research_ready, "research_samples": research_samples, "research_required": research_need,
+        "research_progress": round(research_progress * 100, 1),
         "progress": round(progress * 100, 1),
         "bootstrap_score": round(bootstrap_score, 2),
         "mature_score": round(mature_score, 2),
@@ -7729,8 +7881,10 @@ def ai_cycle():
                     effective_threshold=float(params["min_score"])
                     ml_ok=ml_prob>=float(params.get("ml_min_probability",0.58))
                     dl_ok=dl_prob>=float(params.get("ml_min_probability",0.58))
-                    approved=(x["score"]>=effective_threshold and x["rr"]>=float(params["min_rr"]) and ml_ok and dl_ok)
-                    gate_label=f'mature gate={effective_threshold:.1f}'
+                    rp=float(x.get("research_probability",0.5)); ru=float(x.get("research_uncertainty",0.5))
+                    research_ok=rp>=float(params.get("research_min_probability",0.60)) and ru<=float(params.get("research_max_uncertainty",0.16))
+                    approved=(x["score"]>=effective_threshold and x["rr"]>=float(params["min_rr"]) and ml_ok and dl_ok and research_ok)
+                    gate_label=f'mature gate={effective_threshold:.1f} ensemble={rp:.3f}±{ru:.3f}'
                 reason=f'{role}: {ls["stage"]} score={x["score"]} rr={x["rr"]} ML={ml_prob:.3f} ({"active" if ml_ready else "warming"}) DL={dl_prob:.3f} ({"active" if dl_ready else "warming"}) {gate_label}'
                 ai_record_decision(ver,x,'APPROVE' if approved else 'REJECT',reason)
                 already=any(t['symbol']==sym and t['version']==ver for t in open_now)
@@ -7743,7 +7897,148 @@ def ai_cycle():
                         open_now=ai_open_trades()
         except Exception as e:
             ai_log('ERROR','AI_SCAN',f'{sym}: {e}')
-    ai_learn();ai_evaluate_challenger()
+    ai_learn(); ai_research_train(); ai_evaluate_challenger()
+
+# ---------------------------------------------------------------------------
+# Historical index data collector + pre-training layer
+# ---------------------------------------------------------------------------
+def ai_hist_status():
+    c=ai_db()
+    rows=c.execute("SELECT symbol, COUNT(*) n, MIN(ts) first_ts, MAX(ts) last_ts FROM ai_hist_candles WHERE interval=? GROUP BY symbol",(AI_HIST_INTERVAL,)).fetchall()
+    runs=c.execute("SELECT * FROM ai_hist_runs ORDER BY id DESC LIMIT 20").fetchall()
+    model=c.execute("SELECT * FROM ai_hist_model WHERE id=1").fetchone()
+    rt={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM ai_runtime WHERE key LIKE 'hist_%'").fetchall()}
+    c.close()
+    return {"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,
+            "horizon_bars":AI_HIST_HORIZON_BARS,"symbols":[dict(r) for r in rows],
+            "runs":[dict(r) for r in runs],"model":dict(model) if model else None,
+            "last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),
+            "status":rt.get("hist_status","WAITING FOR KITE")}
+
+def _hist_feature_row(rows, i):
+    closes=np.array([float(r["close"]) for r in rows[:i+1]],dtype=float)
+    highs=np.array([float(r["high"]) for r in rows[:i+1]],dtype=float)
+    lows=np.array([float(r["low"]) for r in rows[:i+1]],dtype=float)
+    vols=np.array([float(r["volume"] or 0) for r in rows[:i+1]],dtype=float)
+    c=float(closes[-1])
+    def ret(n): return ((c/closes[-1-n])-1)*100 if len(closes)>n and closes[-1-n] else 0.0
+    def ema(n):
+        if len(closes)<n:return float(np.mean(closes))
+        a=2/(n+1); v=float(closes[0])
+        for z in closes[1:]:v=a*float(z)+(1-a)*v
+        return v
+    def rsi(n=14):
+        if len(closes)<n+1:return 50.0
+        d=np.diff(closes[-(n+1):]); up=np.mean(np.maximum(d,0)); dn=np.mean(np.maximum(-d,0))
+        return 100.0 if dn==0 and up>0 else 50.0 if dn==0 else 100-(100/(1+up/dn))
+    v10=float(np.std(closes[-10:])/np.mean(closes[-10:])*100) if len(closes)>=10 else 0.0
+    rng20=float((np.max(highs[-20:])-np.min(lows[-20:]))/c*100) if len(closes)>=20 else 0.0
+    vr=float(vols[-1]/np.mean(vols[-20:])) if len(vols)>=20 and np.mean(vols[-20:])>0 else 1.0
+    e9,e20,e50=ema(9),ema(20),ema(50)
+    trend=max(0,min(25,12.5+(e20/e50-1)*500)) if e50 else 12.5
+    mom=max(0,min(25,12.5+ret(5)*3+ret(20)*1.5))
+    ts=str(rows[i]["ts"])
+    try:
+        dt=datetime.fromisoformat(ts.replace("Z","+00:00"))
+        if dt.tzinfo: dt=dt.astimezone(IST).replace(tzinfo=None)
+        minutes=dt.hour*60+dt.minute
+        ang=2*math.pi*(minutes/(24*60))
+        sinv,cosv=math.sin(ang),math.cos(ang)
+    except Exception: sinv=cosv=0.0
+    f={"ret_1":ret(1),"ret_3":ret(3),"ret_5":ret(5),"ret_10":ret(10),"ret_20":ret(20),
+       "ema_gap_9_20":(e9/e20-1)*100 if e20 else 0,"ema_gap_20_50":(e20/e50-1)*100 if e50 else 0,
+       "rsi14":rsi(),"volatility_10":v10,"range_20":rng20,"volume_ratio":vr,
+       "trend_score":trend,"momentum_score":mom,"pcr_norm":1.0,"iv_norm":0.0,
+       "time_sin":sinv,"time_cos":cosv}
+    return f
+
+def _hist_training_sequences(symbol):
+    c=ai_db(); rows=[dict(x) for x in c.execute("SELECT * FROM ai_hist_candles WHERE symbol=? AND interval=? ORDER BY ts",(symbol,AI_HIST_INTERVAL)).fetchall()]; c.close()
+    if len(rows)<DL_SEQUENCE_LEN+AI_HIST_HORIZON_BARS+5:return [],[]
+    seqs=[]; labels=[]
+    # Keep the sample count bounded so a small Oracle VM can retrain regularly.
+    step=max(1,len(rows)//6000)
+    feature_cache={i:_hist_feature_row(rows,i) for i in range(DL_SEQUENCE_LEN-1,len(rows)-AI_HIST_HORIZON_BARS,step)}
+    keys=list(feature_cache)
+    for i in keys:
+        if i-DL_SEQUENCE_LEN+1<0 or i+AI_HIST_HORIZON_BARS>=len(rows):continue
+        seq=[]
+        ok=True
+        for j in range(i-DL_SEQUENCE_LEN+1,i+1):
+            try: seq.append([_norm_feature(n,_hist_feature_row(rows,j).get(n,0)) for n in ML_FEATURE_NAMES])
+            except Exception: ok=False;break
+        if not ok:continue
+        future=float(rows[i+AI_HIST_HORIZON_BARS]["close"]); cur=float(rows[i]["close"])
+        if cur<=0:continue
+        # Classification target: positive if the future path is above current price.
+        seqs.append(np.asarray(seq,dtype=float)); labels.append(1 if future>cur else 0)
+    return seqs,labels
+
+def ai_hist_train_deep():
+    allx=[]; ally=[]
+    for sym in AI_HIST_SYMBOLS:
+        try:
+            x,y=_hist_training_sequences(sym); allx.extend(x); ally.extend(y)
+        except Exception as e: ai_log("ERROR","HIST_FEATURES",f"{sym}: {e}")
+    if len(allx)<AI_HIST_MIN_TRAIN or len(set(ally))<2:
+        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("COLLECTING — NEED MORE HISTORY",));c.commit();c.close();return ai_hist_status()
+    # Reuse the existing Deep Sequence architecture, but pre-train it only on chronological index data.
+    X=np.asarray([a.reshape(-1) for a in allx],dtype=float); Y=np.asarray(ally,dtype=float).reshape(-1,1)
+    cut=max(1,int(len(X)*0.8)); cut=min(cut,len(X)-1)
+    Xtr,Ytr=X[:cut],Y[:cut];Xv,Yv=X[cut:],Y[cut:]
+    rng=np.random.default_rng(20260825); inp=X.shape[1]; h1=32; h2=16
+    p=ai_settings(); lr=float(p.get("dl_learning_rate",0.01)); epochs=max(60,int(p.get("dl_epochs",90)))
+    w1=rng.normal(0,0.05,(inp,h1));b1=np.zeros((1,h1));w2=rng.normal(0,0.05,(h1,h2));b2=np.zeros((1,h2));w3=rng.normal(0,0.05,(h2,1));b3=np.zeros((1,1))
+    for _ in range(epochs):
+        a1=_dl_relu(Xtr@w1+b1);a2=_dl_relu(a1@w2+b2);pred=_dl_sigmoid_vec(a2@w3+b3)
+        dz3=(pred-Ytr)/len(Xtr);dw3=a2.T@dz3;db3=np.sum(dz3,axis=0,keepdims=True)
+        da2=dz3@w3.T;dz2=da2*(a2>0);dw2=a1.T@dz2;db2=np.sum(dz2,axis=0,keepdims=True)
+        da1=dz2@w2.T;dz1=da1*(a1>0);dw1=Xtr.T@dz1;db1=np.sum(dz1,axis=0,keepdims=True)
+        w1-=lr*dw1;b1-=lr*db1;w2-=lr*dw2;b2-=lr*db2;w3-=lr*dw3;b3-=lr*db3
+    pv=_dl_sigmoid_vec(_dl_relu(_dl_relu(Xv@w1+b1)@w2+b2)@w3+b3).reshape(-1)
+    acc=float(np.mean((pv>=0.5)==Yv.reshape(-1).astype(bool))*100);auc=float(_dl_auc(Yv.reshape(-1).astype(int).tolist(),pv.tolist()))
+    now=datetime.now(IST).isoformat();c=ai_db();
+    c.execute("INSERT OR REPLACE INTO ai_dl_model(id,updated_at,w1,b1,w2,b2,w3,b3,samples,accuracy,auc,status) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(now,json.dumps(w1.tolist()),json.dumps(b1.tolist()),json.dumps(w2.tolist()),json.dumps(b2.tolist()),json.dumps(w3.tolist()),float(b3[0,0]),len(X),acc,auc,"HISTORICAL_PRETRAINED"));
+    c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days) VALUES(1,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,len(X),len(Xtr),len(Xv),acc,auc,"PRETRAINED",AI_HIST_LOOKBACK_DAYS));
+    c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_train_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("PRETRAINED — LIVE PAPER LEARNING CONTINUES",));c.commit();c.close()
+    ai_log("LEARNING","HISTORICAL_PRETRAIN",f"samples={len(X)} validation={len(Xv)} accuracy={acc:.1f}% auc={auc:.3f}")
+    return ai_hist_status()
+
+def ai_hist_sync_symbol(symbol):
+    token,err=resolve_token_for_symbol(symbol)
+    if err:return {"symbol":symbol,"status":"ERROR","detail":err,"rows_added":0}
+    end=now_ist(); start=end-timedelta(days=AI_HIST_LOOKBACK_DAYS)
+    try:candles=kite.historical_data(token,start,end,AI_HIST_INTERVAL)
+    except Exception as e:return {"symbol":symbol,"status":"ERROR","detail":str(e),"rows_added":0}
+    added=0;c=ai_db()
+    for x in candles:
+        try:
+            c.execute("INSERT OR IGNORE INTO ai_hist_candles(ts,symbol,interval,open,high,low,close,volume,oi) VALUES(?,?,?,?,?,?,?,?,?)",(str(x["date"]),symbol,AI_HIST_INTERVAL,float(x["open"]),float(x["high"]),float(x["low"]),float(x["close"]),float(x.get("volume") or 0),float(x.get("oi") or 0)));added+=c.rowcount
+        except Exception:pass
+    c.execute("INSERT INTO ai_hist_runs(ts,symbol,interval,rows_added,status,detail) VALUES(?,?,?,?,?,?)",(datetime.now(IST).isoformat(),symbol,AI_HIST_INTERVAL,added,"OK",f"fetched={len(candles)}"));c.commit();c.close()
+    return {"symbol":symbol,"status":"OK","rows_added":added,"fetched":len(candles)}
+
+def ai_hist_sync():
+    if not require_session():
+        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("WAITING FOR KITE",));c.commit();c.close();return ai_hist_status()
+    results=[ai_hist_sync_symbol(sym) for sym in AI_HIST_SYMBOLS]
+    now=datetime.now(IST).isoformat();c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_sync_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("COLLECTING / READY FOR TRAINING",));c.commit();c.close()
+    ai_hist_train_deep();return {"results":results,**ai_hist_status()}
+
+def ai_hist_loop():
+    ai_init_db()
+    while True:
+        try:
+            # Sync when logged in; the dashboard is not required to be open.
+            if require_session():
+                last=ai_hist_status().get("last_sync_at")
+                due=True
+                if last:
+                    try:due=(datetime.now(IST)-datetime.fromisoformat(last)).total_seconds()>=AI_HIST_SYNC_HOURS*3600
+                    except Exception:pass
+                if due: ai_hist_sync()
+        except Exception as e: ai_log("ERROR","HISTORICAL_ENGINE",str(e))
+        time.sleep(300)
 
 def ai_loop():
     ai_init_db();ai_log('SYSTEM','START','Autonomous AI Evolution engine started; paper mode only')
@@ -7759,11 +8054,59 @@ def ai_status():
     universe=ai_universe()
     c=ai_db(); rt={r['key']:r['value'] for r in c.execute('SELECT key,value FROM ai_runtime').fetchall()}; c.close(); ml=ai_ml_model()
     learning=ai_learning_state()
-    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now(IST).isoformat(),'last_cycle_at':rt.get('last_cycle_at'),'last_activity_at':rt.get('last_activity_at'),'last_scan_at':rt.get('last_scan_at'),'ml':ml,'deep_learning':ai_dl_model(),'learning':learning})
+    return jsonify({
+        'enabled':bool(ai_settings().get('enabled',1)),
+        'mode':'AUTONOMOUS PAPER',
+        'connected':bool(SESSION.get('access_token')),
+        'market_open':ai_market_open(),
+        'poll_seconds':AI_POLL_SECONDS,
+        'champion':ch['version'] if ch else None,
+        'params':p,
+        'open_trades':len(ai_open_trades()),
+        'metrics':m,
+        'universe_mode':AI_UNIVERSE_MODE,
+        'universe_size':len(universe),
+        'universe_preview':universe[:20],
+        'timestamp':datetime.now(IST).isoformat(),
+        'last_cycle_at':rt.get('last_cycle_at'),
+        'last_activity_at':rt.get('last_activity_at'),
+        'last_scan_at':rt.get('last_scan_at'),
+        'ml':ml,
+        'deep_learning':ai_dl_model(),
+        'research':ai_research_predict({}),
+        'learning':learning,
+        'historical':ai_hist_status(),
+        'score_semantics': {
+            'current_score_is_decision_score': True,
+            'mature_gate': float(p.get('min_score',72.0)),
+            'bootstrap_gate': float(p.get('bootstrap_min_score',55.0)),
+            'effective_gate': float(learning.get('effective_score',p.get('bootstrap_min_score',55.0))),
+            'mature_models_required': True,
+            'models_trained': learning.get('stage') == 'MATURE AI',
+            'paper_only': True,
+            'historical_option_data_used': False,
+            'historical_index_data_used': True
+        }
+    })
 
 @app.route('/api/ai-evolution/trades')
 def ai_trades_api():
-    c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_trades ORDER BY id DESC LIMIT 200')];c.close();return jsonify(r)
+    c=ai_db();rows=[dict(x) for x in c.execute('SELECT * FROM ai_trades ORDER BY id DESC LIMIT 200')];c.close()
+    for row in rows:
+        try:
+            sj=json.loads(row.get('setup_json') or '{}')
+        except Exception:
+            sj={}
+        row['entry_volume']=sj.get('option_volume',0)
+        row['exit_volume']=sj.get('exit_volume',0)
+        row['entry_bid']=sj.get('option_bid')
+        row['entry_ask']=sj.get('option_ask')
+        row['exit_bid']=sj.get('exit_bid')
+        row['exit_ask']=sj.get('exit_ask')
+        row['entry_ltp']=sj.get('option_ltp')
+        row['exit_ltp']=sj.get('exit_ltp')
+        row['liquidity_status']=sj.get('liquidity_status','UNKNOWN')
+    return jsonify(rows)
 @app.route('/api/ai-evolution/decisions')
 def ai_decisions_api():
     c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_decisions ORDER BY id DESC LIMIT 200')];c.close();return jsonify(r)
@@ -7779,12 +8122,21 @@ def ai_versions_api():
 @app.route('/api/ai-evolution/events')
 def ai_events_api():
     c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_events ORDER BY id DESC LIMIT 150')];c.close();return jsonify(r)
+@app.route('/api/ai-evolution/historical')
+def ai_historical_api():
+    return jsonify(ai_hist_status())
+
+@app.route('/api/ai-evolution/historical/sync',methods=['POST'])
+def ai_historical_sync_api():
+    return jsonify(ai_hist_sync())
+
 @app.route('/api/ai-evolution/cycle',methods=['POST'])
 def ai_force_cycle():
     ai_cycle();return jsonify({'ok':True})
 
 ai_init_db()
 threading.Thread(target=ai_loop,daemon=True).start()
+threading.Thread(target=ai_hist_loop,daemon=True).start()
 
 threading.Thread(target=_autotrade_loop, daemon=True).start()
 threading.Thread(target=_breakout_monitor_loop, daemon=True).start()
