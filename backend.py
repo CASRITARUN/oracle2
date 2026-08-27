@@ -7153,21 +7153,19 @@ AI_OPTION_CAPTURE_MINUTES = int(os.environ.get("AI_OPTION_CAPTURE_MINUTES", "5")
 AI_OPTION_CAPTURE_DAYS = int(os.environ.get("AI_OPTION_CAPTURE_DAYS", "0"))  # 0 = retain indefinitely
 
 # Historical-status cache used by the dashboard telemetry endpoints.
-# These definitions are required by ai_hist_status() and the collector's
-# invalidation path. Keep the cache very short because collection/training
-# happens in background threads while the UI polls frequently.
+# The dashboard polls these endpoints frequently while collection/training runs
+# in background threads. Keep this cache short and thread-safe so status reads
+# do not repeatedly scan the large SQLite history archive.
 AI_HIST_STATUS_CACHE_SECONDS = float(
     os.environ.get("AI_HIST_STATUS_CACHE_SECONDS", "2.0")
 )
 _AI_HIST_STATUS_CACHE_LOCK = threading.Lock()
 _AI_HIST_STATUS_CACHE = {"at": 0.0, "value": None}
 
-
 def _hist_invalidate_status_cache():
     with _AI_HIST_STATUS_CACHE_LOCK:
         _AI_HIST_STATUS_CACHE["at"] = 0.0
         _AI_HIST_STATUS_CACHE["value"] = None
-
 
 AI_DEFAULTS = {
     # Mature AI gate. This remains deliberately strict once both learned models
@@ -8412,6 +8410,7 @@ def ai_hist_sync():
     all_ok=all(x.get("status") in ("OK","NO_DATA") for x in results)
     overall="HISTORY COLLECTION COMPLETE" if all_ok else "HISTORY COLLECTION PARTIAL — RETRYING"
     c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_sync_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",(overall,));c.commit();c.close()
+    _hist_invalidate_status_cache()
     ai_log("DATA","HISTORICAL_SYNC_COMPLETE",f"status={overall}; results={results}")
     trained=ai_hist_train_deep();return {"results":results,"training":trained,**ai_hist_status()}
 
