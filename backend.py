@@ -7218,6 +7218,7 @@ def ai_init_db():
     CREATE TABLE IF NOT EXISTS ai_hist_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,symbols TEXT,interval TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,status TEXT,lookback_days INTEGER);
     CREATE TABLE IF NOT EXISTS ai_option_snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,expiry TEXT,strike REAL,option_type TEXT,tradingsymbol TEXT,token INTEGER,spot REAL,ltp REAL,bid REAL,ask REAL,mid REAL,spread_pct REAL,volume REAL,oi REAL,iv REAL,delta REAL,source TEXT,UNIQUE(ts,symbol,expiry,strike,option_type));
     CREATE INDEX IF NOT EXISTS idx_ai_option_snapshots_symbol_ts ON ai_option_snapshots(symbol,ts);
+    CREATE INDEX IF NOT EXISTS idx_ai_hist_interval_symbol_ts ON ai_hist_candles(interval,symbol,ts);
     CREATE INDEX IF NOT EXISTS idx_ai_option_snapshots_contract_ts ON ai_option_snapshots(tradingsymbol,ts);
     CREATE TABLE IF NOT EXISTS ai_research_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,models TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,probability REAL,uncertainty REAL,status TEXT,regime TEXT);
     """)
@@ -8078,6 +8079,15 @@ def ai_capture_option_chains(force=False):
 # Historical index data collector + pre-training layer
 # ---------------------------------------------------------------------------
 def ai_hist_status():
+    # History status is read by several dashboard endpoints every few seconds.
+    # Cache it briefly so a 600k+ row SQLite archive never becomes a web-request bottleneck.
+    now_m = time.monotonic()
+    with _AI_HIST_STATUS_CACHE_LOCK:
+        cached = _AI_HIST_STATUS_CACHE.get("value")
+        cached_at = float(_AI_HIST_STATUS_CACHE.get("at") or 0.0)
+        if cached is not None and now_m - cached_at < AI_HIST_STATUS_CACHE_SECONDS:
+            return cached
+
     c=ai_db()
     rows=c.execute("SELECT symbol, COUNT(*) n, MIN(ts) first_ts, MAX(ts) last_ts FROM ai_hist_candles WHERE interval=? GROUP BY symbol",(AI_HIST_INTERVAL,)).fetchall()
     runs=c.execute("SELECT * FROM ai_hist_runs ORDER BY id DESC LIMIT 20").fetchall()
@@ -8087,7 +8097,7 @@ def ai_hist_status():
     oldest=c.execute("SELECT MIN(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     newest=c.execute("SELECT MAX(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     c.close()
-    return {"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,
+    result={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,
             "max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,
             "horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),
             "oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],
@@ -8101,6 +8111,10 @@ def ai_hist_status():
             "db_file":AI_DB_FILE,
             "archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),
             "option_capture":ai_option_capture_status()}
+    with _AI_HIST_STATUS_CACHE_LOCK:
+        _AI_HIST_STATUS_CACHE["at"] = time.monotonic()
+        _AI_HIST_STATUS_CACHE["value"] = result
+    return result
 
 def _hist_feature_row(rows, i, arrays=None):
     """Fast, deterministic historical feature builder.
@@ -8212,7 +8226,7 @@ def _hist_set_status(status, detail=""):
     c=ai_db()
     c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",(status,))
     if detail:c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_detail',?)",(detail,))
-    c.commit();c.close()
+    c.commit();c.close();_hist_invalidate_status_cache()
 
 
 def _hist_set_model_status(status, detail=""):
@@ -8291,7 +8305,7 @@ def _hist_insert_candles(symbol, candles):
             added += c.rowcount
         except Exception:
             pass
-    c.commit(); c.close()
+    c.commit(); c.close(); _hist_invalidate_status_cache()
     return added
 
 
@@ -8431,7 +8445,7 @@ def ai_status():
     universe=ai_universe()
     c=ai_db(); rt={r['key']:r['value'] for r in c.execute('SELECT key,value FROM ai_runtime').fetchall()}; c.close(); ml=ai_ml_model()
     learning=ai_learning_state()
-    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now(IST).isoformat(),'last_cycle_at':rt.get('last_cycle_at'),'last_activity_at':rt.get('last_activity_at'),'last_scan_at':rt.get('last_scan_at'),'ml':ml,'deep_learning':ai_dl_model(),'research':ai_research_predict({}),'learning':learning,'historical':ai_hist_status()})
+    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now(IST).isoformat(),'last_cycle_at':rt.get('last_cycle_at'),'last_activity_at':rt.get('last_activity_at'),'last_scan_at':rt.get('last_scan_at'),'ml':ml,'deep_learning':ai_dl_model(),'research':_research_model(),'learning':learning,'historical':ai_hist_status()})
 
 
 @app.route('/api/ai-evolution/learning-progress')
@@ -8660,6 +8674,11 @@ threading.Thread(target=_breakout_monitor_loop, daemon=True).start()
 @app.route("/")
 def index():
     return send_from_directory(os.path.dirname(__file__), "index.html")
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok": True, "service": "tradingbot"})
 
 
 
