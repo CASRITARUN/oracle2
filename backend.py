@@ -8391,14 +8391,14 @@ def ai_hist_sync_symbol(symbol):
             # Do not classify this as a permanent collector failure. Transient
             # throttling/network errors still remain real errors and will retry.
             err_text=str(fetch_err).lower()
+            # A BACKFILL request that ends before the already-stored oldest candle
+            # is an availability-boundary probe. Kite's exact error wording varies
+            # by API response/version, so do not depend only on message text here.
+            # Network/rate-limit failures are still retried three times above and
+            # remain errors when they affect the current/incremental range.
             boundary_error=(
                 kind == "BACKFILL" and existing_first is not None and
-                end <= existing_first and
-                any(k in err_text for k in (
-                    "no data", "no historical", "invalid date", "invalid from",
-                    "invalid interval", "data not available", "out of range",
-                    "too old", "date range"
-                ))
+                end <= existing_first
             )
             if boundary_error:
                 boundary_hits += 1
@@ -8425,11 +8425,18 @@ def ai_hist_sync_symbol(symbol):
                f"fetched={len(candles)} added={added}")
         time.sleep(AI_HIST_REQUEST_STAGGER_SECONDS)
 
-    status="OK" if not errors else ("PARTIAL" if chunks_ok else "ERROR")
+    # If the only failures are older BACKFILL probes and we already have a
+    # substantial historical archive, treat the oldest stored candle as Kite's
+    # practical availability boundary. This prevents endless RETRYING once the
+    # requested 12-year window extends beyond what Kite actually serves.
+    non_boundary_errors = [e for e in errors if "BACKFILL" not in e]
+    boundary_complete = bool(existing_first is not None and boundary_hits > 0 and not non_boundary_errors)
+    status="OK" if (not errors or boundary_complete) else ("PARTIAL" if chunks_ok else "ERROR")
     detail=(
         f"range={AI_HIST_LOOKBACK_DAYS}d (~{AI_HIST_MAX_YEARS:.1f}y target), "
         f"chunk={AI_HIST_CHUNK_DAYS}d, chunks={chunks_ok}/{len(ranges)}, "
-        f"fetched={total_fetched}, added={total_added}, boundary_hits={boundary_hits}"
+        f"fetched={total_fetched}, added={total_added}, boundary_hits={boundary_hits}, "
+        f"boundary_complete={boundary_complete}"
     )
     if errors:
         detail += " | " + " ; ".join(errors[:3])
@@ -8458,7 +8465,7 @@ def ai_hist_sync():
     now=datetime.now(IST).isoformat()
     all_ok=all(x.get("status") in ("OK","NO_DATA") for x in results)
     overall="HISTORY COLLECTION COMPLETE" if all_ok else "HISTORY COLLECTION PARTIAL — RETRYING"
-    c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_sync_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",(overall,));c.commit();c.close()
+    c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_sync_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",(overall,));c.commit();c.close();_hist_invalidate_status_cache()
     ai_log("DATA","HISTORICAL_SYNC_COMPLETE",f"status={overall}; results={results}")
     trained=ai_hist_train_deep();return {"results":results,"training":trained,**ai_hist_status()}
 
