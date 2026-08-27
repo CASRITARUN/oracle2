@@ -7153,9 +7153,8 @@ AI_OPTION_CAPTURE_MINUTES = int(os.environ.get("AI_OPTION_CAPTURE_MINUTES", "5")
 AI_OPTION_CAPTURE_DAYS = int(os.environ.get("AI_OPTION_CAPTURE_DAYS", "0"))  # 0 = retain indefinitely
 
 # Historical-status cache used by the dashboard telemetry endpoints.
-# The dashboard polls these endpoints frequently while collection/training runs
-# in background threads. Keep this cache short and thread-safe so status reads
-# do not repeatedly scan the large SQLite history archive.
+# The collector and UI poll this state frequently, so keep a very short
+# thread-safe cache to avoid repeatedly scanning the SQLite archive.
 AI_HIST_STATUS_CACHE_SECONDS = float(
     os.environ.get("AI_HIST_STATUS_CACHE_SECONDS", "2.0")
 )
@@ -7166,6 +7165,7 @@ def _hist_invalidate_status_cache():
     with _AI_HIST_STATUS_CACHE_LOCK:
         _AI_HIST_STATUS_CACHE["at"] = 0.0
         _AI_HIST_STATUS_CACHE["value"] = None
+
 
 AI_DEFAULTS = {
     # Mature AI gate. This remains deliberately strict once both learned models
@@ -8338,19 +8338,23 @@ def _hist_fetch_chunk(token, start, end):
 
 
 def ai_hist_sync_symbol(symbol):
-    """Backfill the maximum practical 5-minute history and keep the newest data current.
+    """Backfill the maximum practical 5-minute history and keep newest data current.
 
     Kite restricts the span of a single historical request, so the collector walks the
     requested range in chunks, persists each response immediately, and resumes safely
     after an interruption. The actual oldest date returned by Kite is retained as the
-    source-of-truth; if an index has less history available, we do not fabricate it.
+    source-of-truth; if Kite rejects a range older than the already stored boundary,
+    that is treated as an availability boundary rather than an endless retry.
     """
     token,err=resolve_token_for_symbol(symbol)
     if err:return {"symbol":symbol,"status":"ERROR","detail":err,"rows_added":0,"chunks":0}
     now=now_ist()
     target_start=now-timedelta(days=AI_HIST_LOOKBACK_DAYS)
     c=ai_db()
-    r=c.execute("SELECT MIN(ts) first_ts, MAX(ts) last_ts FROM ai_hist_candles WHERE symbol=? AND interval=?",(symbol,AI_HIST_INTERVAL)).fetchone()
+    r=c.execute(
+        "SELECT MIN(ts) first_ts, MAX(ts) last_ts FROM ai_hist_candles "
+        "WHERE symbol=? AND interval=?",(symbol,AI_HIST_INTERVAL)
+    ).fetchone()
     c.close()
     try:
         existing_first=_ai_ts_naive(r["first_ts"]) if r and r["first_ts"] else None
@@ -8359,8 +8363,6 @@ def ai_hist_sync_symbol(symbol):
         existing_first=existing_last=None
 
     ranges=[]
-    # First run: full maximum-history backfill. Existing database: only fetch missing
-    # older history plus the tail since the last stored candle.
     if not existing_first:
         cursor=target_start
         while cursor < now:
@@ -8373,31 +8375,78 @@ def ai_hist_sync_symbol(symbol):
             while cursor < end_limit:
                 end=min(cursor+timedelta(days=AI_HIST_CHUNK_DAYS),end_limit)
                 ranges.append((cursor,end,"BACKFILL")); cursor=end+timedelta(seconds=1)
+
         tail_start=(existing_last+timedelta(minutes=1)) if existing_last else target_start
         if tail_start < now-timedelta(days=AI_HIST_CHUNK_DAYS):
-            # A stale/incomplete database: let the backfill loop above repair the old
-            # portion and fetch only the most recent legal window here.
             tail_start=now-timedelta(days=AI_HIST_CHUNK_DAYS)
         if tail_start < now:
             ranges.append((tail_start,now,"INCREMENTAL"))
 
-    total_added=0; total_fetched=0; chunks_ok=0; errors=[]
+    total_added=0; total_fetched=0; chunks_ok=0; errors=[]; boundary_hits=0
     for start,end,kind in ranges:
         candles,fetch_err=_hist_fetch_chunk(token,start,end)
         if fetch_err:
+            # Once we already have a valid oldest stored candle, a failure on a
+            # pre-boundary BACKFILL range can simply mean Kite has no older data.
+            # Do not classify this as a permanent collector failure. Transient
+            # throttling/network errors still remain real errors and will retry.
+            err_text=str(fetch_err).lower()
+            boundary_error=(
+                kind == "BACKFILL" and existing_first is not None and
+                end <= existing_first and
+                any(k in err_text for k in (
+                    "no data", "no historical", "invalid date", "invalid from",
+                    "invalid interval", "data not available", "out of range",
+                    "too old", "date range"
+                ))
+            )
+            if boundary_error:
+                boundary_hits += 1
+                ai_log("DATA","HISTORICAL_BOUNDARY",
+                       f"{symbol}: Kite has no usable data before {existing_first}; "
+                       f"ignored older request {start.date()}→{end.date()}: {fetch_err}")
+                continue
             errors.append(f"{kind} {start.date()}→{end.date()}: {fetch_err}")
             continue
+
+        # Empty response on an older BACKFILL range is also a valid source boundary
+        # when the database already contains a later oldest candle.
+        if not candles and kind == "BACKFILL" and existing_first is not None and end <= existing_first:
+            boundary_hits += 1
+            ai_log("DATA","HISTORICAL_BOUNDARY",
+                   f"{symbol}: empty Kite response before {existing_first}; "
+                   f"stopping older backfill at {start.date()}→{end.date()}")
+            continue
+
         added=_hist_insert_candles(symbol,candles)
         total_added += added; total_fetched += len(candles); chunks_ok += 1
-        ai_log("DATA","HISTORICAL_CHUNK",f"{symbol} {AI_HIST_INTERVAL} {kind} {start.date()}→{end.date()} fetched={len(candles)} added={added}")
+        ai_log("DATA","HISTORICAL_CHUNK",
+               f"{symbol} {AI_HIST_INTERVAL} {kind} {start.date()}→{end.date()} "
+               f"fetched={len(candles)} added={added}")
         time.sleep(AI_HIST_REQUEST_STAGGER_SECONDS)
 
     status="OK" if not errors else ("PARTIAL" if chunks_ok else "ERROR")
-    detail=f"range={AI_HIST_LOOKBACK_DAYS}d (~{AI_HIST_MAX_YEARS:.1f}y target), chunk={AI_HIST_CHUNK_DAYS}d, chunks={chunks_ok}/{len(ranges)}, fetched={total_fetched}, added={total_added}"
-    if errors: detail += " | " + " ; ".join(errors[:3])
-    c=ai_db();c.execute("INSERT INTO ai_hist_runs(ts,symbol,interval,rows_added,status,detail) VALUES(?,?,?,?,?,?)",
-                        (datetime.now(IST).isoformat(),symbol,AI_HIST_INTERVAL,total_added,status,detail));c.commit();c.close()
-    return {"symbol":symbol,"status":status,"rows_added":total_added,"fetched":total_fetched,"chunks":chunks_ok,"requested_chunks":len(ranges),"detail":detail,"errors":errors[:5]}
+    detail=(
+        f"range={AI_HIST_LOOKBACK_DAYS}d (~{AI_HIST_MAX_YEARS:.1f}y target), "
+        f"chunk={AI_HIST_CHUNK_DAYS}d, chunks={chunks_ok}/{len(ranges)}, "
+        f"fetched={total_fetched}, added={total_added}, boundary_hits={boundary_hits}"
+    )
+    if errors:
+        detail += " | " + " ; ".join(errors[:3])
+
+    c=ai_db()
+    c.execute(
+        "INSERT INTO ai_hist_runs(ts,symbol,interval,rows_added,status,detail) "
+        "VALUES(?,?,?,?,?,?)",
+        (datetime.now(IST).isoformat(),symbol,AI_HIST_INTERVAL,total_added,status,detail)
+    )
+    c.commit(); c.close()
+    return {
+        "symbol":symbol,"status":status,"rows_added":total_added,
+        "fetched":total_fetched,"chunks":chunks_ok,
+        "requested_chunks":len(ranges),"detail":detail,"errors":errors[:5]
+    }
+
 
 def ai_hist_sync():
     if not require_session():
@@ -8410,7 +8459,6 @@ def ai_hist_sync():
     all_ok=all(x.get("status") in ("OK","NO_DATA") for x in results)
     overall="HISTORY COLLECTION COMPLETE" if all_ok else "HISTORY COLLECTION PARTIAL — RETRYING"
     c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_sync_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",(overall,));c.commit();c.close()
-    _hist_invalidate_status_cache()
     ai_log("DATA","HISTORICAL_SYNC_COMPLETE",f"status={overall}; results={results}")
     trained=ai_hist_train_deep();return {"results":results,"training":trained,**ai_hist_status()}
 
