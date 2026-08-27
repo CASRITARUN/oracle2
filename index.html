@@ -2403,12 +2403,24 @@ function aiFmt(v){return v==null?'—':Number(v).toLocaleString('en-IN',{maximum
 // Explicit DOM references: do not rely on browser-created globals for element IDs.
 const aiEl=id=>document.getElementById(id);
 const aiChampion=aiEl('aiChampion'),aiMLSamples=aiEl('aiMLSamples'),aiMLAccuracy=aiEl('aiMLAccuracy'),aiMLAUC=aiEl('aiMLAUC');
-const aiDLStatus=aiEl('aiDLStatus'),aiDLSamples=aiEl('aiDLSamples'),aiDLAccuracy=aiEl('aiDLAccuracy'),aiDLAUC=aiEl('aiDLAUC'),aiDLUpdated=aiEl('aiDLUpdated');
-const aiLearningStage=aiEl('aiLearningStage'),aiEffectiveGate=aiEl('aiEffectiveGate'),aiLearningProgress=aiEl('aiLearningProgress'),aiTrades=aiEl('aiTrades'),aiWin=aiEl('aiWin'),aiAvgR=aiEl('aiAvgR'),aiPF=aiEl('aiPF'),aiOpen=aiEl('aiOpen'),aiEngine=aiEl('aiEngine'),aiUpdated=aiEl('aiUpdated'),aiUniverse=aiEl('aiUniverse'),aiScanRotation=aiEl('aiScanRotation'),aiConnectionPill=aiEl('aiConnectionPill'),aiStatusText=aiEl('aiStatusText'),aiCycleBtn=aiEl('aiCycleBtn');
+const aiDLStatus=aiEl('aiDLStatus'),aiDLSamples=aiEl('aiDLSamples'),aiDLAccuracy=aiEl('aiDLAccuracy'),aiDLAUC=aiEl('aiDLAUC');
+const aiLearningStage=aiEl('aiLearningStage'),aiEffectiveGate=aiEl('aiEffectiveGate'),aiLearningProgress=aiEl('aiLearningProgress'),aiTrades=aiEl('aiTrades'),aiWin=aiEl('aiWin'),aiAvgR=aiEl('aiAvgR'),aiPF=aiEl('aiPF'),aiOpen=aiEl('aiOpen'),aiStatusText=aiEl('aiStatusText'),aiCycleBtn=aiEl('aiCycleBtn');
 const aiResearchProb=aiEl('aiResearchProb'),aiResearchUncertainty=aiEl('aiResearchUncertainty'),aiResearchAUC=aiEl('aiResearchAUC'),aiResearchRegime=aiEl('aiResearchRegime');
+const aiSet=(id,value)=>{const e=aiEl(id);if(e)e.textContent=value==null?'—':String(value);return e;};
 
 function aiStatusClass(v){return v==='ACCEPTED'?'ai-evo-status ai-evo-ok':(v==='ROLLED_BACK'||v==='REJECTED'?'ai-evo-status ai-evo-bad':'ai-evo-status ai-evo-test');}
-async function aiGet(url,opt){const r=await fetch(url,opt);const raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw Error('Backend returned a non-JSON response ('+r.status+'). Check the Python/Gunicorn process.')}if(!r.ok)throw Error(d.error||d.message||'Request failed');return d;}
+async function aiGet(url,opt={}){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),8000);
+  try{
+    const r=await fetch(url,{cache:'no-store',...opt,signal:controller.signal});
+    const raw=await r.text();let d;
+    try{d=JSON.parse(raw)}catch(e){throw Error('Backend returned a non-JSON response ('+r.status+'). Check Gunicorn/service logs.')}
+    if(!r.ok)throw Error(d.error||d.message||('HTTP '+r.status));
+    return d;
+  }catch(e){if(e.name==='AbortError')throw Error('Request timed out');throw e;}
+  finally{clearTimeout(timer);}
+}
 let aiGlobeFrame=0,aiGlobeTimer=null;
 function startAIGlobe(){
   if(aiGlobeTimer)return; const c=document.getElementById('aiGlobe'); if(!c)return; const ctx=c.getContext('2d');
@@ -2424,7 +2436,7 @@ function startAIGlobe(){
     ctx.lineWidth=1;for(let i=0;i<pts.length;i++)for(let j=i+1;j<pts.length;j++){ctx.strokeStyle='rgba(255,99,56,.16)';ctx.beginPath();ctx.moveTo(...pts[i]);ctx.lineTo(...pts[j]);ctx.stroke();}
     pts.forEach((p,i)=>{ctx.fillStyle=i%2?'#ff8a68':'#ff6338';ctx.shadowBlur=10;ctx.shadowColor='#ff6338';ctx.beginPath();ctx.arc(p[0],p[1],4,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0});
     ctx.fillStyle='#667085';ctx.font='700 11px system-ui';ctx.textAlign='center';ctx.fillText('NIFTY  ·  BANKNIFTY  ·  FINNIFTY',cx,cy+r+28);ctx.font='10px system-ui';ctx.fillText('historical candles → sequence learning',cx,cy+r+45);
-    aiGlobeFrame++;aiGlobeTimer=requestAnimationFrame(draw);
+    aiGlobeFrame++;setTimeout(()=>{aiGlobeTimer=requestAnimationFrame(draw)},50);
   }draw();
 }
 function updateAIHistorical(h){
@@ -2434,11 +2446,15 @@ function updateAIHistorical(h){
   const histStatus=aiEl('aiHistStatus'); if(histStatus)histStatus.textContent=status;
   const rows=aiEl('aiHistRows'); if(rows)rows.textContent=total.toLocaleString('en-IN');
   const targetYears=Number(h.max_years||3).toFixed(1);
-  const model=aiEl('aiHistModel'); if(model)model.textContent=m.status||'—';
+  const model=aiEl('aiHistModel'); if(model)model.textContent=m.status||h.model_status||'NOT TRAINED';
   const targetEl=aiEl('aiHistTarget'); if(targetEl)targetEl.textContent=targetYears+' years target';
   const oldestEl=aiEl('aiHistOldest'); if(oldestEl)oldestEl.textContent=h.oldest||'—';
   const auc=aiEl('aiHistAUC'); if(auc)auc.textContent=m.auc!=null&&Number(m.auc)>0?Number(m.auc).toFixed(3):'—';
-  const phase=aiEl('aiHistPhase'); if(phase)phase.textContent=(m.status&&String(m.status).includes('PRETRAIN'))?'PRETRAINED → LIVE REFINEMENT':(total>0?'COLLECTING / TRAINING':'WAITING FOR KITE');
+  const phase=aiEl('aiHistPhase');
+  if(phase){
+    const ms=String(m.status||h.model_status||'NOT TRAINED');
+    phase.textContent=ms.includes('PRETRAIN')?'PRETRAINED → LIVE REFINEMENT':(ms.includes('TRAINING')||ms.includes('BUILDING')?'TRAINING GRU':(total>0?(String(h.training_requested)==='1'?'HISTORY COMPLETE → TRAINING QUEUED':'READY FOR TRAINING'):'WAITING FOR KITE'));
+  }
   const live=aiEl('aiGlobeLive'); if(live)live.textContent=status;
   const backend=aiEl('aiBackendState'); if(backend)backend.textContent=status==='WAITING FOR KITE'?'WAITING':(status.includes('PARTIAL')?'ONLINE / RETRYING':'ONLINE');
   const chunk=Number(h.chunk_days||90);
@@ -2475,49 +2491,49 @@ async function updateAIOptionHistory(){
 
 let aiRefreshBusy=false, aiLastTableRefresh=0;
 async function refreshAIEvolution(forceTables=false){
-  if(aiRefreshBusy) return;
+  if(aiRefreshBusy)return;
   aiRefreshBusy=true;
   try{
-    // The status endpoint is deliberately lightweight.  Keep the dashboard responsive by
-    // fetching only the two live summary payloads on the fast timer.
-    const [s,o]=await Promise.all([
-      aiGet('/api/ai-evolution/status'),
-      aiGet('/api/ai-evolution/options')
-    ]);
+    const results=await Promise.allSettled([aiGet('/api/ai-evolution/status'),aiGet('/api/ai-evolution/options')]);
+    const s=results[0].status==='fulfilled'?results[0].value:null;
+    const o=results[1].status==='fulfilled'?results[1].value:null;
+    if(!s){aiSet('aiStatusText','AI status unavailable — backend check required');return;}
     updateAIInstitutionalLifecycle(s);
-    if(s.historical) updateAIHistorical(s.historical);
-    // option history is already fetched above; update its small readout without another request
-    const os=document.getElementById('aiOptStatus'); if(os) os.textContent=o.status||'WAITING';
-    const or=document.getElementById('aiOptRows'); if(or) or.textContent=Number(o.rows||0).toLocaleString('en-IN');
-    const sy=o.symbols||[]; const contracts=sy.reduce((a,x)=>a+Number(x.contracts||0),0);
-    const oc=document.getElementById('aiOptContracts'); if(oc) oc.textContent=contracts.toLocaleString('en-IN');
-    const ol=document.getElementById('aiOptLast'); if(ol) ol.textContent=o.last_capture_at?new Date(o.last_capture_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';
-    const ot=document.getElementById('aiOptTable'); if(ot) ot.innerHTML=sy.map(x=>`<tr><td><b>${aiEsc(x.symbol)}</b></td><td>${Number(x.n||0).toLocaleString('en-IN')}</td><td>${Number(x.contracts||0).toLocaleString('en-IN')}</td><td>${aiEsc(x.first_ts||'—')}</td><td>${aiEsc(x.last_ts||'—')}</td></tr>`).join('')||'<tr><td colspan="5">Waiting for live option-chain capture…</td></tr>';
-
-    aiChampion.textContent=s.champion||'—';
-    if(s.ml){aiMLSamples.textContent=s.ml.samples||0;aiMLAccuracy.textContent=s.ml.samples?s.ml.accuracy.toFixed(1)+'%':'—';aiMLAUC.textContent=s.ml.samples?s.ml.auc.toFixed(3):'—';}
-    if(s.deep_learning){aiDLStatus.textContent=s.deep_learning.status||'NOT TRAINED';const arch=document.getElementById('aiDLArchitecture');if(arch)arch.textContent=s.deep_learning.architecture||'GRU-32';aiDLSamples.textContent=s.deep_learning.samples||0;aiDLAccuracy.textContent=s.deep_learning.samples?s.deep_learning.accuracy.toFixed(1)+'%':'—';aiDLAUC.textContent=s.deep_learning.samples?s.deep_learning.auc.toFixed(3):'—';aiDLUpdated.textContent=s.deep_learning.updated_at?new Date(s.deep_learning.updated_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';}
-    const rs=s.research||{};const rpEl=document.getElementById('aiResearchProb'),ruEl=document.getElementById('aiResearchUncertainty'),rrEl=document.getElementById('aiResearchRegime'),raEl=document.getElementById('aiResearchAUC');if(rpEl)rpEl.textContent=rs.probability!=null?(Number(rs.probability)*100).toFixed(1)+'%':'—';if(ruEl)ruEl.textContent=rs.uncertainty!=null?(Number(rs.uncertainty)*100).toFixed(1)+'%':'—';if(rrEl)rrEl.textContent=rs.regime||'—';if(raEl)raEl.textContent=rs.auc?Number(rs.auc).toFixed(3):'—';const reEl=document.getElementById('aiResearchEnsembleState');if(reEl)reEl.textContent=rs.status||'WARMING';
-    const ls=s.learning||{};aiLearningStage.textContent=ls.stage||'AUTONOMOUS BOOTSTRAP';aiEffectiveGate.textContent=(ls.effective_score!=null?Number(ls.effective_score).toFixed(1):'55.0')+'/100';aiLearningProgress.textContent=(ls.progress!=null?Number(ls.progress).toFixed(1):'0')+'%';aiTrades.textContent=s.metrics.trades;aiWin.textContent=aiFmt(s.metrics.win_rate)+'%';aiAvgR.textContent=aiFmt(s.metrics.avg_r)+'R';aiPF.textContent=aiFmt(s.metrics.profit_factor);aiOpen.textContent=s.open_trades;aiEngine.textContent=!s.connected?'WAITING — KITE':(s.market_open?'RUNNING':'WAITING — MARKET CLOSED');aiUpdated.textContent=s.last_activity_at?new Date(s.last_activity_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'Waiting for market/Kite activity';
-    aiUniverse.textContent='NIFTY · BANKNIFTY · FINNIFTY';aiScanRotation.textContent=(s.poll_seconds||60)+'s / cycle · '+(s.last_scan_at?new Date(s.last_scan_at).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'}):'not scanned');aiConnectionPill.textContent=s.connected?'KITE CONNECTED':'WAITING FOR KITE';aiConnectionPill.className='pill '+(s.connected?'ok':'warn');
-
-    // Large audit tables refresh less often.  This removes repeated 200-row DOM rebuilds
-    // from the 10-second heartbeat while retaining the same tables and data.
-    const nowMs=Date.now();
-    if(forceTables || nowMs-aiLastTableRefresh>=30000){
-      aiLastTableRefresh=nowMs;
-      const [dec,changes,learning,tr,vs,ev]=await Promise.all([
-        aiGet('/api/ai-evolution/decisions'),aiGet('/api/ai-evolution/changes'),aiGet('/api/ai-evolution/learning'),aiGet('/api/ai-evolution/trades'),aiGet('/api/ai-evolution/versions'),aiGet('/api/ai-evolution/events')
-      ]);
-      if(dec[0]){try{const snap=JSON.parse(dec[0].snapshot||'{}');aiScore.textContent=aiFmt(dec[0].score);aiSetupTitle.textContent=`${dec[0].symbol} — ${dec[0].decision} — ${dec[0].score}/100`;aiSetupNote.textContent=(dec[0].reason||'')+(ls.stage?` · ${ls.stage} · effective gate ${Number(ls.effective_score??72).toFixed(1)}`:'')+(snap.ml_probability!=null?` · ML ${(Number(snap.ml_probability)*100).toFixed(1)}% · Deep ${(Number(snap.dl_probability??0.5)*100).toFixed(1)}% · Ensemble ${(Number(snap.research_probability??0.5)*100).toFixed(1)}% ± ${(Number(snap.research_uncertainty??0.5)*100).toFixed(1)}% · ${aiEsc(snap.market_regime||'UNKNOWN')}`:'');const c=snap.components||{};aiTrend.textContent=aiFmt(c.trend);aiMomentum.textContent=aiFmt(c.momentum);aiVol.textContent=aiFmt(c.volatility);aiPCR.textContent=aiFmt(snap.pcr);aiIV.textContent=aiFmt(snap.iv)+'%';}catch(e){}}
-      aiChanges.innerHTML=changes.length?changes.map(x=>`<div class="ai-evo-learning"><b>${aiEsc(x.from_version)} → ${aiEsc(x.to_version)}</b> <span class="${aiStatusClass(x.status)}">${aiEsc(x.status)}</span><br>${aiEsc(x.hypothesis)}<br><span class="ai-evo-note">Change: ${aiEsc(x.change_json)} · Before: ${aiEsc(x.before_metrics)} · After: ${aiEsc(x.after_metrics||'awaiting evidence')} · Impact: ${aiEsc(x.impact)}</span></div>`).join(''):'<div class="ai-evo-note">No strategy change yet. The AI is collecting evidence.</div>';
-      aiLearning.innerHTML=learning.length?learning.slice(0,12).map(x=>`<div class="ai-evo-learning"><b>${aiEsc(x.ts)}</b> — ${aiEsc(x.observation)}<br><span class="ai-evo-note">Hypothesis: ${aiEsc(x.hypothesis)}<br>Action: ${aiEsc(x.action)}<br>Evidence: ${aiEsc(x.evidence)}</span></div>`).join(''):'<div class="ai-evo-note">No learning record yet.</div>';
-      aiTradesTable.innerHTML=tr.map(x=>{let sj={};try{sj=JSON.parse(x.setup_json||'{}')}catch(e){};const fmtPair=(a,b)=>`${a!=null?aiFmt(a):'—'} / ${b!=null?aiFmt(b):'—'}`;return `<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.version)}</td><td>${aiEsc(x.symbol)}</td><td>${aiEsc(x.option_symbol)}</td><td>${aiEsc(x.side)}</td><td>${aiFmt(x.score)}</td><td>${aiFmt(x.entry)}</td><td>${aiFmt(x.exit)}</td><td>${aiFmt(x.entry_volume)}</td><td>${aiFmt(x.exit_volume)}</td><td>${fmtPair(x.entry_bid,x.entry_ask)}</td><td>${fmtPair(x.exit_bid,x.exit_ask)}</td><td class="${Number(x.pnl)>=0?'pnl-pos':'pnl-neg'}">${aiFmt(x.pnl)}</td><td>${aiFmt(x.r_multiple)}</td><td>${aiFmt(x.mfe)}%</td><td>${aiFmt(x.mae)}%</td><td>${sj.ml_probability!=null?(Number(sj.ml_probability)*100).toFixed(1)+'%':'—'}</td><td>${aiEsc(x.liquidity_status||'—')}</td><td>${aiEsc(x.status)}</td><td>${aiEsc(x.exit_reason||'')}</td></tr>`}).join('')||'<tr><td colspan="20">No paper transactions yet.</td></tr>';
-      aiDecisionsTable.innerHTML=dec.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.version)}</td><td>${aiEsc(x.symbol)}</td><td>${aiFmt(x.score)}</td><td>${aiEsc(x.decision)}</td><td>${aiEsc(x.reason)}</td></tr>`).join('')||'<tr><td colspan="6">No decisions yet.</td></tr>';
-      aiVersionsTable.innerHTML=vs.map(x=>`<tr><td>${aiEsc(x.version)}</td><td>${aiEsc(x.parent_version)}</td><td>${aiEsc(x.created_at)}</td><td><span class="${aiStatusClass(x.status)}">${aiEsc(x.status)}</span></td><td>${aiEsc(x.reason)}</td><td>${aiEsc(x.metrics)}</td></tr>`).join('');
-      aiEventsTable.innerHTML=ev.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.level)}</td><td>${aiEsc(x.event)}</td><td>${aiEsc(x.detail)}</td></tr>`).join('');
+    if(s.historical)updateAIHistorical(s.historical);
+    if(o){
+      aiSet('aiOptStatus',o.status||'WAITING');aiSet('aiOptRows',Number(o.rows||0).toLocaleString('en-IN'));
+      const sy=o.symbols||[];aiSet('aiOptContracts',sy.reduce((a,x)=>a+Number(x.contracts||0),0).toLocaleString('en-IN'));
+      aiSet('aiOptLast',o.last_capture_at?new Date(o.last_capture_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—');
+      const ot=aiEl('aiOptTable');if(ot)ot.innerHTML=sy.map(x=>`<tr><td><b>${aiEsc(x.symbol)}</b></td><td>${Number(x.n||0).toLocaleString('en-IN')}</td><td>${Number(x.contracts||0).toLocaleString('en-IN')}</td><td>${aiEsc(x.first_ts||'—')}</td><td>${aiEsc(x.last_ts||'—')}</td></tr>`).join('')||'<tr><td colspan="5">Waiting for live option-chain capture…</td></tr>';
     }
-  }catch(e){aiStatusText.textContent='AI status: '+e.message;}
+    if(s.ml){aiSet('aiMLSamples',s.ml.samples||0);aiSet('aiMLAccuracy',s.ml.samples?Number(s.ml.accuracy).toFixed(1)+'%':'—');aiSet('aiMLAUC',s.ml.samples?Number(s.ml.auc).toFixed(3):'—');}
+    if(s.deep_learning){
+      aiSet('aiDLStatus',s.deep_learning.status||'NOT TRAINED');aiSet('aiDLArchitecture',s.deep_learning.architecture||'GRU-32');
+      aiSet('aiDLSamples',s.deep_learning.samples||0);aiSet('aiDLAccuracy',s.deep_learning.samples?Number(s.deep_learning.accuracy).toFixed(1)+'%':'—');aiSet('aiDLAUC',s.deep_learning.samples?Number(s.deep_learning.auc).toFixed(3):'—');
+    }
+    const rs=s.research||{};aiSet('aiResearchProb',rs.probability!=null?(Number(rs.probability)*100).toFixed(1)+'%':'—');aiSet('aiResearchUncertainty',rs.uncertainty!=null?(Number(rs.uncertainty)*100).toFixed(1)+'%':'—');aiSet('aiResearchRegime',rs.regime||'—');aiSet('aiResearchAUC',rs.auc?Number(rs.auc).toFixed(3):'—');aiSet('aiResearchEnsembleState',rs.status||'WARMING');
+    const ls=s.learning||{};aiSet('aiLearningStage',ls.stage||'AUTONOMOUS BOOTSTRAP');aiSet('aiEffectiveGate',(ls.effective_score!=null?Number(ls.effective_score).toFixed(1):'55.0')+'/100');aiSet('aiLearningProgress',(ls.progress!=null?Number(ls.progress).toFixed(1):'0')+'%');
+    const metrics=s.metrics||{};aiSet('aiTrades',metrics.trades||0);aiSet('aiWin',aiFmt(metrics.win_rate)+'%');aiSet('aiAvgR',aiFmt(metrics.avg_r)+'R');aiSet('aiPF',aiFmt(metrics.profit_factor));aiSet('aiOpen',s.open_trades||0);
+    aiSet('aiStatusText',s.connected?(s.market_open?'Backend ONLINE / MARKET OPEN':'Backend ONLINE / MARKET CLOSED'):'Backend ONLINE / WAITING FOR KITE');
+
+    const nowMs=Date.now();
+    if(forceTables||nowMs-aiLastTableRefresh>=30000){
+      aiLastTableRefresh=nowMs;
+      const names=['decisions','changes','learning','trades','versions','events'];
+      const settled=await Promise.allSettled(names.map(n=>aiGet('/api/ai-evolution/'+n)));
+      const get=i=>settled[i].status==='fulfilled'?settled[i].value:[];
+      const dec=get(0),changes=get(1),learning=get(2),tr=get(3),vs=get(4),ev=get(5);
+      if(dec[0]){
+        try{const snap=JSON.parse(dec[0].snapshot||'{}');aiSet('aiScore',aiFmt(dec[0].score));aiSet('aiSetupTitle',`${dec[0].symbol} — ${dec[0].decision} — ${dec[0].score}/100`);aiSet('aiSetupNote',(dec[0].reason||'')+(ls.stage?` · ${ls.stage} · effective gate ${Number(ls.effective_score??72).toFixed(1)}`:'')+(snap.ml_probability!=null?` · ML ${(Number(snap.ml_probability)*100).toFixed(1)}% · Deep ${(Number(snap.dl_probability??0.5)*100).toFixed(1)}% · Ensemble ${(Number(snap.research_probability??0.5)*100).toFixed(1)}% ± ${(Number(snap.research_uncertainty??0.5)*100).toFixed(1)}% · ${aiEsc(snap.market_regime||'UNKNOWN')}`:''));const c=snap.components||{};aiSet('aiTrend',aiFmt(c.trend));aiSet('aiMomentum',aiFmt(c.momentum));aiSet('aiVol',aiFmt(c.volatility));aiSet('aiPCR',aiFmt(snap.pcr));aiSet('aiIV',aiFmt(snap.iv)+'%');}catch(e){}
+      }
+      const ch=aiEl('aiChanges');if(ch)ch.innerHTML=changes.length?changes.map(x=>`<div class="ai-evo-learning"><b>${aiEsc(x.from_version)} → ${aiEsc(x.to_version)}</b> <span class="${aiStatusClass(x.status)}">${aiEsc(x.status)}</span><br>${aiEsc(x.hypothesis)}<br><span class="ai-evo-note">Change: ${aiEsc(x.change_json)} · Before: ${aiEsc(x.before_metrics)} · After: ${aiEsc(x.after_metrics||'awaiting evidence')} · Impact: ${aiEsc(x.impact)}</span></div>`).join(''):'<div class="ai-evo-note">No strategy change yet. The AI is collecting evidence.</div>';
+      const le=aiEl('aiLearning');if(le)le.innerHTML=learning.length?learning.slice(0,12).map(x=>`<div class="ai-evo-learning"><b>${aiEsc(x.ts)}</b> — ${aiEsc(x.observation)}<br><span class="ai-evo-note">Hypothesis: ${aiEsc(x.hypothesis)}<br>Action: ${aiEsc(x.action)}<br>Evidence: ${aiEsc(x.evidence)}</span></div>`).join(''):'<div class="ai-evo-note">No learning record yet.</div>';
+      const tt=aiEl('aiTradesTable');if(tt)tt.innerHTML=tr.map(x=>{let sj={};try{sj=JSON.parse(x.setup_json||'{}')}catch(e){};const fmtPair=(a,b)=>`${a!=null?aiFmt(a):'—'} / ${b!=null?aiFmt(b):'—'}`;return `<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.version)}</td><td>${aiEsc(x.symbol)}</td><td>${aiEsc(x.option_symbol)}</td><td>${aiEsc(x.side)}</td><td>${aiFmt(x.score)}</td><td>${aiFmt(x.entry)}</td><td>${aiFmt(x.exit)}</td><td>${aiFmt(x.entry_volume)}</td><td>${aiFmt(x.exit_volume)}</td><td>${fmtPair(x.entry_bid,x.entry_ask)}</td><td>${fmtPair(x.exit_bid,x.exit_ask)}</td><td class="${Number(x.pnl)>=0?'pnl-pos':'pnl-neg'}">${aiFmt(x.pnl)}</td><td>${aiFmt(x.r_multiple)}</td><td>${aiFmt(x.mfe)}%</td><td>${aiFmt(x.mae)}%</td><td>${sj.ml_probability!=null?(Number(sj.ml_probability)*100).toFixed(1)+'%':'—'}</td><td>${aiEsc(x.liquidity_status||'—')}</td><td>${aiEsc(x.status)}</td><td>${aiEsc(x.exit_reason||'')}</td></tr>`}).join('')||'<tr><td colspan="20">No paper transactions yet.</td></tr>';
+      const dt=aiEl('aiDecisionsTable');if(dt)dt.innerHTML=dec.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.version)}</td><td>${aiEsc(x.symbol)}</td><td>${aiFmt(x.score)}</td><td>${aiEsc(x.decision)}</td><td>${aiEsc(x.reason)}</td></tr>`).join('')||'<tr><td colspan="6">No decisions yet.</td></tr>';
+      const vt=aiEl('aiVersionsTable');if(vt)vt.innerHTML=vs.map(x=>`<tr><td>${aiEsc(x.version)}</td><td>${aiEsc(x.parent_version)}</td><td>${aiEsc(x.created_at)}</td><td><span class="${aiStatusClass(x.status)}">${aiEsc(x.status)}</span></td><td>${aiEsc(x.reason)}</td><td>${aiEsc(x.metrics)}</td></tr>`).join('');
+      const et=aiEl('aiEventsTable');if(et)et.innerHTML=ev.map(x=>`<tr><td>${aiEsc(x.ts)}</td><td>${aiEsc(x.level)}</td><td>${aiEsc(x.event)}</td><td>${aiEsc(x.detail)}</td></tr>`).join('');
+    }
+  }catch(e){aiSet('aiStatusText','AI status: '+e.message)}
   finally{aiRefreshBusy=false;}
 }
 
@@ -2539,7 +2555,11 @@ function updateAIInstitutionalLifecycle(s){
   const cp=document.getElementById('aiConnectionPillText');if(cp)cp.textContent=s.connected?'KITE / BACKEND ONLINE':'KITE CONNECTION REQUIRED';
 }
 
-function initAIEvolutionTab(){if(aiUiInited)return;aiUiInited=true;aiCycleBtn.onclick=async()=>{aiStatusText.textContent='Running one cycle…';try{await aiGet('/api/ai-evolution/cycle',{method:'POST'});await refreshAIEvolution();aiStatusText.textContent='Cycle complete.'}catch(e){aiStatusText.textContent=e.message}};refreshAIEvolution();aiUiTimer=setInterval(refreshAIEvolution,15000);}
+function initAIEvolutionTab(){
+  if(aiUiInited)return;aiUiInited=true;
+  if(aiCycleBtn)aiCycleBtn.onclick=async()=>{aiSet('aiStatusText','Running one cycle…');try{await aiGet('/api/ai-evolution/cycle',{method:'POST'});await refreshAIEvolution(true);aiSet('aiStatusText','Cycle complete.')}catch(e){aiSet('aiStatusText',e.message)}};
+  refreshAIEvolution(true);aiUiTimer=setInterval(()=>{if(document.visibilityState==='visible')refreshAIEvolution(false)},15000);
+}
 // Override only the top-level router, preserving the existing Condor and NIFTY Breakout tabs.
 const __originalSwitchTopTab = window.switchTopTab;
 window.switchTopTab=function(which){
