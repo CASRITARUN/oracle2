@@ -704,7 +704,104 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 .ai-lp-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}.ai-lp-step{padding:12px;border:1px solid #e2e6eb;border-radius:11px;background:#fff;min-width:0}.ai-lp-label{display:flex;justify-content:space-between;gap:7px;align-items:center;font-size:10px}.ai-lp-label b{color:#20252b}.ai-lp-label span{font-size:8px;color:#667085;letter-spacing:.06em;white-space:nowrap}.ai-lp-track{height:6px;margin:11px 0 8px;background:#edf0f3;border-radius:99px;overflow:hidden}.ai-lp-track i{display:block;height:100%;width:0;background:linear-gradient(90deg,#ff6338,#ff8a65);border-radius:99px;transition:width .5s ease}.ai-lp-meta{display:flex;justify-content:space-between;align-items:end;gap:5px}.ai-lp-meta strong{font-size:19px;color:#20252b}.ai-lp-meta small{font-size:8px;color:#667085;text-align:right}@media(max-width:1050px){.ai-lp-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:600px){.ai-lp-grid{grid-template-columns:1fr}}
 </style>
 <script>
-(function(){const $=id=>document.getElementById(id);function step(k,p,s,d){p=Math.max(0,Math.min(100,Number(p)||0));if($(k+'Bar'))$(k+'Bar').style.width=p+'%';if($(k+'Pct'))$(k+'Pct').textContent=p.toFixed(1).replace('.0','')+'%';if($(k+'Status'))$(k+'Status').textContent=s||'—';if($(k+'Detail'))$(k+'Detail').textContent=d||'';}async function aiLearningTelemetry(){try{const r=await fetch('/api/ai-evolution/learning-progress',{cache:'no-store'});if(!r.ok)return;const x=await r.json();if(!x.ok)return;step('aiLpHist',x.historical.progress,x.historical.status,(x.historical.candles||0).toLocaleString()+' candles');step('aiLpData',x.dataset.progress,x.dataset.status,(x.dataset.ml_samples||0)+' ML · '+(x.dataset.dl_samples||0)+' GRU samples');step('aiLpML',x.ml.progress,x.ml.status,x.ml.samples+' / '+x.ml.required+' samples'+(x.ml.status==='TRAINED'&&x.ml.accuracy!=null?' · '+Number(x.ml.accuracy).toFixed(1)+'% acc':''));step('aiLpDL',x.dl.progress,x.dl.status,x.dl.samples+' / '+x.dl.required+' sequences'+(x.dl.status==='TRAINED'&&x.dl.accuracy!=null?' · '+Number(x.dl.accuracy).toFixed(1)+'% acc':''));step('aiLpVal',x.validation.progress,x.validation.status,x.validation.samples+' / '+x.validation.required+' samples'+(x.validation.status==='TRAINED'&&x.validation.auc!=null?' · AUC '+Number(x.validation.auc).toFixed(3):''));if($('aiLpOverall'))$('aiLpOverall').textContent=Number(x.overall||0).toFixed(1).replace('.0','')+'%';}catch(e){}}aiLearningTelemetry();setInterval(aiLearningTelemetry,5000);})();
+(function(){
+  const $=id=>document.getElementById(id);
+
+  function step(k,p,s,d){
+    p=Math.max(0,Math.min(100,Number(p)||0));
+    if($(k+'Bar')) $(k+'Bar').style.width=p+'%';
+    if($(k+'Pct')) $(k+'Pct').textContent=p.toFixed(1).replace('.0','')+'%';
+    if($(k+'Status')) $(k+'Status').textContent=s||'—';
+    if($(k+'Detail')) $(k+'Detail').textContent=d||'';
+  }
+
+  function applyTelemetry(x){
+    if(!x) return;
+
+    const hist=x.historical||{};
+    const data=x.dataset||{};
+    const ml=x.ml||{};
+    const dl=x.dl||{};
+    const val=x.validation||{};
+
+    step('aiLpHist',
+      hist.progress,
+      hist.status||'WAITING',
+      (Number(hist.candles||0)).toLocaleString('en-IN')+' candles');
+
+    step('aiLpData',
+      data.progress,
+      data.status||'WAITING',
+      (Number(data.ml_samples||0))+' ML · '+(Number(data.dl_samples||0))+' GRU samples');
+
+    step('aiLpML',
+      ml.progress,
+      ml.status||'NOT STARTED',
+      (Number(ml.samples||0))+' / '+(Number(ml.required||40))+' samples'+
+      (ml.status==='TRAINED' && ml.accuracy!=null ? ' · '+Number(ml.accuracy).toFixed(1)+'% acc' : ''));
+
+    step('aiLpDL',
+      dl.progress,
+      dl.status||'NOT STARTED',
+      (Number(dl.samples||0))+' / '+(Number(dl.required||80))+' sequences'+
+      (dl.status==='TRAINED' && dl.accuracy!=null ? ' · '+Number(dl.accuracy).toFixed(1)+'% acc' : ''));
+
+    step('aiLpVal',
+      val.progress,
+      val.status||'WARMING',
+      (Number(val.samples||0))+' / '+(Number(val.required||120))+' samples'+
+      (val.status==='TRAINED' && val.auc!=null ? ' · AUC '+Number(val.auc).toFixed(3) : ''));
+
+    if($('aiLpOverall'))
+      $('aiLpOverall').textContent=Number(x.overall||0).toFixed(1).replace('.0','')+'%';
+  }
+
+  async function aiLearningTelemetry(){
+    try{
+      let r=await fetch('/api/ai-evolution/learning-progress',{cache:'no-store'});
+      if(r.ok){
+        const x=await r.json();
+        if(x && x.ok){ applyTelemetry(x); return; }
+      }
+
+      // Compatibility fallback: older backend versions already expose the
+      // complete /status payload. This keeps the UI populated during upgrades.
+      r=await fetch('/api/ai-evolution/status',{cache:'no-store'});
+      if(!r.ok) return;
+      const s=await r.json();
+      const h=s.historical||{};
+      const m=s.ml||{};
+      const d=s.deep_learning||{};
+      const rs=s.research||{};
+      const ls=s.learning||{};
+
+      const histPct=(String(h.status||'').toUpperCase().indexOf('COMPLETE')>=0)
+        ? 100
+        : (Number(h.candles||0)>0 ? Math.min(99,Number(h.candles||0)/300*100) : 0);
+
+      const mlPct=Math.min(100,Number(m.samples||0)/Math.max(1,Number(ls.ml_required||40))*100);
+      const dlPct=Math.min(100,Number(d.samples||0)/Math.max(1,Number(ls.dl_required||80))*100);
+      const valPct=Math.min(100,Number(rs.samples||0)/Math.max(1,Number(ls.research_required||120))*100);
+      const livePct=Math.min(mlPct,dlPct,valPct);
+      const overall=0.25*histPct+0.25*(h.model_status&&String(h.model_status).toUpperCase().indexOf('PRETRAINED')>=0?100:35)+0.50*livePct;
+
+      applyTelemetry({
+        overall,
+        historical:{progress:histPct,status:h.status||'WAITING',candles:h.candles||0},
+        dataset:{progress:h.candles?100:0,status:h.candles?'READY':'WAITING',ml_samples:m.samples||0,dl_samples:d.samples||0},
+        ml:{progress:mlPct,status:m.status||'NOT STARTED',samples:m.samples||0,required:ls.ml_required||40,accuracy:m.accuracy,auc:m.auc},
+        dl:{progress:dlPct,status:d.status||'NOT STARTED',samples:d.samples||0,required:ls.dl_required||80,accuracy:d.accuracy,auc:d.auc},
+        validation:{progress:valPct,status:rs.status||'WARMING',samples:rs.samples||0,required:ls.research_required||120,accuracy:rs.accuracy,auc:rs.auc}
+      });
+    }catch(e){
+      // Telemetry must never break the rest of the AI dashboard.
+      console.debug('AI learning telemetry unavailable',e);
+    }
+  }
+
+  aiLearningTelemetry();
+  setInterval(aiLearningTelemetry,5000);
+})();
 </script>
 
 <section class="ai-kpi-grid">
