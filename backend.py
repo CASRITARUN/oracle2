@@ -7152,6 +7152,23 @@ AI_HIST_MIN_TRAIN = int(os.environ.get("AI_HIST_MIN_TRAIN", "300"))
 AI_OPTION_CAPTURE_MINUTES = int(os.environ.get("AI_OPTION_CAPTURE_MINUTES", "5"))
 AI_OPTION_CAPTURE_DAYS = int(os.environ.get("AI_OPTION_CAPTURE_DAYS", "0"))  # 0 = retain indefinitely
 
+# Historical-status cache used by the dashboard telemetry endpoints.
+# These definitions are required by ai_hist_status() and the collector's
+# invalidation path. Keep the cache very short because collection/training
+# happens in background threads while the UI polls frequently.
+AI_HIST_STATUS_CACHE_SECONDS = float(
+    os.environ.get("AI_HIST_STATUS_CACHE_SECONDS", "2.0")
+)
+_AI_HIST_STATUS_CACHE_LOCK = threading.Lock()
+_AI_HIST_STATUS_CACHE = {"at": 0.0, "value": None}
+
+
+def _hist_invalidate_status_cache():
+    with _AI_HIST_STATUS_CACHE_LOCK:
+        _AI_HIST_STATUS_CACHE["at"] = 0.0
+        _AI_HIST_STATUS_CACHE["value"] = None
+
+
 AI_DEFAULTS = {
     # Mature AI gate. This remains deliberately strict once both learned models
     # have enough evidence to become entry gates.
