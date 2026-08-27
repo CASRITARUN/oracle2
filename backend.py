@@ -7152,16 +7152,6 @@ AI_HIST_MIN_TRAIN = int(os.environ.get("AI_HIST_MIN_TRAIN", "300"))
 AI_OPTION_CAPTURE_MINUTES = int(os.environ.get("AI_OPTION_CAPTURE_MINUTES", "5"))
 AI_OPTION_CAPTURE_DAYS = int(os.environ.get("AI_OPTION_CAPTURE_DAYS", "0"))  # 0 = retain indefinitely
 
-# Stability/performance controls for the large historical archive.
-AI_HIST_STATUS_CACHE_SECONDS = float(os.environ.get("AI_HIST_STATUS_CACHE_SECONDS", "5"))
-AI_HIST_TRAIN_RETRY_MINUTES = float(os.environ.get("AI_HIST_TRAIN_RETRY_MINUTES", "15"))
-AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL = int(os.environ.get("AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL", "1200"))
-AI_HIST_TRAIN_MAX_SAMPLES = int(os.environ.get("AI_HIST_TRAIN_MAX_SAMPLES", "2400"))
-AI_HIST_TRAIN_EPOCHS = int(os.environ.get("AI_HIST_TRAIN_EPOCHS", "24"))
-AI_HIST_TRAIN_LOCK = threading.Lock()
-_AI_HIST_STATUS_CACHE = {"at": 0.0, "value": None}
-_AI_HIST_STATUS_CACHE_LOCK = threading.Lock()
-
 AI_DEFAULTS = {
     # Mature AI gate. This remains deliberately strict once both learned models
     # have enough evidence to become entry gates.
@@ -7205,15 +7195,7 @@ def _ai_ts_naive(value):
 
 
 def ai_db():
-    c=sqlite3.connect(AI_DB_FILE, timeout=30, check_same_thread=False)
-    c.row_factory=sqlite3.Row
-    try:
-        c.execute("PRAGMA busy_timeout=10000")
-        c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    return c
+    c=sqlite3.connect(AI_DB_FILE); c.row_factory=sqlite3.Row; return c
 
 def ai_init_db():
     c=ai_db()
@@ -7236,10 +7218,8 @@ def ai_init_db():
     CREATE TABLE IF NOT EXISTS ai_hist_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,symbols TEXT,interval TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,status TEXT,lookback_days INTEGER);
     CREATE TABLE IF NOT EXISTS ai_option_snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,expiry TEXT,strike REAL,option_type TEXT,tradingsymbol TEXT,token INTEGER,spot REAL,ltp REAL,bid REAL,ask REAL,mid REAL,spread_pct REAL,volume REAL,oi REAL,iv REAL,delta REAL,source TEXT,UNIQUE(ts,symbol,expiry,strike,option_type));
     CREATE INDEX IF NOT EXISTS idx_ai_option_snapshots_symbol_ts ON ai_option_snapshots(symbol,ts);
+    CREATE INDEX IF NOT EXISTS idx_ai_hist_interval_symbol_ts ON ai_hist_candles(interval,symbol,ts);
     CREATE INDEX IF NOT EXISTS idx_ai_option_snapshots_contract_ts ON ai_option_snapshots(tradingsymbol,ts);
-    CREATE INDEX IF NOT EXISTS idx_ai_hist_symbol_interval_ts ON ai_hist_candles(symbol,interval,ts);
-    CREATE INDEX IF NOT EXISTS idx_ai_hist_interval_ts ON ai_hist_candles(interval,ts);
-    CREATE INDEX IF NOT EXISTS idx_ai_market_symbol_id ON ai_market(symbol,id);
     CREATE TABLE IF NOT EXISTS ai_research_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,models TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,probability REAL,uncertainty REAL,status TEXT,regime TEXT);
     """)
     for k,v in AI_DEFAULTS.items(): c.execute("INSERT OR IGNORE INTO ai_settings VALUES(?,?)",(k,str(v)))
@@ -7590,14 +7570,14 @@ def ai_dl_predict_sequence(seq):
     return p,ai_dl_model()
 
 
-def _ai_dl_train_arrays(X,Y,status_name="TRAINED",seed=42,epochs_override=None):
+def _ai_dl_train_arrays(X,Y,status_name="TRAINED",seed=42):
     X=np.asarray(X,dtype=float);Y=np.asarray(Y,dtype=float).reshape(-1)
     if len(X)<2 or len(set(Y.astype(int).tolist()))<2:return None
     # Chronological 80/20 holdout. No validation sample is used for fitting.
     cut=max(1,int(len(X)*0.8));cut=min(cut,len(X)-1)
     Xtr,Ytr=X[:cut],Y[:cut];Xv,Yv=X[cut:],Y[cut:]
     params=_gru_init(X.shape[2],DL_GRU_HIDDEN,seed)
-    p=ai_settings();lr=float(p.get("dl_learning_rate",0.01));epochs=min(60,max(8,int(epochs_override if epochs_override is not None else p.get("dl_epochs",30))))
+    p=ai_settings();lr=float(p.get("dl_learning_rate",0.01));epochs=min(60,max(8,int(p.get("dl_epochs",30))))
     bs=max(8,min(DL_BATCH_SIZE,len(Xtr)))
     rng=np.random.default_rng(seed)
     # Training batches remain chronological inside each batch; batch order may change, but
@@ -8099,12 +8079,15 @@ def ai_capture_option_chains(force=False):
 # Historical index data collector + pre-training layer
 # ---------------------------------------------------------------------------
 def ai_hist_status():
-    """Cached history status; safe for a frequent browser heartbeat."""
-    now_m=time.monotonic()
+    # History status is read by several dashboard endpoints every few seconds.
+    # Cache it briefly so a 600k+ row SQLite archive never becomes a web-request bottleneck.
+    now_m = time.monotonic()
     with _AI_HIST_STATUS_CACHE_LOCK:
-        cached=_AI_HIST_STATUS_CACHE.get("value")
-        if cached is not None and now_m-float(_AI_HIST_STATUS_CACHE.get("at",0)) < AI_HIST_STATUS_CACHE_SECONDS:
+        cached = _AI_HIST_STATUS_CACHE.get("value")
+        cached_at = float(_AI_HIST_STATUS_CACHE.get("at") or 0.0)
+        if cached is not None and now_m - cached_at < AI_HIST_STATUS_CACHE_SECONDS:
             return cached
+
     c=ai_db()
     rows=c.execute("SELECT symbol, COUNT(*) n, MIN(ts) first_ts, MAX(ts) last_ts FROM ai_hist_candles WHERE interval=? GROUP BY symbol",(AI_HIST_INTERVAL,)).fetchall()
     runs=c.execute("SELECT * FROM ai_hist_runs ORDER BY id DESC LIMIT 20").fetchall()
@@ -8114,11 +8097,24 @@ def ai_hist_status():
     oldest=c.execute("SELECT MIN(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     newest=c.execute("SELECT MAX(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     c.close()
-    value={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,"max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,"horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),"oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],"runs":[dict(r) for r in runs],"model":dict(model) if model else None,"last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),"train_detail":rt.get("hist_train_detail"),"status":rt.get("hist_status","WAITING FOR KITE"),"collector_status":rt.get("hist_collector_status",rt.get("hist_status","WAITING FOR KITE")),"model_status":rt.get("hist_model_status",(dict(model).get("status") if model else "NOT TRAINED")),"detail":rt.get("hist_detail",""),"archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),"training_requested":rt.get("hist_training_requested","0"),"training_started_at":rt.get("hist_training_started_at"),"training_error":rt.get("hist_training_error",""),"option_capture":ai_option_capture_status()}
+    result={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,
+            "max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,
+            "horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),
+            "oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],
+            "runs":[dict(r) for r in runs],"model":dict(model) if model else None,
+            "last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),
+            "train_detail":rt.get("hist_train_detail"),
+            "status":rt.get("hist_status","WAITING FOR KITE"),
+            "collector_status":rt.get("hist_status","WAITING FOR KITE"),
+            "model_status":rt.get("hist_model_status", (dict(model).get("status") if model else "NOT TRAINED")),
+            "detail":rt.get("hist_detail",""),
+            "db_file":AI_DB_FILE,
+            "archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),
+            "option_capture":ai_option_capture_status()}
     with _AI_HIST_STATUS_CACHE_LOCK:
-        _AI_HIST_STATUS_CACHE["at"]=now_m
-        _AI_HIST_STATUS_CACHE["value"]=value
-    return value
+        _AI_HIST_STATUS_CACHE["at"] = time.monotonic()
+        _AI_HIST_STATUS_CACHE["value"] = result
+    return result
 
 def _hist_feature_row(rows, i, arrays=None):
     """Fast, deterministic historical feature builder.
@@ -8202,7 +8198,7 @@ def _hist_training_sequences(symbol):
         "low":np.asarray([float(r["low"]) for r in rows],dtype=float),
         "volume":np.asarray([float(r.get("volume") or 0) for r in rows],dtype=float),
     }
-    max_points=AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL
+    max_points=1800
     step=max(1,usable//max_points)
     candidate=list(range(DL_SEQUENCE_LEN-1,usable,step))
     if candidate and candidate[-1] != usable-1:candidate.append(usable-1)
@@ -8230,7 +8226,7 @@ def _hist_set_status(status, detail=""):
     c=ai_db()
     c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",(status,))
     if detail:c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_detail',?)",(detail,))
-    c.commit();c.close()
+    c.commit();c.close();_hist_invalidate_status_cache()
 
 
 def _hist_set_model_status(status, detail=""):
@@ -8239,48 +8235,64 @@ def _hist_set_model_status(status, detail=""):
     if detail:c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_train_detail',?)",(detail,))
     c.commit();c.close()
 
-def _hist_invalidate_status_cache():
-    with _AI_HIST_STATUS_CACHE_LOCK:
-        _AI_HIST_STATUS_CACHE["at"]=0.0
-
 def ai_hist_train_deep(force=False):
-    """Pre-train the GRU from the historical archive in a bounded background job."""
-    if not AI_HIST_TRAIN_LOCK.acquire(blocking=False):
-        return ai_hist_status()
+    """Automatically pre-train the real GRU sequence brain from index candles.
+
+    Historical data is used only for market-state pre-training.  The 20-bar sequence
+    is fed to the recurrent GRU in time order; it is never flattened.  A chronological
+    80/20 holdout is kept completely outside gradient updates.  After pre-training,
+    completed live paper trades continue to refine the same sequence architecture.
+    """
     try:
-        started=datetime.now(IST).isoformat()
-        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_started_at',?)",(started,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_requested',?)",("0",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.commit();c.close()
-        _hist_set_model_status("BUILDING SEQUENCES","Preparing chronological GRU sequences from historical archive")
+        _hist_set_model_status("BUILDING SEQUENCES", "Preparing 20-state chronological GRU sequences")
         allx=[];ally=[];all_times=[];per_symbol={}
         for sym in AI_HIST_SYMBOLS:
             try:
-                x,y,t=_hist_training_sequences(sym);per_symbol[sym]=len(x);allx.extend(x);ally.extend(y);all_times.extend(t);ai_log("LEARNING","HIST_SEQUENCE_BUILD",f"{sym}: GRU sequences={len(x)}")
+                x,y,t=_hist_training_sequences(sym);per_symbol[sym]=len(x);allx.extend(x);ally.extend(y);all_times.extend(t)
+                ai_log("LEARNING","HIST_SEQUENCE_BUILD",f"{sym}: GRU sequences={len(x)}")
             except Exception as e:
                 per_symbol[sym]=0;ai_log("ERROR","HIST_SEQUENCE_BUILD",f"{sym}: {e}")
+        # Merge the three index streams by sequence-end timestamp so the validation set is a true
+        # chronological walk-forward slice across the combined market universe, not a symbol-block split.
         if allx and len(allx)==len(ally)==len(all_times):
-            order=sorted(range(len(allx)),key=lambda i:all_times[i]);allx=[allx[i] for i in order];ally=[ally[i] for i in order]
+            order=sorted(range(len(allx)), key=lambda i: all_times[i])
+            allx=[allx[i] for i in order]; ally=[ally[i] for i in order]
+
         if len(allx)<AI_HIST_MIN_TRAIN:
-            detail=f"sequences={len(allx)} need={AI_HIST_MIN_TRAIN} per_symbol={per_symbol}";_hist_set_model_status("READY — NEED MORE TRAINING SAMPLES",detail);return ai_hist_status()
+            detail=f"sequences={len(allx)} need={AI_HIST_MIN_TRAIN} per_symbol={per_symbol}"
+            _hist_set_model_status("READY — NEED MORE TRAINING SAMPLES",detail);return ai_hist_status()
         if len(set(ally))<2:
-            detail=f"only one target class in historical labels; samples={len(ally)}";_hist_set_model_status("READY — TARGET CLASS INSUFFICIENT",detail);return ai_hist_status()
+            detail=f"only one target class in historical labels; samples={len(ally)}"
+            _hist_set_model_status("READY — TARGET CLASS INSUFFICIENT",detail);return ai_hist_status()
+
         X=np.asarray(allx,dtype=float);Y=np.asarray(ally,dtype=float)
-        if len(X)>AI_HIST_TRAIN_MAX_SAMPLES:X=X[-AI_HIST_TRAIN_MAX_SAMPLES:];Y=Y[-AI_HIST_TRAIN_MAX_SAMPLES:]
-        _hist_set_model_status("TRAINING GRU SEQUENCE MODEL",f"GRU hidden={DL_GRU_HIDDEN} sequence_len={DL_SEQUENCE_LEN} samples={len(X)} epochs={AI_HIST_TRAIN_EPOCHS}")
-        trained=_ai_dl_train_arrays(X,Y,"HISTORICAL_PRETRAINED",seed=20260825,epochs_override=AI_HIST_TRAIN_EPOCHS)
+        if len(X)>DL_MAX_TRAIN_SAMPLES:
+            # Preserve chronology within the retained research window.
+            X=X[-DL_MAX_TRAIN_SAMPLES:];Y=Y[-DL_MAX_TRAIN_SAMPLES:]
+        _hist_set_model_status("TRAINING GRU SEQUENCE MODEL",f"GRU hidden={DL_GRU_HIDDEN} sequence_len={DL_SEQUENCE_LEN} samples={len(X)}")
+        trained=_ai_dl_train_arrays(X,Y,"HISTORICAL_PRETRAINED",seed=20260825)
         if not trained:
-            detail="GRU training returned no two-class model";_hist_set_model_status("TRAINING ERROR — RETRYING",detail);c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",(detail,));c.commit();c.close();return ai_hist_status()
+            _hist_set_model_status("TRAINING ERROR — RETRYING","GRU training could not produce a two-class model")
+            return ai_hist_status()
         params,acc,auc,samples,train_samples,val_samples=trained
+        # Persist the same model used by live paper learning.  This is deliberate: historical
+        # knowledge is a starting point, while future completed paper trades refine it.
         _ai_dl_persist(params,acc,auc,samples,train_samples,val_samples,status="HISTORICAL_PRETRAINED")
-        now=datetime.now(IST).isoformat();c=ai_db();hist_status="PRETRAINED" if val_samples and len(set(Y[-val_samples:].astype(int).tolist()))>=2 else "PRETRAINED — AUC UNAVAILABLE"
-        c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days) VALUES(1,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS))
-        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_train_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("PRETRAINED — LIVE GRU LEARNING CONTINUES",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_collector_status',?)",("HISTORY COLLECTION COMPLETE",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_train_detail',?)",(f"architecture=GRU-{DL_GRU_HIDDEN} sequence={DL_SEQUENCE_LEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",));c.commit();c.close()
-        ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}");return ai_hist_status()
+        now=datetime.now(IST).isoformat();c=ai_db()
+        hist_status="PRETRAINED" if val_samples and len(set(Y[-val_samples:].astype(int).tolist()))>=2 else "PRETRAINED — AUC UNAVAILABLE"
+        c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days) VALUES(1,?,?,?,?,?,?,?,?,?,?)",
+                  (now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS))
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_train_at',?)",(now,))
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("PRETRAINED — LIVE GRU LEARNING CONTINUES",))
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_train_detail',?)",(f"architecture=GRU-{DL_GRU_HIDDEN} sequence={DL_SEQUENCE_LEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",))
+        c.commit();c.close()
+        ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}")
+        return ai_hist_status()
     except Exception as e:
-        logger.exception("historical GRU pre-training failed");detail=f"{type(e).__name__}: {e}";_hist_set_model_status("TRAINING ERROR — RETRYING",detail);ai_log("ERROR","HISTORICAL_GRU_TRAIN",detail);c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",(detail,));c.commit();c.close();return ai_hist_status()
-    finally:
-        try:AI_HIST_TRAIN_LOCK.release()
-        except Exception:pass
-        _hist_invalidate_status_cache()
+        logger.exception("historical GRU pre-training failed")
+        detail=f"{type(e).__name__}: {e}"
+        _hist_set_model_status("TRAINING ERROR — RETRYING",detail);ai_log("ERROR","HISTORICAL_GRU_TRAIN",detail)
+        return ai_hist_status()
 
 def _hist_insert_candles(symbol, candles):
     """Insert a historical response and deduplicate by symbol/interval/timestamp."""
@@ -8293,7 +8305,7 @@ def _hist_insert_candles(symbol, candles):
             added += c.rowcount
         except Exception:
             pass
-    c.commit(); c.close()
+    c.commit(); c.close(); _hist_invalidate_status_cache()
     return added
 
 
@@ -8374,39 +8386,49 @@ def ai_hist_sync_symbol(symbol):
 
 def ai_hist_sync():
     if not require_session():
-        _hist_set_status("WAITING FOR KITE","Connect Kite; historical collection will resume automatically.");return ai_hist_status()
-    _hist_set_status("COLLECTING MAXIMUM KITE HISTORY",f"target={AI_HIST_MAX_YEARS:.1f} years; {AI_HIST_INTERVAL}; request_chunk={AI_HIST_CHUNK_DAYS}")
-    ai_log("DATA","HISTORICAL_SYNC_START",f"target={AI_HIST_MAX_YEARS:.1f}y; symbols={','.join(AI_HIST_SYMBOLS)}")
+        _hist_set_status("WAITING FOR KITE", "Connect Kite; historical collection will resume automatically.")
+        return ai_hist_status()
+    _hist_set_status("COLLECTING MAXIMUM KITE HISTORY",f"target={AI_HIST_MAX_YEARS:.1f} years; {AI_HIST_INTERVAL}; request_chunk={AI_HIST_CHUNK_DAYS} days; fresh archive")
+    ai_log("DATA","HISTORICAL_SYNC_START",f"fresh archive={AI_DB_FILE}; target={AI_HIST_MAX_YEARS:.1f}y; symbols={','.join(AI_HIST_SYMBOLS)}")
     results=[ai_hist_sync_symbol(sym) for sym in AI_HIST_SYMBOLS]
-    now=datetime.now(IST).isoformat();all_ok=all(x.get("status") in ("OK","NO_DATA") for x in results);overall="HISTORY COLLECTION COMPLETE" if all_ok else "HISTORY COLLECTION PARTIAL — RETRYING"
-    c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_sync_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",(overall,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_collector_status',?)",(overall,));
-    if all_ok:c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_requested',?)",("1",))
-    c.commit();c.close();_hist_invalidate_status_cache();ai_log("DATA","HISTORICAL_SYNC_COMPLETE",f"status={overall}; results={results}")
-    return {"results":results,"training":{"status":"QUEUED" if all_ok else "WAITING FOR COMPLETE HISTORY"},**ai_hist_status()}
+    now=datetime.now(IST).isoformat()
+    all_ok=all(x.get("status") in ("OK","NO_DATA") for x in results)
+    overall="HISTORY COLLECTION COMPLETE" if all_ok else "HISTORY COLLECTION PARTIAL — RETRYING"
+    c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_sync_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",(overall,));c.commit();c.close()
+    ai_log("DATA","HISTORICAL_SYNC_COMPLETE",f"status={overall}; results={results}")
+    trained=ai_hist_train_deep();return {"results":results,"training":trained,**ai_hist_status()}
 
 def ai_hist_loop():
     ai_init_db()
     while True:
         try:
+            # Sync when logged in; the dashboard is not required to be open.
             if require_session():
-                hs=ai_hist_status();last=hs.get("last_sync_at");due=True
+                last=ai_hist_status().get("last_sync_at")
+                due=True
                 if last:
-                    dt=_ai_ts_naive(last);due=not dt or (now_ist()-dt).total_seconds()>=AI_HIST_SYNC_HOURS*3600
+                    try:due=(now_ist()-_ai_ts_naive(last)).total_seconds()>=AI_HIST_SYNC_HOURS*3600 if _ai_ts_naive(last) else True
+                    except Exception:pass
                 if due:
-                    ai_hist_sync();hs=ai_hist_status()
-                opt_last=ai_option_capture_status().get("last_capture_at");opt_due=True
+                    ai_hist_sync()
+                # Live option-chain recorder: builds genuine historical option data from this point forward.
+                opt_last=ai_option_capture_status().get("last_capture_at")
+                opt_due=True
                 if opt_last:
-                    dt=_ai_ts_naive(opt_last);opt_due=not dt or (now_ist()-dt).total_seconds()>=AI_OPTION_CAPTURE_MINUTES*60
-                if opt_due and ai_market_open():ai_capture_option_chains()
-                hs=ai_hist_status();model=hs.get("model") or {};total=int(hs.get("candles") or 0);requested=str(hs.get("training_requested") or "0")=="1";model_missing=not int(model.get("samples") or 0);retry_due=True
-                if hs.get("last_train_at"):
-                    dt=_ai_ts_naive(hs.get("last_train_at"));retry_due=not dt or (now_ist()-dt).total_seconds()>=AI_HIST_TRAIN_RETRY_MINUTES*60
-                if total>=AI_HIST_MIN_TRAIN and (requested or (model_missing and retry_due)):ai_hist_train_deep()
+                    try:opt_due=(now_ist()-_ai_ts_naive(opt_last)).total_seconds()>=AI_OPTION_CAPTURE_MINUTES*60 if _ai_ts_naive(opt_last) else True
+                    except Exception:pass
+                if opt_due and ai_market_open():
+                    ai_capture_option_chains()
+                else:
+                    hs=ai_hist_status(); model=hs.get("model") or {}
+                    total=sum(int(x.get("n") or 0) for x in hs.get("symbols",[]))
+                    # If data already exists but pre-training never completed (or failed),
+                    # retry without requiring a manual dashboard action.
+                    if total>=AI_HIST_MIN_TRAIN and not model.get("samples"):
+                        ai_hist_train_deep()
         except Exception as e:
             ai_log("ERROR","HISTORICAL_ENGINE",f"{type(e).__name__}: {e}")
-            try:
-                hs=ai_hist_status();_hist_set_status("HISTORY COLLECTION COMPLETE" if hs.get("candles",0)>=AI_HIST_MIN_TRAIN else "COLLECTOR RETRYING",f"{type(e).__name__}: {e}")
-            except Exception:pass
+            _hist_set_status("COLLECTOR RETRYING",f"{type(e).__name__}: {e}")
         time.sleep(300)
 
 def ai_loop():
@@ -8423,7 +8445,167 @@ def ai_status():
     universe=ai_universe()
     c=ai_db(); rt={r['key']:r['value'] for r in c.execute('SELECT key,value FROM ai_runtime').fetchall()}; c.close(); ml=ai_ml_model()
     learning=ai_learning_state()
-    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now(IST).isoformat(),'last_cycle_at':rt.get('last_cycle_at'),'last_activity_at':rt.get('last_activity_at'),'last_scan_at':rt.get('last_scan_at'),'ml':ml,'deep_learning':ai_dl_model(),'research':ai_research_predict({}),'learning':learning,'historical':ai_hist_status()})
+    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now(IST).isoformat(),'last_cycle_at':rt.get('last_cycle_at'),'last_activity_at':rt.get('last_activity_at'),'last_scan_at':rt.get('last_scan_at'),'ml':ml,'deep_learning':ai_dl_model(),'research':_research_model(),'learning':learning,'historical':ai_hist_status()})
+
+
+@app.route('/api/ai-evolution/learning-progress')
+def ai_learning_progress_api():
+    """Lightweight live telemetry for the AI Learning Pipeline.
+
+    This endpoint MUST NOT start training or call Kite. It only reads the
+    already-maintained local AI database/runtime state, so the dashboard
+    remains responsive while collection/training happens in background threads.
+    """
+    try:
+        ai_init_db()
+        hist = ai_hist_status()
+        ml = ai_ml_model()
+        dl = ai_dl_model()
+        research = _research_model()
+
+        p = ai_params()
+        ml_required = max(1, int(p.get("ml_min_samples", 40)))
+        dl_required = max(1, int(p.get("dl_min_samples", 80)))
+        val_required = max(1, int(p.get("research_min_samples", 120)))
+
+        candles = int(hist.get("candles") or 0)
+        hist_status = str(hist.get("status") or hist.get("collector_status") or "WAITING FOR KITE")
+        model_status = str(hist.get("model_status") or "NOT TRAINED")
+        hist_model = hist.get("model") or {}
+
+        # Historical collection:
+        # COMPLETE means the collector reached Kite's actual available boundary.
+        # Otherwise show bounded coverage based on the configured research window.
+        if "COMPLETE" in hist_status.upper():
+            hist_pct = 100.0
+        elif candles > 0:
+            lookback = max(1, int(hist.get("lookback_days") or round(float(hist.get("max_years") or 12) * 365)))
+            oldest = hist.get("oldest")
+            newest = hist.get("newest")
+            coverage = 0.0
+            try:
+                from datetime import datetime as _dt
+                o = _dt.fromisoformat(str(oldest).replace("Z", "+00:00"))
+                n = _dt.fromisoformat(str(newest).replace("Z", "+00:00"))
+                coverage = max(0.0, (n - o).total_seconds() / 86400.0) / lookback
+            except Exception:
+                coverage = min(0.99, candles / max(1, lookback * 75 * 252 / 365))
+            hist_pct = min(99.0, max(1.0, coverage * 100.0))
+        else:
+            hist_pct = 0.0
+
+        # Dataset preparation is based on having enough local historical rows
+        # to build the bounded chronological training set. This is a read-only
+        # readiness metric; it never fabricates sequences.
+        dataset_pct = min(100.0, candles / max(1, 300) * 100.0) if candles else 0.0
+        dataset_status = (
+            "READY" if candles >= 300 else
+            "PREPARING" if candles > 0 else
+            "WAITING"
+        )
+
+        # Historical GRU pre-training is a separate 25% research stage.
+        hist_gru_samples = int(hist_model.get("samples") or 0)
+        if str(model_status).upper().startswith("PRETRAINED"):
+            hist_gru_pct = 100.0
+            hist_gru_status = "PRETRAINED"
+        elif "TRAINING GRU" in model_status.upper():
+            hist_gru_pct = 60.0 if hist_gru_samples == 0 else min(95.0, 60.0 + hist_gru_samples / 3000.0 * 35.0)
+            hist_gru_status = "TRAINING"
+        elif "BUILDING SEQUENCES" in model_status.upper():
+            hist_gru_pct = 35.0
+            hist_gru_status = "BUILDING"
+        elif "READY" in model_status.upper():
+            hist_gru_pct = min(30.0, hist_gru_samples / max(1, 300) * 30.0)
+            hist_gru_status = "READY"
+        else:
+            hist_gru_pct = 0.0
+            hist_gru_status = "WAITING"
+
+        ml_samples = int(ml.get("samples") or 0)
+        dl_samples = int(dl.get("samples") or 0)
+        val_samples = int(research.get("samples") or 0)
+
+        ml_pct = min(100.0, ml_samples / ml_required * 100.0)
+        dl_pct = min(100.0, dl_samples / dl_required * 100.0)
+        val_pct = min(100.0, val_samples / val_required * 100.0)
+
+        ml_status = str(ml.get("status") or "NOT STARTED")
+        dl_status = str(dl.get("status") or "NOT STARTED")
+        val_status = str(research.get("status") or "WARMING")
+
+        # Research-grade overall progress follows the documented architecture:
+        # 25% history collection + 25% historical GRU pre-training +
+        # 50% live evidence (weakest of ML / GRU / ensemble validation).
+        live_evidence_pct = min(ml_pct, dl_pct, val_pct)
+        overall = (
+            0.25 * hist_pct +
+            0.25 * hist_gru_pct +
+            0.50 * live_evidence_pct
+        )
+
+        return jsonify({
+            "ok": True,
+            "overall": round(overall, 1),
+            "historical": {
+                "progress": round(hist_pct, 1),
+                "status": hist_status,
+                "candles": candles,
+                "oldest": hist.get("oldest"),
+                "newest": hist.get("newest"),
+                "detail": hist.get("detail") or "",
+            },
+            "dataset": {
+                "progress": round(dataset_pct, 1),
+                "status": dataset_status,
+                "ml_samples": ml_samples,
+                "dl_samples": dl_samples,
+                "detail": "Historical candles available for chronological feature/sequence preparation",
+            },
+            "historical_gru": {
+                "progress": round(hist_gru_pct, 1),
+                "status": hist_gru_status,
+                "samples": hist_gru_samples,
+                "required": 300,
+                "detail": hist.get("train_detail") or "",
+            },
+            "ml": {
+                "progress": round(ml_pct, 1),
+                "status": ml_status,
+                "samples": ml_samples,
+                "required": ml_required,
+                "accuracy": ml.get("accuracy"),
+                "auc": ml.get("auc"),
+            },
+            "dl": {
+                "progress": round(dl_pct, 1),
+                "status": dl_status,
+                "samples": dl_samples,
+                "required": dl_required,
+                "accuracy": dl.get("accuracy"),
+                "auc": dl.get("auc"),
+            },
+            "validation": {
+                "progress": round(val_pct, 1),
+                "status": val_status,
+                "samples": val_samples,
+                "required": val_required,
+                "accuracy": research.get("accuracy"),
+                "auc": research.get("auc"),
+            },
+            "live_evidence": {
+                "progress": round(live_evidence_pct, 1),
+                "status": "READY" if live_evidence_pct >= 100 else "BUILDING",
+            },
+            "learning": ai_learning_state(),
+            "timestamp": datetime.now(IST).isoformat(),
+        })
+    except Exception as exc:
+        logger.exception("AI learning telemetry failed")
+        return jsonify({
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}"
+        }), 500
 
 @app.route('/api/ai-evolution/trades')
 def ai_trades_api():
@@ -8492,6 +8674,11 @@ threading.Thread(target=_breakout_monitor_loop, daemon=True).start()
 @app.route("/")
 def index():
     return send_from_directory(os.path.dirname(__file__), "index.html")
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok": True, "service": "tradingbot"})
 
 
 
