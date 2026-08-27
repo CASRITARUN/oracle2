@@ -8202,7 +8202,7 @@ def _hist_training_sequences(symbol):
         (symbol,AI_HIST_INTERVAL)).fetchall()]
     c.close()
     need=DL_SEQUENCE_LEN+AI_HIST_HORIZON_BARS+5
-    if len(rows)<need:return [],[]
+    if len(rows)<need:return [],[],[]
 
     # Keep training bounded for the Oracle VM.  We deliberately sample chronologically,
     # rather than randomly, so the eventual 80/20 split remains a genuine walk-forward test.
@@ -8465,7 +8465,17 @@ def ai_hist_sync():
         return ai_hist_status()
     _hist_set_status("COLLECTING MAXIMUM KITE HISTORY",f"target={AI_HIST_MAX_YEARS:.1f} years; {AI_HIST_INTERVAL}; request_chunk={AI_HIST_CHUNK_DAYS} days; fresh archive")
     ai_log("DATA","HISTORICAL_SYNC_START",f"fresh archive={AI_DB_FILE}; target={AI_HIST_MAX_YEARS:.1f}y; symbols={','.join(AI_HIST_SYMBOLS)}")
-    results=[ai_hist_sync_symbol(sym) for sym in AI_HIST_SYMBOLS]
+    # Isolate each symbol: one bad Kite response must never abort the entire
+    # synchronization before the final archive status is written.
+    results=[]
+    for sym in AI_HIST_SYMBOLS:
+        try:
+            results.append(ai_hist_sync_symbol(sym))
+        except Exception as exc:
+            detail=f"{type(exc).__name__}: {exc}"
+            ai_log("ERROR","HISTORICAL_SYMBOL_SYNC",f"{sym}: {detail}")
+            results.append({"symbol":sym,"status":"ERROR","rows_added":0,"fetched":0,
+                            "chunks":0,"requested_chunks":0,"detail":detail,"errors":[detail]})
     now=datetime.now(IST).isoformat()
     all_ok=all(x.get("status") in ("OK","NO_DATA") for x in results)
     # If every index already has a substantial local archive, treat the configured
@@ -8494,49 +8504,71 @@ def ai_hist_sync():
 def ai_hist_loop():
     ai_init_db()
     while True:
+        # Historical collector has its own error boundary.  Option-chain capture or
+        # another auxiliary task must never overwrite a healthy historical status.
         try:
-            # Sync when logged in; the dashboard is not required to be open.
             if require_session():
                 hs0=ai_hist_status()
                 last=hs0.get("last_sync_at")
                 due=True
                 if last:
-                    try:due=(now_ist()-_ai_ts_naive(last)).total_seconds()>=AI_HIST_SYNC_HOURS*3600 if _ai_ts_naive(last) else True
-                    except Exception:pass
-                # Reconcile an old RETRYING flag immediately when the local archive
-                # is already complete enough to train. This also handles upgrades
-                # where the previous process persisted a stale retry state.
-                stale_retry = "RETRYING" in str(hs0.get("status") or "").upper()
+                    try:
+                        due=(now_ist()-_ai_ts_naive(last)).total_seconds()>=AI_HIST_SYNC_HOURS*3600 if _ai_ts_naive(last) else True
+                    except Exception:
+                        pass
+
+                stale_retry="RETRYING" in str(hs0.get("status") or "").upper()
                 archive_ready=False
                 try:
                     c=ai_db(); archive_ready=True
                     for sym in AI_HIST_SYMBOLS:
-                        rr=c.execute("SELECT COUNT(*) n, MIN(ts) first_ts, MAX(ts) last_ts FROM ai_hist_candles WHERE symbol=? AND interval=?",(sym,AI_HIST_INTERVAL)).fetchone()
-                        if not rr or int(rr["n"] or 0) < 100000 or not rr["first_ts"] or not rr["last_ts"]:
+                        rr=c.execute(
+                            "SELECT COUNT(*) n, MIN(ts) first_ts, MAX(ts) last_ts "
+                            "FROM ai_hist_candles WHERE symbol=? AND interval=?",
+                            (sym,AI_HIST_INTERVAL)
+                        ).fetchone()
+                        if not rr or int(rr["n"] or 0)<100000 or not rr["first_ts"] or not rr["last_ts"]:
                             archive_ready=False; break
                     c.close()
                 except Exception:
                     archive_ready=False
+
                 if due or (stale_retry and archive_ready):
                     ai_hist_sync()
-                # Live option-chain recorder: builds genuine historical option data from this point forward.
+
+                # If a healthy archive exists, never leave a stale collector retry
+                # flag behind merely because a later auxiliary operation failed.
+                if archive_ready:
+                    hs=ai_hist_status()
+                    if "RETRYING" in str(hs.get("status") or "").upper():
+                        _hist_set_status("HISTORY COLLECTION COMPLETE",
+                                         "Local historical archive complete at Kite availability boundary")
+
+                # Retry historical pre-training independently of the collector state.
+                hs=ai_hist_status(); model=hs.get("model") or {}
+                total=sum(int(x.get("n") or 0) for x in hs.get("symbols",[]))
+                if total>=AI_HIST_MIN_TRAIN and not model.get("samples"):
+                    ai_hist_train_deep()
+        except Exception as e:
+            ai_log("ERROR","HISTORICAL_ENGINE",f"{type(e).__name__}: {e}")
+            # Only this historical-engine exception is allowed to mark the collector
+            # retrying; option-chain/live tasks are handled below.
+            _hist_set_status("COLLECTOR RETRYING",f"{type(e).__name__}: {e}")
+
+        try:
+            if require_session():
                 opt_last=ai_option_capture_status().get("last_capture_at")
                 opt_due=True
                 if opt_last:
-                    try:opt_due=(now_ist()-_ai_ts_naive(opt_last)).total_seconds()>=AI_OPTION_CAPTURE_MINUTES*60 if _ai_ts_naive(opt_last) else True
-                    except Exception:pass
+                    try:
+                        opt_due=(now_ist()-_ai_ts_naive(opt_last)).total_seconds()>=AI_OPTION_CAPTURE_MINUTES*60 if _ai_ts_naive(opt_last) else True
+                    except Exception:
+                        pass
                 if opt_due and ai_market_open():
                     ai_capture_option_chains()
-                else:
-                    hs=ai_hist_status(); model=hs.get("model") or {}
-                    total=sum(int(x.get("n") or 0) for x in hs.get("symbols",[]))
-                    # If data already exists but pre-training never completed (or failed),
-                    # retry without requiring a manual dashboard action.
-                    if total>=AI_HIST_MIN_TRAIN and not model.get("samples"):
-                        ai_hist_train_deep()
         except Exception as e:
-            ai_log("ERROR","HISTORICAL_ENGINE",f"{type(e).__name__}: {e}")
-            _hist_set_status("COLLECTOR RETRYING",f"{type(e).__name__}: {e}")
+            ai_log("ERROR","OPTION_CAPTURE_ENGINE",f"{type(e).__name__}: {e}")
+
         time.sleep(300)
 
 def ai_loop():
