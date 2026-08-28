@@ -7627,7 +7627,7 @@ def ai_dl_train():
 
 def _ai_dl_persist(params,acc,auc,samples,train_samples,val_samples,status="TRAINED"):
     updated=datetime.now(IST).isoformat();blob=json.dumps(_gru_to_json(params),separators=(",",":"));c=ai_db()
-    c.execute("""INSERT OR REPLACE INTO ai_dl_model(id,updated_at,w1,b1,w2,b2,w3,b3,samples,accuracy,auc,status) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)""",
+    c.execute("""INSERT OR REPLACE INTO ai_dl_model(id,updated_at,w1,b1,w2,b2,w3,b3,samples,accuracy,auc,status) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (updated,blob,"GRU",json.dumps({"hidden":DL_GRU_HIDDEN}),"GRU",json.dumps({"sequence_len":DL_SEQUENCE_LEN}),"GRU",0.0,samples,acc,auc,status))
     c.commit();c.close();ai_log("LEARNING","DL_GRU_TRAIN",f"GRU sequence model samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}")
     return {**ai_dl_model(),"train_samples":train_samples,"validation_samples":val_samples}
@@ -8281,10 +8281,12 @@ def ai_hist_train_deep(force=False):
             _hist_set_model_status("READY — TARGET CLASS INSUFFICIENT",detail);return ai_hist_status()
 
         X=np.asarray(allx,dtype=float);Y=np.asarray(ally,dtype=float)
-        if len(X)>DL_MAX_TRAIN_SAMPLES:
-            # Preserve chronology within the retained research window.
-            X=X[-DL_MAX_TRAIN_SAMPLES:];Y=Y[-DL_MAX_TRAIN_SAMPLES:]
-        _hist_set_model_status("TRAINING GRU SEQUENCE MODEL",f"GRU hidden={DL_GRU_HIDDEN} sequence_len={DL_SEQUENCE_LEN} samples={len(X)}")
+        # Historical pre-training uses ALL available historical sequences.
+        # Do not apply the live-learning cap here: the archive is the intended
+        # long-term historical knowledge base. _ai_dl_train_arrays keeps the
+        # chronological 80/20 holdout completely outside gradient updates.
+        _hist_set_model_status("TRAINING GRU SEQUENCE MODEL",f"GRU hidden={DL_GRU_HIDDEN} sequence_len={DL_SEQUENCE_LEN} samples={len(X)} using ALL historical sequences")
+        ai_log("LEARNING","HISTORICAL_GRU_DATASET",f"Using ALL historical GRU sequences={len(X)}; chronological 80/20 holdout; no historical sample cap")
         trained=_ai_dl_train_arrays(X,Y,"HISTORICAL_PRETRAINED",seed=20260825)
         if not trained:
             _hist_set_model_status("TRAINING ERROR — RETRYING","GRU training could not produce a two-class model")
