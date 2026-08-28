@@ -8676,10 +8676,33 @@ def ai_directional_status():
         "min_score": AI_DIRECTIONAL_MIN_SCORE,
         "historical_gru": dl,
         "live_ml": ml,
+        "historical_ml": {
+            "samples": 0, "accuracy": None, "auc": None,
+            "status": "NOT SEPARATELY PRETRAINED",
+            "note": "Historical archive is used by the GRU pre-training layer; live ML learns from completed paper outcomes."
+        },
         "historical": hs,
         "open_directional_trades": [t for t in ai_open_trades() if (json.loads(t.get('setup_json') or '{}').get('strategy_type') == 'INDEX_DIRECTIONAL_LONG_OPTION')],
         "last_cycle_at": rt.get('last_cycle_at'),
         "last_activity_at": rt.get('last_activity_at'),
+    })
+
+@app.route('/api/ai-evolution/learning-progress')
+def ai_learning_progress_api():
+    """Stable learning telemetry for the AI dashboard."""
+    ai_init_db(); hs=ai_hist_status(); ml=ai_ml_model(); dl=ai_dl_model()
+    total=int(hs.get('candles',0) or 0); model=hs.get('model') or {}
+    hist_samples=int(model.get('samples',0) or 0); train_samples=int(model.get('train_samples',0) or 0); val_samples=int(model.get('validation_samples',0) or 0)
+    ml_samples=int(ml.get('samples',0) or 0); dl_samples=int(dl.get('samples',0) or 0)
+    hist_ready=total>0 and (bool(model) or str(hs.get('status','')).upper().startswith('HISTORY COLLECTION COMPLETE'))
+    ml_need=max(1,int(ai_params().get('ml_min_samples',40))); dl_need=max(1,int(ai_params().get('dl_min_samples',80)))
+    live_progress=min(100.0,max(ml_samples/ml_need*100.0,dl_samples/dl_need*100.0))
+    return jsonify({
+        'historical': {'progress':100 if hist_ready else (100 if total else 0),'status':hs.get('status','WAITING FOR KITE'),'candles':total,'oldest':hs.get('oldest'),'newest':hs.get('newest')},
+        'ml': {'progress':min(100.0,ml_samples/ml_need*100.0),'status':ml.get('status','WAITING FOR PAPER OUTCOMES') if ml_samples else 'WAITING FOR PAPER OUTCOMES','samples':ml_samples,'accuracy':ml.get('accuracy'),'auc':ml.get('auc')},
+        'dl': {'progress':100 if hist_samples else min(100.0,dl_samples/dl_need*100.0),'status':model.get('status') or dl.get('status') or 'NOT TRAINED','samples':hist_samples or dl_samples,'train_samples':train_samples,'validation_samples':val_samples,'accuracy':model.get('accuracy',dl.get('accuracy')),'auc':model.get('auc',dl.get('auc'))},
+        'validation': {'progress':100 if val_samples else 0,'status':f'{val_samples:,} chronological validation samples' if val_samples else 'WAITING'},
+        'live': {'ml_samples':ml_samples,'dl_samples':dl_samples,'progress':live_progress}
     })
 
 @app.route('/api/ai-evolution/status')
