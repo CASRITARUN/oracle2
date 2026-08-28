@@ -7155,11 +7155,8 @@ AI_OPTION_CAPTURE_DAYS = int(os.environ.get("AI_OPTION_CAPTURE_DAYS", "0"))  # 0
 # Stability/performance controls for the large historical archive.
 AI_HIST_STATUS_CACHE_SECONDS = float(os.environ.get("AI_HIST_STATUS_CACHE_SECONDS", "5"))
 AI_HIST_TRAIN_RETRY_MINUTES = float(os.environ.get("AI_HIST_TRAIN_RETRY_MINUTES", "15"))
-# Historical pre-training uses a much denser chronological sample than the live-learning
-# layer.  This is still bounded so a small Oracle VM is protected from an unbounded
-# 12-year archive, while retaining substantially more market regimes for the GRU.
-AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL = int(os.environ.get("AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL", "2400"))
-AI_HIST_TRAIN_MAX_SAMPLES = int(os.environ.get("AI_HIST_TRAIN_MAX_SAMPLES", "6000"))
+AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL = int(os.environ.get("AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL", "1200"))
+AI_HIST_TRAIN_MAX_SAMPLES = int(os.environ.get("AI_HIST_TRAIN_MAX_SAMPLES", "2400"))
 AI_HIST_TRAIN_EPOCHS = int(os.environ.get("AI_HIST_TRAIN_EPOCHS", "24"))
 AI_HIST_TRAIN_LOCK = threading.Lock()
 _AI_HIST_STATUS_CACHE = {"at": 0.0, "value": None}
@@ -8148,13 +8145,19 @@ def _hist_feature_row(rows, i, arrays=None):
         j=i-int(n)
         return ((c/closes[j])-1)*100 if j>=0 and closes[j] else 0.0
     def ema(n):
-        # Exact enough for the research feature and bounded to the available history.
-        lo=max(0,i-int(n)*4)
+        # Preserve the previous bounded EMA definition, but evaluate the recurrence
+        # with a vector dot-product instead of a Python loop.  This is materially
+        # faster on the small Oracle VM while keeping the same 4*n bounded window.
+        n=int(n)
+        lo=max(0,i-n*4)
         x=closes[lo:i+1]
         if len(x)==0:return c
-        a=2/(int(n)+1); v=float(x[0])
-        for z in x[1:]:v=a*float(z)+(1-a)*v
-        return v
+        a=2/(n+1); r=1-a
+        m=len(x)-1
+        if m<=0:return float(x[0])
+        # EMA_i = a*sum(x[i-k]*r**k, k=0..m-1) + x[lo]*r**m
+        weights=a*np.power(r,np.arange(m-1,-1,-1,dtype=float))
+        return float(np.dot(x[1:],weights) + x[0]*(r**m))
     def rsi(n=14):
         lo=max(0,i-int(n))
         d=np.diff(closes[lo:i+1])
@@ -8170,7 +8173,8 @@ def _hist_feature_row(rows, i, arrays=None):
     e9,e20,e50=ema(9),ema(20),ema(50)
     trend=max(0,min(25,12.5+(e20/e50-1)*500)) if e50 else 12.5
     mom=max(0,min(25,12.5+ret(5)*3+ret(20)))
-    ts=str(rows[i]["ts"])
+    row_i=rows[i]
+    ts=str(row_i[0] if not isinstance(row_i,dict) else row_i["ts"])
     try:
         dt=datetime.fromisoformat(ts.replace("Z","+00:00"))
         if dt.tzinfo: dt=dt.astimezone(IST).replace(tzinfo=None)
@@ -8188,101 +8192,46 @@ def _hist_feature_row(rows, i, arrays=None):
     }
 
 def _hist_training_sequences(symbol):
-    """Build clean chronological GRU sequences from the historical candle archive.
-
-    The archive itself is never modified here.  We deliberately sample evenly across
-    the available history, build the full 20-bar feature window for each selected
-    endpoint, and reject only genuinely invalid/non-finite samples.  The target is
-    whether the close is higher after AI_HIST_HORIZON_BARS candles.
-    """
     c=ai_db()
-    rows=[dict(x) for x in c.execute(
-        "SELECT * FROM ai_hist_candles WHERE symbol=? AND interval=? ORDER BY ts",
-        (symbol,AI_HIST_INTERVAL)).fetchall()]
+    # Fetch only the fields required by the historical feature builder.  The old
+    # SELECT * + dict() materialisation consumed a large amount of RAM for ~215k
+    # candles and could push the 512 MiB VM into swap before GRU training began.
+    rows=c.execute(
+        "SELECT ts,close,high,low,volume FROM ai_hist_candles WHERE symbol=? AND interval=? ORDER BY ts",
+        (symbol,AI_HIST_INTERVAL)).fetchall()
     c.close()
-
     need=DL_SEQUENCE_LEN+AI_HIST_HORIZON_BARS+5
-    if len(rows)<need:
-        return [],[],[]
+    if len(rows)<need:return [],[]
 
+    # Keep training bounded for the Oracle VM.  We deliberately sample chronologically,
+    # rather than randomly, so the eventual 80/20 split remains a genuine walk-forward test.
     usable=len(rows)-AI_HIST_HORIZON_BARS
-    try:
-        closes=np.asarray([float(r.get("close") or 0.0) for r in rows],dtype=float)
-        highs=np.asarray([float(r.get("high") or 0.0) for r in rows],dtype=float)
-        lows=np.asarray([float(r.get("low") or 0.0) for r in rows],dtype=float)
-        vols=np.asarray([float(r.get("volume") or 0.0) for r in rows],dtype=float)
-    except Exception:
-        return [],[],[]
+    arrays={
+        "close":np.asarray([float(r[1]) for r in rows],dtype=float),
+        "high":np.asarray([float(r[2]) for r in rows],dtype=float),
+        "low":np.asarray([float(r[3]) for r in rows],dtype=float),
+        "volume":np.asarray([float(r[4] or 0) for r in rows],dtype=float),
+    }
+    max_points=AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL
+    step=max(1,usable//max_points)
+    candidate=list(range(DL_SEQUENCE_LEN-1,usable,step))
+    if candidate and candidate[-1] != usable-1:candidate.append(usable-1)
 
-    arrays={"close":closes,"high":highs,"low":lows,"volume":vols}
-
-    # Select evenly-spaced endpoints rather than taking only the newest history.
-    # This preserves old bull/bear/sideways regimes while keeping CPU/RAM bounded.
-    max_points=max(1,int(AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL))
-    first=DL_SEQUENCE_LEN-1
-    available=max(0,usable-first)
-    if available<=0:
-        return [],[],[]
-    if available<=max_points:
-        candidate=list(range(first,usable))
-    else:
-        # linspace gives stable coverage from the oldest usable endpoint to the newest.
-        candidate=np.linspace(first,usable-1,max_points,dtype=int).tolist()
-        candidate=sorted(set(candidate))
-
-    feature_rows={}
+    feature_rows={i:_hist_feature_row(rows,i,arrays) for i in candidate}
     seqs=[]; labels=[]; times=[]
-    rejected={"feature":0,"price":0,"nonfinite":0}
-
     for i in candidate:
-        # The endpoint must have a complete future horizon.
-        if i<first or i+AI_HIST_HORIZON_BARS>=len(rows):
-            rejected["price"]+=1
-            continue
-
+        if i-DL_SEQUENCE_LEN+1<0 or i+AI_HIST_HORIZON_BARS>=len(rows):continue
         fseq=[]; ok=True
         for j in range(i-DL_SEQUENCE_LEN+1,i+1):
-            if j not in feature_rows:
-                try:
-                    feature_rows[j]=_hist_feature_row(rows,j,arrays)
-                except Exception:
-                    feature_rows[j]={}
+            # j is usually not in candidate; build it only once and cache it.
+            if j not in feature_rows:feature_rows[j]=_hist_feature_row(rows,j,arrays)
             f=feature_rows[j]
-            if not f:
-                rejected["feature"]+=1
-                ok=False
-                break
-            try:
-                vec=np.asarray([_norm_feature(n,f.get(n,0.0)) for n in ML_FEATURE_NAMES],dtype=float)
-            except Exception:
-                rejected["nonfinite"]+=1
-                ok=False
-                break
-            if vec.shape!=(len(ML_FEATURE_NAMES),) or not np.all(np.isfinite(vec)):
-                rejected["nonfinite"]+=1
-                ok=False
-                break
-            fseq.append(vec.tolist())
-
-        if not ok:
-            continue
-
-        cur=closes[i]
-        future=closes[i+AI_HIST_HORIZON_BARS]
-        if not np.isfinite(cur) or cur<=0 or not np.isfinite(future) or future<=0:
-            rejected["price"]+=1
-            continue
-
-        seq=np.asarray(fseq,dtype=float)
-        if seq.shape!=(DL_SEQUENCE_LEN,len(ML_FEATURE_NAMES)) or not np.all(np.isfinite(seq)):
-            rejected["nonfinite"]+=1
-            continue
-
-        # Binary target: 1 = future close higher than current close, 0 = otherwise.
-        seqs.append(seq)
-        labels.append(1 if future>cur else 0)
-        times.append(str(rows[i].get("ts") or ""))
-
+            if not f:ok=False;break
+            fseq.append([_norm_feature(n,f.get(n,0)) for n in ML_FEATURE_NAMES])
+        if not ok:continue
+        cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
+        if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):continue
+        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if future>cur else 0); times.append(str(rows[i][0]))
     return seqs,labels,times
 
 def _hist_set_status(status, detail=""):
@@ -8320,14 +8269,8 @@ def ai_hist_train_deep(force=False):
                 per_symbol[sym]=0;ai_log("ERROR","HIST_SEQUENCE_BUILD",f"{sym}: {e}")
         if allx and len(allx)==len(ally)==len(all_times):
             order=sorted(range(len(allx)),key=lambda i:all_times[i]);allx=[allx[i] for i in order];ally=[ally[i] for i in order]
-        # Make the actual data pipeline visible in the UI/logs so a sparse or bad archive
-        # cannot look like a mysterious zero-sample training failure.
-        if allx:
-            up=sum(1 for y in ally if int(y)==1); down=len(ally)-up
-            ai_log("LEARNING","HIST_SEQUENCE_SUMMARY",f"total={len(allx)} up={up} down={down} per_symbol={per_symbol}")
         if len(allx)<AI_HIST_MIN_TRAIN:
-            up=sum(1 for y in ally if int(y)==1); down=len(ally)-up
-            detail=f"sequences={len(allx)} need={AI_HIST_MIN_TRAIN} up={up} down={down} per_symbol={per_symbol}";_hist_set_model_status("READY — NEED MORE TRAINING SAMPLES",detail);return ai_hist_status()
+            detail=f"sequences={len(allx)} need={AI_HIST_MIN_TRAIN} per_symbol={per_symbol}";_hist_set_model_status("READY — NEED MORE TRAINING SAMPLES",detail);return ai_hist_status()
         if len(set(ally))<2:
             detail=f"only one target class in historical labels; samples={len(ally)}";_hist_set_model_status("READY — TARGET CLASS INSUFFICIENT",detail);return ai_hist_status()
         X=np.asarray(allx,dtype=float);Y=np.asarray(ally,dtype=float)
