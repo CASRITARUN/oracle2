@@ -7465,6 +7465,7 @@ DL_SEQUENCE_LEN = int(os.environ.get("AI_DL_SEQUENCE_LEN", str(DL_SEQUENCE_LEN))
 DL_GRU_HIDDEN = int(os.environ.get("AI_DL_GRU_HIDDEN", "32"))
 DL_BATCH_SIZE = int(os.environ.get("AI_DL_BATCH_SIZE", "64"))
 DL_MAX_TRAIN_SAMPLES = int(os.environ.get("AI_DL_MAX_TRAIN_SAMPLES", "3600"))
+# Historical pre-training intentionally uses ALL available sequences; this cap applies only to live learning.
 DL_EPS = 1e-8
 
 
@@ -7627,8 +7628,8 @@ def ai_dl_train():
 
 def _ai_dl_persist(params,acc,auc,samples,train_samples,val_samples,status="TRAINED"):
     updated=datetime.now(IST).isoformat();blob=json.dumps(_gru_to_json(params),separators=(",",":"));c=ai_db()
-    c.execute("""INSERT OR REPLACE INTO ai_dl_model(id,updated_at,w1,b1,w2,b2,w3,b3,samples,accuracy,auc,status) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)""",
-              (updated,blob,"GRU",json.dumps({"hidden":DL_GRU_HIDDEN}),"GRU",json.dumps({"sequence_len":DL_SEQUENCE_LEN}),"GRU",0.0,samples,acc,auc,status))
+    c.execute("""INSERT OR REPLACE INTO ai_dl_model(id,updated_at,w1,b1,w2,b2,w3,b3,samples,accuracy,auc,status) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)""",
+              (updated,blob,"{}","{}","{}","{}",0.0,samples,acc,auc,status))
     c.commit();c.close();ai_log("LEARNING","DL_GRU_TRAIN",f"GRU sequence model samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}")
     return {**ai_dl_model(),"train_samples":train_samples,"validation_samples":val_samples}
 
