@@ -233,6 +233,70 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 .ai-research-strip{display:grid;grid-template-columns:auto 1fr auto 1fr auto 1.5fr;gap:8px;align-items:center;margin-top:8px;padding:9px 10px;border:1px solid #17364a;border-radius:9px;background:#08131d}.ai-research-strip span{font-size:8px;color:#55748a;letter-spacing:.08em;font-weight:900}.ai-research-strip b{font-size:9px;color:#d9eaf2}.ai-research-strip b:nth-of-type(1){color:#49d8ad}.ai-research-strip b:nth-of-type(2){color:#4cd6ef}.ai-research-strip b:nth-of-type(3){color:#9ab4c5}
 @media(max-width:800px){.ai-research-strip{grid-template-columns:1fr 1fr}}
 </style>
+<style id="ai-directional-theme">
+.ai-directional-panel{margin-top:12px!important;padding:17px 18px!important;border:1px solid #16344a!important;border-radius:16px!important;background:linear-gradient(145deg,#0a141e,#071019)!important;color:#dbe7f5}.ai-dir-flow{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:10px 12px;border:1px solid #17364a;border-radius:10px;background:#08131d;color:#7d9bb0;font-size:9px;font-weight:800}.ai-dir-flow span{padding:5px 8px;border-radius:999px;background:#0c1924;border:1px solid #1b384b}.ai-dir-flow i{font-style:normal;color:#2bc9ef}.ai-dir-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}.ai-dir-card{padding:13px;border:1px solid #17364a;border-radius:11px;background:linear-gradient(145deg,#0b1722,#08111a)}.ai-dir-head{display:flex;justify-content:space-between;align-items:center}.ai-dir-head b{font-size:13px;color:#edf7fc}.ai-dir-action{margin:12px 0;padding:10px;border-radius:9px;background:#091923;border:1px solid #173a4e;color:#40d8f4;font-size:16px;font-weight:900}.ai-dir-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.ai-dir-metrics div{padding:8px;border:1px solid #17364a;border-radius:8px}.ai-dir-metrics small{display:block;color:#5f7d91;font-size:7px}.ai-dir-metrics strong{display:block;color:#e8f4fa;font-size:13px;margin-top:3px}.ai-dir-card p{margin:9px 0 0;color:#617d91;font-size:9px;line-height:1.45;min-height:27px}.ai-dir-bottom{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:10px}.ai-dir-bottom>div{padding:9px;border:1px solid #17364a;border-radius:9px;background:#09141e}.ai-dir-bottom small{display:block;color:#5d7b90;font-size:7px;letter-spacing:.08em}.ai-dir-bottom b{display:block;color:#dcecf4;font-size:10px;margin-top:4px}.ai-dir-card.up .ai-dir-action{color:#4ee0ad;border-color:#1b604c}.ai-dir-card.down .ai-dir-action{color:#ff7b84;border-color:#71303a}.ai-dir-card.wait .ai-dir-action{color:#ffc65a;border-color:#705020}@media(max-width:900px){.ai-dir-grid{grid-template-columns:1fr}.ai-dir-bottom{grid-template-columns:1fr 1fr}}
+</style>
+
+<style id="ai-clean-command-ui">
+/* AI CLEAN MODE — keep the decision path visible, remove research clutter */
+#tabPageAIEvolution .ai-clean-hidden{display:none!important}
+#tabPageAIEvolution .ai-hero{margin-bottom:12px}
+#tabPageAIEvolution .ai-hero h2{font-size:24px;margin:4px 0 6px}
+#tabPageAIEvolution .ai-hero p{font-size:11px;max-width:760px;margin:0}
+#tabPageAIEvolution .ai-controlbar{padding:9px 12px}
+#tabPageAIEvolution .ai-directional-panel{margin-bottom:12px}
+#tabPageAIEvolution .ai-dir-flow{padding:8px 10px;font-size:10px;gap:7px}
+#tabPageAIEvolution .ai-dir-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}
+#tabPageAIEvolution .ai-dir-card{padding:12px}
+#tabPageAIEvolution .ai-dir-action{font-size:18px;margin:8px 0}
+#tabPageAIEvolution .ai-dir-metrics{gap:6px}
+#tabPageAIEvolution .ai-dir-metrics>div{padding:7px}
+#tabPageAIEvolution .ai-dir-metrics strong{font-size:15px}
+#tabPageAIEvolution .ai-dir-card p{font-size:9px;line-height:1.4;min-height:25px}
+#tabPageAIEvolution .ai-dir-bottom{padding:8px 10px;margin-top:9px}
+#tabPageAIEvolution #aiLearningPipeline{margin-bottom:12px;padding:12px 14px}
+#tabPageAIEvolution #aiLearningPipeline .ai-lp-head{margin-bottom:9px}
+#tabPageAIEvolution #aiLearningPipeline h3{font-size:14px}
+#tabPageAIEvolution .ai-lp-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:7px}
+#tabPageAIEvolution .ai-lp-step{padding:8px}
+#tabPageAIEvolution .ai-lp-label b{font-size:9px}
+#tabPageAIEvolution .ai-lp-meta strong{font-size:15px}
+#tabPageAIEvolution .ai-lp-meta small{font-size:7px}
+#tabPageAIEvolution .ai-model-command{margin-bottom:12px}
+#tabPageAIEvolution .ai-model-command .ai-section-head{margin-bottom:9px}
+#tabPageAIEvolution .ai-status-cards{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+#tabPageAIEvolution .ai-status-card{padding:10px}
+#tabPageAIEvolution .ai-status-card p{font-size:8px;line-height:1.35}
+#tabPageAIEvolution .ai-model-health{grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;margin-top:8px}
+#tabPageAIEvolution .ai-model-health>div{padding:7px}
+#tabPageAIEvolution .ai-model-health span{font-size:7px}
+#tabPageAIEvolution .ai-model-health b{font-size:12px}
+#tabPageAIEvolution .ai-command-flow{margin-top:9px;padding:8px;font-size:8px;gap:5px;overflow:auto;white-space:nowrap}
+#tabPageAIEvolution .ai-command-note{font-size:9px;margin-top:7px}
+#tabPageAIEvolution .ai-kpi-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:12px}
+#tabPageAIEvolution .ai-kpi{padding:10px}
+#tabPageAIEvolution .ai-kpi strong{font-size:18px}
+#tabPageAIEvolution .ai-kpi small{font-size:7px}
+/* Remove duplicate/low-value panels from the main AI screen. Data remains in backend/API. */
+#tabPageAIEvolution .ai-lifecycle-panel,
+#tabPageAIEvolution .ai-data-panel,
+#tabPageAIEvolution .ai-model-panel,
+#tabPageAIEvolution .ai-option-memory,
+#tabPageAIEvolution .ai-decision-row,
+#tabPageAIEvolution > .ai-institutional > section:nth-last-child(2),
+#tabPageAIEvolution > .ai-institutional > section:nth-last-child(1){display:none!important}
+@media(max-width:1050px){
+  #tabPageAIEvolution .ai-status-cards,#tabPageAIEvolution .ai-lp-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #tabPageAIEvolution .ai-model-health{grid-template-columns:repeat(3,minmax(0,1fr))}
+  #tabPageAIEvolution .ai-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:700px){
+  #tabPageAIEvolution .ai-dir-grid{grid-template-columns:1fr}
+  #tabPageAIEvolution .ai-status-cards,#tabPageAIEvolution .ai-lp-grid{grid-template-columns:1fr}
+  #tabPageAIEvolution .ai-model-health{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+</style>
+
 </head>
 <body>
 
@@ -687,6 +751,42 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
     </div>
   </section>
 
+  <section id="aiDirectionalPanel" class="ai-panel ai-directional-panel">
+    <div class="ai-section-head">
+      <div><div class="ai-section-label">INDEX DIRECTION → OPTION ACTION</div><h3>Directional AI Execution Engine</h3></div>
+      <span id="aiDirMode" class="ai-lock">PAPER ONLY</span>
+    </div>
+    <div class="ai-dir-flow">
+      <span>Historical Index</span><i>→</i><span>GRU Direction</span><i>→</i><span>UP / DOWN</span><i>→</i><span>BUY ATM CE / PE</span><i>→</i><span>Paper Exit</span><i>→</i><span>Learn</span>
+    </div>
+    <div class="ai-dir-grid">
+      <div class="ai-dir-card"><div class="ai-dir-head"><b>NIFTY</b><span id="aiDirNIFTYState" class="ai-badge neutral">WAITING</span></div><div class="ai-dir-action" id="aiDirNIFTYAction">—</div><div class="ai-dir-metrics"><div><small>P(UP)</small><strong id="aiDirNIFTYProb">—</strong></div><div><small>GRU SAMPLES</small><strong id="aiDirNIFTYSamples">—</strong></div><div><small>SCORE</small><strong id="aiDirNIFTYScore">—</strong></div></div><p id="aiDirNIFTYReason">No directional decision yet.</p></div>
+      <div class="ai-dir-card"><div class="ai-dir-head"><b>BANKNIFTY</b><span id="aiDirBANKNIFTYState" class="ai-badge neutral">WAITING</span></div><div class="ai-dir-action" id="aiDirBANKNIFTYAction">—</div><div class="ai-dir-metrics"><div><small>P(UP)</small><strong id="aiDirBANKNIFTYProb">—</strong></div><div><small>GRU SAMPLES</small><strong id="aiDirBANKNIFTYSamples">—</strong></div><div><small>SCORE</small><strong id="aiDirBANKNIFTYScore">—</strong></div></div><p id="aiDirBANKNIFTYReason">No directional decision yet.</p></div>
+      <div class="ai-dir-card"><div class="ai-dir-head"><b>FINNIFTY</b><span id="aiDirFINNIFTYState" class="ai-badge neutral">WAITING</span></div><div class="ai-dir-action" id="aiDirFINNIFTYAction">—</div><div class="ai-dir-metrics"><div><small>P(UP)</small><strong id="aiDirFINNIFTYProb">—</strong></div><div><small>GRU SAMPLES</small><strong id="aiDirFINNIFTYSamples">—</strong></div><div><small>SCORE</small><strong id="aiDirFINNIFTYScore">—</strong></div></div><p id="aiDirFINNIFTYReason">No directional decision yet.</p></div>
+    </div>
+    <div class="ai-dir-bottom"><div><small>LAST AI CYCLE</small><b id="aiDirLastCycle">—</b></div><div><small>OPEN PAPER DIRECTIONAL TRADES</small><b id="aiDirOpen">0</b></div><div><small>MODEL</small><b id="aiDirModel">HISTORICAL GRU</b></div><div><small>RULE</small><b>UP → CE · DOWN → PE · UNCERTAIN → WAIT</b></div></div>
+    <div class="ai-note-line"><b>Important:</b> historical training uses index movement labels. Historical option premiums are not fabricated. Live option entry uses the executable ASK for a long option, and paper exit uses the executable BID. The AI Evolution engine remains paper-only.</div>
+  </section>
+
+  <section id="aiPaperTradingPanel" class="ai-paper-new">
+    <div class="paper-head">
+      <div><div class="paper-kicker">PAPER TRADING</div><h3>Live Simulation</h3></div>
+      <span id="paperModeBadge">PAPER ONLY</span>
+    </div>
+    <div class="paper-kpis">
+      <div><small>OPEN</small><b id="paperOpen">0</b></div>
+      <div><small>CLOSED</small><b id="paperClosed">0</b></div>
+      <div><small>WINS</small><b id="paperWins">0</b></div>
+      <div><small>LOSSES</small><b id="paperLosses">0</b></div>
+      <div><small>WIN RATE</small><b id="paperWinRate">0%</b></div>
+      <div><small>P&L</small><b id="paperPnl">0</b></div>
+    </div>
+    <div class="paper-table-wrap">
+      <table class="paper-table"><thead><tr><th>TIME</th><th>INDEX</th><th>OPTION</th><th>SIDE</th><th>ENTRY</th><th>EXIT / LTP</th><th>P&L</th><th>STATUS</th></tr></thead><tbody id="paperTradesBody"><tr><td colspan="8">Waiting for paper trades…</td></tr></tbody></table>
+    </div>
+    <div class="paper-feedback"><b>Learning feedback:</b> completed paper outcomes become labelled evidence for the live ML / GRU learning loop.</div>
+  </section>
+
   <section id="aiLearningPipeline" class="ai-learning-pipeline">
   <div class="ai-lp-head"><div><div class="ai-eyebrow">LEARNING TELEMETRY</div><h3>AI Learning Pipeline</h3></div><div class="ai-lp-overall"><span>OVERALL</span><b id="aiLpOverall">0%</b></div></div>
   <div class="ai-lp-grid">
@@ -804,10 +904,56 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 })();
 </script>
 
+<section class="ai-panel ai-model-command">
+  <div class="ai-section-head">
+    <div><span class="ai-section-label">MODEL COMMAND CENTER</span><h3>Learning Status — Live</h3></div>
+    <div class="ai-command-meta"><span class="ai-live-dot"></span><b id="aiModelHeartbeat">UPDATING</b><small id="aiModelUpdated">—</small></div>
+  </div>
+  <div class="ai-status-cards">
+    <article class="ai-status-card"><div class="ai-status-icon">IDX</div><div><b>Historical INDEX</b><span id="aiCmdHistStatus">WAITING</span></div><strong id="aiCmdHistSamples">0</strong><small>5m candles</small><div class="ai-mini-bar"><i id="aiCmdHistBar"></i></div><p id="aiCmdHistDetail">Waiting for historical archive</p></article>
+    <article class="ai-status-card"><div class="ai-status-icon ml">ML</div><div><b>Machine Learning</b><span id="aiCmdMLStatus">NOT TRAINED</span></div><strong id="aiCmdMLSamples">0</strong><small>training samples</small><div class="ai-mini-bar"><i id="aiCmdMLBar"></i></div><p id="aiCmdMLDetail">—</p></article>
+    <article class="ai-status-card"><div class="ai-status-icon gru">GRU</div><div><b>Deep Sequence</b><span id="aiCmdGRUStatus">NOT TRAINED</span></div><strong id="aiCmdGRUSamples">0</strong><small>sequences</small><div class="ai-mini-bar"><i id="aiCmdGRUBar"></i></div><p id="aiCmdGRUDetail">—</p></article>
+    <article class="ai-status-card"><div class="ai-status-icon val">VAL</div><div><b>Validation</b><span id="aiCmdVALStatus">WAITING</span></div><strong id="aiCmdVALSamples">0</strong><small>validation evidence</small><div class="ai-mini-bar"><i id="aiCmdVALBar"></i></div><p id="aiCmdVALDetail">Chronological / walk-forward</p></article>
+  </div>
+  <div class="ai-model-health">
+    <div><span>ML accuracy</span><b id="aiCmdMLAcc">—</b></div><div><span>ML AUC</span><b id="aiCmdMLAUC">—</b></div>
+    <div><span>GRU accuracy</span><b id="aiCmdGRUAcc">—</b></div><div><span>GRU AUC</span><b id="aiCmdGRUAUC">—</b></div>
+    <div><span>Learned confidence</span><b id="aiCmdFloor">—</b></div><div><span>Historical range</span><b id="aiCmdRange">—</b></div>
+  </div>
+  <div class="ai-command-flow"><span class="done">12Y INDEX</span><i>→</i><span class="done">ML + GRU</span><i>→</i><span>VALIDATE</span><i>→</i><span>INDEX DIRECTION</span><i>→</i><span>CE / PE</span><i>→</i><span>PAPER OUTCOME</span><i>→</i><span>RETRAIN</span></div>
+  <div class="ai-command-note">The models learn <b>index direction</b>. Options are the execution instrument. No historical option premium is invented, and this AI panel remains paper-only.</div>
+</section>
+<style>
+.ai-model-command{overflow:hidden;background:linear-gradient(135deg,#fffdfa 0%,#f8fafc 100%)}
+.ai-command-meta{display:flex;align-items:center;gap:8px;font-size:10px;color:#667085}.ai-command-meta small{padding-left:5px;border-left:1px solid #d9dde3}.ai-live-dot{width:7px;height:7px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 4px rgba(22,163,74,.10)}
+.ai-status-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.ai-status-card{position:relative;padding:15px;border:1px solid #e1e6eb;border-radius:14px;background:rgba(255,255,255,.88);min-width:0;box-shadow:0 5px 18px rgba(30,41,59,.045)}.ai-status-card>div:nth-child(2){display:flex;flex-direction:column;gap:3px;margin-left:42px}.ai-status-card b{font-size:12px;color:#20252b}.ai-status-card span{font-size:8px;letter-spacing:.09em;font-weight:800;color:#667085}.ai-status-card>strong{display:block;font-size:27px;line-height:1.1;margin-top:14px;color:#20252b}.ai-status-card>small{display:block;color:#8a929d;font-size:9px;margin-top:2px}.ai-status-icon{position:absolute;left:14px;top:14px;width:32px;height:32px;border-radius:9px;display:grid;place-items:center;font-size:9px;font-weight:900;letter-spacing:.04em;background:#eef2f6;color:#334155}.ai-status-icon.ml{background:#fff0e9;color:#d94b22}.ai-status-icon.gru{background:#eeeafd;color:#5946a8}.ai-status-icon.val{background:#eaf7ef;color:#237743}.ai-mini-bar{height:5px;background:#edf0f3;border-radius:99px;overflow:hidden;margin-top:11px}.ai-mini-bar i{display:block;width:0;height:100%;border-radius:99px;background:linear-gradient(90deg,#ff6338,#ff9a7c);transition:width .45s ease}.ai-status-card p{margin:9px 0 0;color:#737b86;font-size:9px;line-height:1.45;min-height:26px}.ai-model-health{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:#e3e7eb;border:1px solid #e3e7eb;border-radius:11px;overflow:hidden;margin-top:12px}.ai-model-health div{background:#fff;padding:10px 12px}.ai-model-health span{display:block;color:#7a828c;font-size:8px;text-transform:uppercase;letter-spacing:.07em}.ai-model-health b{display:block;margin-top:4px;font-size:14px;color:#20252b}.ai-command-flow{display:flex;align-items:center;justify-content:center;gap:9px;flex-wrap:wrap;margin:15px 0 2px;color:#667085;font-size:9px;font-weight:800;letter-spacing:.04em}.ai-command-flow span{padding:6px 9px;border-radius:99px;background:#eef1f4}.ai-command-flow span.done{background:#eaf7ef;color:#237743}.ai-command-flow i{font-style:normal;color:#a0a7b0}.ai-command-note{margin-top:12px;padding:10px 12px;border-radius:10px;background:#f4f6f8;color:#667085;font-size:9px;line-height:1.5}.ai-command-note b{color:#20252b}@media(max-width:1000px){.ai-status-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.ai-model-health{grid-template-columns:repeat(3,1fr)}}@media(max-width:600px){.ai-status-cards{grid-template-columns:1fr}.ai-model-health{grid-template-columns:repeat(2,1fr)}}
+</style>
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const txt=(id,v)=>{if($(id))$(id).textContent=v==null?'—':v};
+  const pct=(id,v)=>{if($(id))$(id).style.width=Math.max(0,Math.min(100,Number(v)||0))+'%'};
+  const fmt=(v,d=1)=>v==null||v===''?'—':Number(v).toFixed(d);
+  async function modelCommand(){
+    try{
+      const r=await fetch('/api/ai-evolution/learning-progress',{cache:'no-store'}); if(!r.ok)return; const x=await r.json(); if(!x.ok)return;
+      const h=x.historical||{},m=x.ml||{},g=x.dl||{},v=x.validation||{},l=x.learned||{};
+      txt('aiCmdHistStatus',h.status||'WAITING');txt('aiCmdHistSamples',Number(h.candles||0).toLocaleString('en-IN'));pct('aiCmdHistBar',h.progress);txt('aiCmdHistDetail',(h.oldest&&h.newest)?h.oldest+' → '+h.newest:'Historical INDEX archive');
+      txt('aiCmdMLStatus',m.status||'NOT TRAINED');txt('aiCmdMLSamples',Number(m.samples||0).toLocaleString('en-IN'));pct('aiCmdMLBar',m.progress);txt('aiCmdMLDetail',(m.accuracy!=null?'Accuracy '+fmt(m.accuracy)+'%':'Training from INDEX history')+(m.auc!=null?' · AUC '+fmt(m.auc,3):''));
+      txt('aiCmdGRUStatus',g.status||'NOT TRAINED');txt('aiCmdGRUSamples',Number(g.samples||0).toLocaleString('en-IN'));pct('aiCmdGRUBar',g.progress);txt('aiCmdGRUDetail',(g.architecture||'GRU sequence model')+(g.accuracy!=null?' · '+fmt(g.accuracy)+'% acc':'')+(g.auc!=null?' · AUC '+fmt(g.auc,3):''));
+      txt('aiCmdVALStatus',v.status||'WAITING');txt('aiCmdVALSamples',Number(v.samples||0).toLocaleString('en-IN'));pct('aiCmdVALBar',v.progress);txt('aiCmdVALDetail','Chronological validation · '+(v.auc!=null?'AUC '+fmt(v.auc,3):'awaiting evidence'));
+      txt('aiCmdMLAcc',m.accuracy==null?'—':fmt(m.accuracy)+'%');txt('aiCmdMLAUC',m.auc==null?'—':fmt(m.auc,3));txt('aiCmdGRUAcc',g.accuracy==null?'—':fmt(g.accuracy)+'%');txt('aiCmdGRUAUC',g.auc==null?'—':fmt(g.auc,3));txt('aiCmdFloor',l.confidence_floor==null?'—':fmt(Number(l.confidence_floor)*100)+'%');txt('aiCmdRange',(h.oldest&&h.newest)?h.oldest+' → '+h.newest:'—');
+      txt('aiModelHeartbeat','LIVE');txt('aiModelUpdated',new Date().toLocaleTimeString());txt('aiEffectiveGate',l.confidence_floor==null?'—':fmt(Number(l.confidence_floor)*100)+'%');
+    }catch(e){txt('aiModelHeartbeat','RETRYING')}
+  }
+  modelCommand();setInterval(modelCommand,5000);
+})();
+</script>
+
 <section class="ai-kpi-grid">
     <div class="ai-kpi ai-kpi-primary"><span>CHAMPION</span><strong id="aiChampion">—</strong><small>Current production research version</small></div>
     <div class="ai-kpi"><span>LEARNING STAGE</span><strong id="aiLearningStage">BOOTSTRAP</strong><small id="aiLearningProgress">0% evidence progress</small></div>
-    <div class="ai-kpi"><span>EFFECTIVE ENTRY GATE</span><strong id="aiEffectiveGate">55/100</strong><small>Matures toward the research gate</small></div>
+    <div class="ai-kpi"><span>LEARNED CONFIDENCE</span><strong id="aiEffectiveGate">—</strong><small>Validation-derived probability floor</small></div>
     <div class="ai-kpi"><span>OPEN PAPER TRADES</span><strong id="aiOpen">0</strong><small>Simulated positions only</small></div>
     <div class="ai-kpi"><span>CLOSED OUTCOMES</span><strong id="aiTrades">0</strong><small>Completed price-path observations</small></div>
     <div class="ai-kpi"><span>WIN RATE</span><strong id="aiWin">—</strong><small>Closed paper trades</small></div>
@@ -2671,5 +2817,540 @@ window.switchTopTab=function(which){
 };
 </script>
 
+<script>
+(function(){
+  const dirEsc=v=>String(v??'—').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const dirEl=id=>document.getElementById(id);
+  function setDirCard(sym,row){
+    const up=`aiDir${sym}`;
+    const reason=String(row?.reason||'');
+    const m=reason.match(/p_up=([0-9.]+)/i);
+    const sm=reason.match(/score=([0-9.]+)/i);
+    const gm=reason.match(/historical_GRU_samples=(\d+)/i);
+    const p=m?Number(m[1]):null;
+    let direction='WAIT', action='WAIT';
+    if(reason.includes('BUY CE')){direction='UP';action='BUY ATM CE';}
+    else if(reason.includes('BUY PE')){direction='DOWN';action='BUY ATM PE';}
+    const state=dirEl(up+'State'); if(state){state.textContent=direction;state.className='ai-badge '+(direction==='UP'?'safe':direction==='DOWN'?'ai-evo-status ai-evo-bad':'neutral');}
+    const a=dirEl(up+'Action'); if(a)a.textContent=action+(reason.match(/BUY (?:CE|PE) ([A-Z0-9_-]+)/)?.[1]?' · '+reason.match(/BUY (?:CE|PE) ([A-Z0-9_-]+)/)[1]:'');
+    const pe=dirEl(up+'Prob'); if(pe)pe.textContent=p==null?'—':(p*100).toFixed(1)+'%';
+    const se=dirEl(up+'Samples'); if(se)se.textContent=gm?gm[1]:'—';
+    const sc=dirEl(up+'Score'); if(sc)sc.textContent=sm?Number(sm[1]).toFixed(1):'—';
+    const re=dirEl(up+'Reason'); if(re)re.textContent=reason||'No directional decision yet.';
+    const card=dirEl(up+'Action')?.closest('.ai-dir-card'); if(card)card.classList.toggle('up',direction==='UP'),card.classList.toggle('down',direction==='DOWN'),card.classList.toggle('wait',direction==='WAIT');
+  }
+  async function refreshDirectional(){
+    try{
+      const [st,latest]=await Promise.all([aiGet('/api/ai-evolution/directional-status'),aiGet('/api/ai-evolution/directional-latest')]);
+      const rows=latest.symbols||[]; const map={}; rows.forEach(r=>map[r.symbol]=r);
+      ['NIFTY','BANKNIFTY','FINNIFTY'].forEach(sym=>setDirCard(sym,map[sym]||null));
+      const lc=dirEl('aiDirLastCycle');if(lc)lc.textContent=st.last_cycle_at?new Date(st.last_cycle_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';
+      const op=dirEl('aiDirOpen');if(op)op.textContent=(st.open_directional_trades||[]).length;
+      const model=dirEl('aiDirModel');if(model)model.textContent=(st.historical_gru?.status||'HISTORICAL GRU').replace('HISTORICAL_PRETRAINED','GRU PRE-TRAINED');
+    }catch(e){const x=dirEl('aiDirLastCycle');if(x)x.textContent='Backend error';}
+  }
+  window.refreshDirectionalAI=refreshDirectional;
+  setTimeout(refreshDirectional,800);
+  setInterval(refreshDirectional,15000);
+})();
+</script>
+
+<style id="ai-complete-redesign">
+/* =========================================================
+   AI EVOLUTION — COMPLETE COMMAND-CENTER REDESIGN
+   Visual-only redesign. Existing IDs/JS/data endpoints preserved.
+   ========================================================= */
+#tabPageAIEvolution{
+  --ai-bg:#f4f6f8;
+  --ai-card:#ffffff;
+  --ai-ink:#111827;
+  --ai-muted:#6b7280;
+  --ai-line:#e5e7eb;
+  --ai-accent:#ff6338;
+  --ai-green:#16a34a;
+  --ai-red:#dc2626;
+  --ai-purple:#6d4aff;
+  background:var(--ai-bg)!important;
+  padding:22px!important;
+}
+#tabPageAIEvolution .ai-institutional{
+  max-width:1480px;
+  margin:0 auto;
+  font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+
+/* Hide the old research-heavy sections while preserving their DOM bindings. */
+#tabPageAIEvolution .ai-lifecycle-panel,
+#tabPageAIEvolution .ai-two-col:not(.ai-directional-panel),
+#tabPageAIEvolution .ai-option-memory,
+#tabPageAIEvolution .ai-decision-row,
+#tabPageAIEvolution .ai-memory-grid,
+#tabPageAIEvolution .ai-panel:not(.ai-directional-panel):not(.ai-model-command),
+#tabPageAIEvolution .ai-kpi-grid{
+  display:none!important;
+}
+
+/* HERO */
+#tabPageAIEvolution .ai-hero{
+  background:linear-gradient(135deg,#101828 0%,#182230 58%,#202b3a 100%)!important;
+  color:#fff!important;
+  border:0!important;
+  border-radius:22px!important;
+  padding:25px 28px!important;
+  margin-bottom:16px!important;
+  box-shadow:0 18px 50px rgba(15,23,42,.16)!important;
+}
+#tabPageAIEvolution .ai-hero h2{
+  color:#fff!important;
+  font-size:30px!important;
+  letter-spacing:-.035em!important;
+  margin:5px 0 7px!important;
+}
+#tabPageAIEvolution .ai-hero p{
+  color:#b8c1cc!important;
+  max-width:700px!important;
+}
+#tabPageAIEvolution .ai-eyebrow{
+  color:#ff9677!important;
+  font-weight:900!important;
+  letter-spacing:.14em!important;
+}
+#tabPageAIEvolution .ai-hero-status{
+  background:rgba(255,255,255,.08)!important;
+  border:1px solid rgba(255,255,255,.12)!important;
+  border-radius:14px!important;
+  padding:12px 15px!important;
+  color:#e5e7eb!important;
+}
+#tabPageAIEvolution .ai-controlbar{
+  border-top:1px solid rgba(255,255,255,.10)!important;
+  margin-top:20px!important;
+  padding-top:15px!important;
+}
+#tabPageAIEvolution .ai-run-btn{
+  background:#fff!important;
+  color:#111827!important;
+  border:0!important;
+  border-radius:10px!important;
+  font-weight:800!important;
+}
+
+/* DIRECTIONAL COMMAND BOARD */
+#tabPageAIEvolution #aiDirectionalPanel{
+  background:transparent!important;
+  border:0!important;
+  padding:0!important;
+  margin:0 0 16px!important;
+  box-shadow:none!important;
+}
+#tabPageAIEvolution #aiDirectionalPanel .ai-section-head{
+  padding:0 2px 11px!important;
+}
+#tabPageAIEvolution #aiDirectionalPanel .ai-section-head h3{
+  font-size:21px!important;
+  color:var(--ai-ink)!important;
+  margin-top:3px!important;
+}
+#tabPageAIEvolution .ai-lock{
+  background:#ecfdf3!important;
+  color:#15803d!important;
+  border:1px solid #bbf7d0!important;
+  border-radius:999px!important;
+  font-weight:900!important;
+}
+#tabPageAIEvolution .ai-dir-flow{
+  background:#fff!important;
+  border:1px solid var(--ai-line)!important;
+  border-radius:14px!important;
+  padding:11px 15px!important;
+  color:#667085!important;
+  box-shadow:0 5px 18px rgba(15,23,42,.04)!important;
+  margin-bottom:12px!important;
+}
+#tabPageAIEvolution .ai-dir-grid{
+  display:grid!important;
+  grid-template-columns:repeat(3,minmax(0,1fr))!important;
+  gap:13px!important;
+}
+#tabPageAIEvolution .ai-dir-card{
+  position:relative!important;
+  background:var(--ai-card)!important;
+  border:1px solid var(--ai-line)!important;
+  border-radius:18px!important;
+  padding:18px!important;
+  min-height:190px!important;
+  box-shadow:0 8px 25px rgba(15,23,42,.055)!important;
+  overflow:hidden!important;
+}
+#tabPageAIEvolution .ai-dir-card:before{
+  content:"";
+  position:absolute;
+  left:0;top:0;bottom:0;width:4px;
+  background:#cbd5e1;
+}
+#tabPageAIEvolution .ai-dir-head{
+  padding-bottom:10px!important;
+  border-bottom:1px solid #f0f1f3!important;
+}
+#tabPageAIEvolution .ai-dir-head b{
+  font-size:16px!important;
+  color:var(--ai-ink)!important;
+}
+#tabPageAIEvolution .ai-dir-action{
+  font-size:25px!important;
+  font-weight:950!important;
+  letter-spacing:-.03em!important;
+  margin:18px 0 15px!important;
+  color:#111827!important;
+}
+#tabPageAIEvolution .ai-dir-metrics{
+  display:grid!important;
+  grid-template-columns:repeat(3,1fr)!important;
+  gap:7px!important;
+}
+#tabPageAIEvolution .ai-dir-metrics>div{
+  background:#f8fafc!important;
+  border:1px solid #eef0f2!important;
+  border-radius:10px!important;
+  padding:8px!important;
+}
+#tabPageAIEvolution .ai-dir-metrics small{
+  font-size:8px!important;
+  color:#8a929d!important;
+  letter-spacing:.07em!important;
+}
+#tabPageAIEvolution .ai-dir-metrics strong{
+  font-size:14px!important;
+  display:block!important;
+  margin-top:3px!important;
+  color:#1f2937!important;
+}
+#tabPageAIEvolution .ai-dir-card p{
+  color:#6b7280!important;
+  font-size:10px!important;
+  line-height:1.45!important;
+  margin-top:10px!important;
+}
+#tabPageAIEvolution .ai-dir-bottom{
+  background:#111827!important;
+  color:#fff!important;
+  border-radius:15px!important;
+  margin-top:12px!important;
+  padding:13px 15px!important;
+  display:grid!important;
+  grid-template-columns:repeat(4,1fr)!important;
+  gap:12px!important;
+}
+#tabPageAIEvolution .ai-dir-bottom small{
+  color:#9ca3af!important;
+  font-size:8px!important;
+  letter-spacing:.09em!important;
+}
+#tabPageAIEvolution .ai-dir-bottom b{
+  display:block!important;
+  margin-top:3px!important;
+  font-size:11px!important;
+  color:#fff!important;
+}
+#tabPageAIEvolution .ai-note-line{
+  background:#fff7ed!important;
+  border:1px solid #fed7aa!important;
+  color:#7c2d12!important;
+  border-radius:11px!important;
+  padding:10px 13px!important;
+  margin-top:10px!important;
+  font-size:9px!important;
+}
+
+/* LEARNING — single clean status board */
+#tabPageAIEvolution #aiLearningPipeline{
+  background:#fff!important;
+  border:1px solid var(--ai-line)!important;
+  border-radius:18px!important;
+  padding:18px!important;
+  box-shadow:0 8px 25px rgba(15,23,42,.045)!important;
+  margin-bottom:16px!important;
+}
+#tabPageAIEvolution #aiLearningPipeline .ai-lp-grid{
+  grid-template-columns:repeat(5,minmax(0,1fr))!important;
+  gap:9px!important;
+}
+#tabPageAIEvolution #aiLearningPipeline .ai-lp-step{
+  background:#f8fafc!important;
+  border:1px solid #edf0f3!important;
+  border-radius:12px!important;
+  padding:11px!important;
+}
+#tabPageAIEvolution #aiLearningPipeline .ai-lp-step:nth-child(3),
+#tabPageAIEvolution #aiLearningPipeline .ai-lp-step:nth-child(4){
+  background:#faf9ff!important;
+}
+#tabPageAIEvolution #aiLearningPipeline .ai-lp-track{
+  height:5px!important;
+}
+
+/* MODEL COMMAND CENTER becomes the compact "health" strip */
+#tabPageAIEvolution .ai-model-command{
+  background:#fff!important;
+  border:1px solid var(--ai-line)!important;
+  border-radius:18px!important;
+  padding:18px!important;
+  box-shadow:0 8px 25px rgba(15,23,42,.045)!important;
+  margin-bottom:0!important;
+}
+#tabPageAIEvolution .ai-model-command .ai-section-head{
+  padding-bottom:12px!important;
+}
+#tabPageAIEvolution .ai-status-cards{
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:10px!important;
+}
+#tabPageAIEvolution .ai-status-card{
+  box-shadow:none!important;
+  border-radius:13px!important;
+  padding:13px!important;
+}
+#tabPageAIEvolution .ai-status-card>strong{
+  font-size:23px!important;
+}
+#tabPageAIEvolution .ai-model-health{
+  margin-top:10px!important;
+}
+#tabPageAIEvolution .ai-command-flow{
+  margin-top:12px!important;
+}
+#tabPageAIEvolution .ai-command-note{
+  font-size:9px!important;
+}
+
+/* Make statuses visually meaningful when JS writes their text. */
+#tabPageAIEvolution .ai-badge{
+  font-weight:850!important;
+}
+#tabPageAIEvolution .ai-status-card span{
+  white-space:nowrap!important;
+}
+
+/* Mobile */
+@media(max-width:1050px){
+  #tabPageAIEvolution{padding:14px!important}
+  #tabPageAIEvolution .ai-dir-grid,
+  #tabPageAIEvolution .ai-status-cards{grid-template-columns:1fr 1fr!important}
+  #tabPageAIEvolution #aiLearningPipeline .ai-lp-grid{grid-template-columns:repeat(2,1fr)!important}
+  #tabPageAIEvolution .ai-dir-bottom{grid-template-columns:1fr 1fr!important}
+}
+@media(max-width:650px){
+  #tabPageAIEvolution .ai-hero{padding:19px!important}
+  #tabPageAIEvolution .ai-hero h2{font-size:24px!important}
+  #tabPageAIEvolution .ai-dir-grid,
+  #tabPageAIEvolution .ai-status-cards,
+  #tabPageAIEvolution #aiLearningPipeline .ai-lp-grid{grid-template-columns:1fr!important}
+  #tabPageAIEvolution .ai-dir-bottom{grid-template-columns:1fr 1fr!important}
+  #tabPageAIEvolution .ai-dir-flow{line-height:2}
+}
+</style>
+
+
+<style id="ai-simple-final-redesign">
+/* ===== SIMPLE AI COMMAND CENTER ===== */
+#tabPageAIEvolution{
+  background:#f6f7f9!important;
+  padding:18px!important;
+}
+#tabPageAIEvolution .ai-institutional{
+  max-width:1280px!important;
+  margin:auto!important;
+  font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;
+}
+/* Keep only the useful top-level areas. */
+#tabPageAIEvolution .ai-hero{
+  border-radius:18px!important;
+  padding:20px 22px!important;
+  margin-bottom:14px!important;
+  box-shadow:0 8px 28px rgba(15,23,42,.08)!important;
+}
+#tabPageAIEvolution .ai-hero h2{
+  font-size:25px!important;
+  margin:4px 0!important;
+}
+#tabPageAIEvolution .ai-hero p{font-size:11px!important;margin:3px 0!important}
+#tabPageAIEvolution .ai-controlbar{margin-top:12px!important;padding-top:11px!important}
+
+/* Remove duplicate/technical sections from the visible AI workspace. */
+#tabPageAIEvolution .ai-lifecycle-panel,
+#tabPageAIEvolution .ai-option-memory,
+#tabPageAIEvolution .ai-memory-grid,
+#tabPageAIEvolution .ai-decision-row,
+#tabPageAIEvolution .ai-kpi-grid,
+#tabPageAIEvolution .ai-two-col:not(.ai-directional-panel),
+#tabPageAIEvolution .ai-panel:not(.ai-directional-panel):not(.ai-model-command):not(#aiPaperTradingPanel),
+#tabPageAIEvolution #aiLearningPipeline{
+  display:none!important;
+}
+
+/* Direction = primary screen */
+#tabPageAIEvolution #aiDirectionalPanel{
+  margin:0 0 14px!important;
+  padding:0!important;
+  background:none!important;
+  border:0!important;
+  box-shadow:none!important;
+}
+#tabPageAIEvolution #aiDirectionalPanel .ai-section-head{padding:0 2px 8px!important}
+#tabPageAIEvolution #aiDirectionalPanel .ai-section-head h3{
+  font-size:18px!important;
+  margin:0!important;
+}
+#tabPageAIEvolution .ai-dir-grid{
+  display:grid!important;
+  grid-template-columns:repeat(3,1fr)!important;
+  gap:10px!important;
+}
+#tabPageAIEvolution .ai-dir-card{
+  min-height:165px!important;
+  padding:15px!important;
+  border-radius:15px!important;
+  box-shadow:0 5px 18px rgba(15,23,42,.05)!important;
+}
+#tabPageAIEvolution .ai-dir-action{
+  font-size:22px!important;
+  margin:13px 0!important;
+}
+#tabPageAIEvolution .ai-dir-bottom{
+  margin-top:9px!important;
+  border-radius:13px!important;
+  padding:10px 13px!important;
+}
+
+/* PAPER TRADING — dedicated, prominent card */
+#tabPageAIEvolution #aiPaperTradingPanel{
+  display:block!important;
+  background:#fff!important;
+  border:1px solid #e5e7eb!important;
+  border-radius:16px!important;
+  padding:16px!important;
+  margin:0 0 14px!important;
+  box-shadow:0 6px 22px rgba(15,23,42,.05)!important;
+}
+#tabPageAIEvolution #aiPaperTradingPanel .ai-section-head{
+  display:flex!important;
+  justify-content:space-between!important;
+  align-items:center!important;
+  padding-bottom:11px!important;
+}
+#tabPageAIEvolution #aiPaperTradingPanel h3{
+  margin:0!important;
+  font-size:18px!important;
+}
+#tabPageAIEvolution #aiPaperTradingPanel .ai-paper-kpis{
+  display:grid!important;
+  grid-template-columns:repeat(6,1fr)!important;
+  gap:7px!important;
+}
+#tabPageAIEvolution #aiPaperTradingPanel .ai-paper-kpi{
+  background:#f8fafc!important;
+  border:1px solid #edf0f2!important;
+  border-radius:10px!important;
+  padding:9px!important;
+}
+#tabPageAIEvolution #aiPaperTradingPanel .ai-paper-kpi small{
+  display:block!important;
+  font-size:8px!important;
+  color:#7b8490!important;
+  text-transform:uppercase!important;
+}
+#tabPageAIEvolution #aiPaperTradingPanel .ai-paper-kpi b{
+  display:block!important;
+  font-size:16px!important;
+  margin-top:2px!important;
+}
+#tabPageAIEvolution #aiPaperTradingPanel .ai-paper-table{
+  margin-top:10px!important;
+  max-height:230px!important;
+  overflow:auto!important;
+}
+
+/* Single compact learning section */
+#tabPageAIEvolution .ai-model-command{
+  display:block!important;
+  background:#fff!important;
+  border:1px solid #e5e7eb!important;
+  border-radius:16px!important;
+  padding:16px!important;
+  margin:0!important;
+  box-shadow:0 6px 22px rgba(15,23,42,.05)!important;
+}
+#tabPageAIEvolution .ai-model-command .ai-section-head{padding-bottom:10px!important}
+#tabPageAIEvolution .ai-model-command h3{font-size:18px!important;margin:0!important}
+#tabPageAIEvolution .ai-status-cards{
+  display:grid!important;
+  grid-template-columns:repeat(4,1fr)!important;
+  gap:8px!important;
+}
+#tabPageAIEvolution .ai-status-card{
+  padding:11px!important;
+  border-radius:11px!important;
+  box-shadow:none!important;
+}
+#tabPageAIEvolution .ai-status-card>strong{font-size:20px!important}
+
+/* Hide any accidental old duplicate learning headings/cards. */
+#tabPageAIEvolution .ai-learning-title + .ai-learning-title{display:none!important}
+
+@media(max-width:900px){
+  #tabPageAIEvolution .ai-dir-grid{grid-template-columns:1fr!important}
+  #tabPageAIEvolution #aiPaperTradingPanel .ai-paper-kpis{grid-template-columns:repeat(3,1fr)!important}
+  #tabPageAIEvolution .ai-status-cards{grid-template-columns:1fr 1fr!important}
+}
+@media(max-width:560px){
+  #tabPageAIEvolution #aiPaperTradingPanel .ai-paper-kpis,
+  #tabPageAIEvolution .ai-status-cards{grid-template-columns:1fr 1fr!important}
+}
+</style>
+
+<style id="paper-final-ui">
+#tabPageAIEvolution .ai-paper-new{display:block!important;background:#fff!important;border:1px solid #e5e7eb!important;border-radius:16px!important;padding:16px!important;margin:0 0 14px!important;box-shadow:0 6px 22px rgba(15,23,42,.05)!important}
+#tabPageAIEvolution .paper-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:11px!important}
+#tabPageAIEvolution .paper-kicker{font-size:9px;font-weight:900;letter-spacing:.12em;color:#ff6338!important}
+#tabPageAIEvolution .paper-head h3{margin:2px 0 0!important;font-size:18px!important;color:#111827!important}
+#tabPageAIEvolution #paperModeBadge{font-size:9px;font-weight:900;color:#15803d;background:#ecfdf3;border:1px solid #bbf7d0;border-radius:999px;padding:6px 9px}
+#tabPageAIEvolution .paper-kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:10px}
+#tabPageAIEvolution .paper-kpis>div{background:#f8fafc;border:1px solid #edf0f2;border-radius:10px;padding:9px}
+#tabPageAIEvolution .paper-kpis small{display:block;font-size:8px;color:#7b8490;letter-spacing:.08em}
+#tabPageAIEvolution .paper-kpis b{display:block;margin-top:3px;font-size:17px;color:#111827}
+#tabPageAIEvolution .paper-table-wrap{max-height:245px;overflow:auto;border:1px solid #edf0f2;border-radius:10px}
+#tabPageAIEvolution .paper-table{width:100%;border-collapse:collapse;font-size:10px}
+#tabPageAIEvolution .paper-table th{position:sticky;top:0;background:#f8fafc;color:#6b7280;font-size:8px;letter-spacing:.07em;text-align:left;padding:8px;border-bottom:1px solid #e5e7eb}
+#tabPageAIEvolution .paper-table td{padding:9px 8px;border-bottom:1px solid #f0f1f3;color:#374151;white-space:nowrap}
+#tabPageAIEvolution .paper-feedback{margin-top:9px;padding:9px 11px;border-radius:9px;background:#fff7ed;color:#7c2d12;font-size:9px}
+@media(max-width:900px){#tabPageAIEvolution .paper-kpis{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:560px){#tabPageAIEvolution .paper-kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+<script>
+(function(){
+  function esc(v){const d=document.createElement('div');d.textContent=v==null?'':String(v);return d.innerHTML}
+  function fmt(v){if(v==null||v==='')return '—'; const n=Number(v); return Number.isFinite(n)?n.toLocaleString('en-IN',{maximumFractionDigits:2}):esc(v)}
+  async function paperRefresh(){
+    try{
+      const [s,tr]=await Promise.all([
+        fetch('/api/ai-evolution/status',{cache:'no-store'}).then(r=>r.json()),
+        fetch('/api/ai-evolution/trades',{cache:'no-store'}).then(r=>r.json())
+      ]);
+      const rows=Array.isArray(tr)?tr:(tr.trades||tr.rows||[]);
+      const closed=rows.filter(x=>String(x.status||'').toUpperCase()!=='OPEN');
+      const open=rows.filter(x=>String(x.status||'').toUpperCase()==='OPEN');
+      const wins=closed.filter(x=>Number(x.pnl)>0).length;
+      const losses=closed.filter(x=>Number(x.pnl)<0).length;
+      const pnl=closed.reduce((a,x)=>a+(Number(x.pnl)||0),0);
+      const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};
+      set('paperOpen',open.length);set('paperClosed',closed.length);set('paperWins',wins);set('paperLosses',losses);set('paperWinRate',closed.length?(wins/closed.length*100).toFixed(1)+'%':'0%');set('paperPnl',fmt(pnl));
+      const body=document.getElementById('paperTradesBody');
+      if(!body)return;
+      body.innerHTML=rows.slice(0,25).map(x=>`<tr><td>${esc(x.ts||'—')}</td><td><b>${esc(x.symbol||'—')}</b></td><td>${esc(x.option_symbol||'—')}</td><td>${esc(x.side||'—')}</td><td>${fmt(x.entry)}</td><td>${fmt(x.exit!=null?x.exit:x.last_price)}</td><td>${fmt(x.pnl)}</td><td>${esc(x.status||'—')}</td></tr>`).join('')||'<tr><td colspan="8">No paper trades yet — AI is waiting for a qualifying index signal.</td></tr>';
+    }catch(e){const b=document.getElementById('paperTradesBody');if(b)b.innerHTML='<tr><td colspan="8">Paper-trade status unavailable.</td></tr>'}
+  }
+  paperRefresh();setInterval(paperRefresh,10000);
+})();
+</script>
 </body>
 </html>
