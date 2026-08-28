@@ -7152,6 +7152,20 @@ AI_HIST_MIN_TRAIN = int(os.environ.get("AI_HIST_MIN_TRAIN", "300"))
 AI_OPTION_CAPTURE_MINUTES = int(os.environ.get("AI_OPTION_CAPTURE_MINUTES", "5"))
 AI_OPTION_CAPTURE_DAYS = int(os.environ.get("AI_OPTION_CAPTURE_DAYS", "0"))  # 0 = retain indefinitely
 
+# --- Directional index -> long-option paper engine ---
+# The historical GRU is trained on INDEX direction (future close > current close).
+# Live decisions therefore use the learned index direction first, then translate
+# that direction into a liquid CE/PE purchase.  This is intentionally paper-only.
+AI_DIRECTIONAL_ENABLED = os.environ.get("AI_DIRECTIONAL_ENABLED", "1").lower() not in ("0", "false", "no")
+AI_DIRECTIONAL_PAPER_ONLY = True
+AI_DIRECTIONAL_UP_PROB = float(os.environ.get("AI_DIRECTIONAL_UP_PROB", "0.55"))
+AI_DIRECTIONAL_DOWN_PROB = float(os.environ.get("AI_DIRECTIONAL_DOWN_PROB", "0.45"))
+AI_DIRECTIONAL_MIN_SCORE = float(os.environ.get("AI_DIRECTIONAL_MIN_SCORE", "55.0"))
+AI_DIRECTIONAL_TARGET_DELTA = float(os.environ.get("AI_DIRECTIONAL_TARGET_DELTA", "0.50"))
+AI_DIRECTIONAL_MAX_SPREAD_PCT = float(os.environ.get("AI_DIRECTIONAL_MAX_SPREAD_PCT", "10.0"))
+AI_DIRECTIONAL_MIN_VOLUME = int(os.environ.get("AI_DIRECTIONAL_MIN_VOLUME", "1"))
+AI_DIRECTIONAL_POLL_SECONDS = int(os.environ.get("AI_DIRECTIONAL_POLL_SECONDS", "60"))
+
 # Stability/performance controls for the large historical archive.
 AI_HIST_STATUS_CACHE_SECONDS = float(os.environ.get("AI_HIST_STATUS_CACHE_SECONDS", "5"))
 AI_HIST_TRAIN_RETRY_MINUTES = float(os.environ.get("AI_HIST_TRAIN_RETRY_MINUTES", "15"))
@@ -7344,6 +7358,165 @@ def ai_snapshot(symbol, params=None):
             "stop":stop,"target":target_price,"lot_size":lot,"iv":iv,"pcr":pcr,"volume":vol,
             "trend":trend,"momentum":momentum,"volatility":volatility,"components":{"trend":round(trend,2),"momentum":round(momentum,2),"volatility":round(vol_score,2),"pcr":round(pcr_score,2),"iv":round(iv_score,2)},
             "rr":round(abs(target_price-entry)/max(abs(entry-stop),0.0001),2), "ml_features":ml_features, "ml_probability":round(float(ml_prob),4), "dl_probability":round(float(dl_prob),4), "research_probability":round(float(research.get("probability",0.5)),4), "research_uncertainty":round(float(research.get("uncertainty",0.5)),4), "market_regime":research.get("regime","UNKNOWN"), "research_auc":float(research.get("auc",0)), "research_samples":int(research.get("samples",0)), "dl_samples":int(dl_model.get("samples",0)), "ml_samples":int(ml_model.get("samples",0)), "dl_sequence":dl_seq},None
+
+# ---------------------------------------------------------------------------
+# Directional index-learning -> CE/PE paper execution
+# ---------------------------------------------------------------------------
+# IMPORTANT: this engine does NOT learn from option prices to decide direction.
+# It learns the underlying index path first.  The live option is only the execution
+# instrument: UP -> BUY CE, DOWN -> BUY PE.  This keeps the historical training target
+# and the live decision target identical.
+def ai_directional_snapshot(symbol, params=None):
+    if not AI_DIRECTIONAL_ENABLED:
+        return None, "directional engine disabled"
+    params = params or ai_params()
+    data, err = get_chain_for_symbol(symbol)
+    if err:
+        return None, err
+    spot = float(data["spot"])
+    chain = data.get("chain") or []
+    if not chain or spot <= 0:
+        return None, "empty option chain / invalid spot"
+
+    # Build the same market-state feature vector used by the historical GRU.
+    # PCR/IV/volume are live context; the direction target remains index movement.
+    calls = [x for x in chain if x.get("instrument_type") == "CE"]
+    puts = [x for x in chain if x.get("instrument_type") == "PE"]
+    atm = min(chain, key=lambda x: abs(float(x.get("strike", 0)) - spot)) if chain else None
+    iv = float(atm.get("iv") or 0) if atm else 0.0
+    pcr = float(compute_pcr_and_max_pain(chain).get("pcr") or 1.0)
+    volume = float(sum(float(x.get("volume") or 0) for x in chain) / max(len(chain), 1))
+
+    hist = ai_market_history(symbol, 120)
+    prices = [float(x["spot"]) for x in hist if x.get("spot") is not None]
+    prices.append(spot)
+    ret5 = ((spot / prices[-6]) - 1) * 100 if len(prices) >= 6 and prices[-6] else 0.0
+    ret20 = ((spot / prices[-21]) - 1) * 100 if len(prices) >= 21 and prices[-21] else ret5
+    ma10 = mean(prices[-10:]) if len(prices) >= 10 else spot
+    ma30 = mean(prices[-30:]) if len(prices) >= 30 else ma10
+    trend = max(0, min(25, 12.5 + (ma10 / ma30 - 1) * 500)) if ma30 else 12.5
+    momentum = max(0, min(25, 12.5 + ret5 * 3 + ret20 * 1.5))
+    if len(prices) >= 10:
+        m = mean(prices[-10:])
+        sd = mean([(z - m) ** 2 for z in prices[-10:]]) ** 0.5
+        volatility = (sd / m * 100) if m else 0.0
+    else:
+        volatility = 0.0
+
+    features = ai_market_pattern_features(symbol, spot, iv, pcr, volume, trend, momentum)
+    seq = ai_dl_sequence(symbol, features)
+    dl_prob, dl_model = ai_dl_predict_sequence(seq)
+    ml_prob, ml_model = ai_ml_predict(features)
+
+    # Historical GRU target: 1 = future index close above current close.
+    if dl_prob >= AI_DIRECTIONAL_UP_PROB:
+        direction = "UP"
+        option_type = "CE"
+        confidence = dl_prob
+    elif dl_prob <= AI_DIRECTIONAL_DOWN_PROB:
+        direction = "DOWN"
+        option_type = "PE"
+        confidence = 1.0 - dl_prob
+    else:
+        return None, {
+            "error": f"GRU direction uncertain: p_up={dl_prob:.3f}",
+            "decision": "WAIT",
+            "p_up": round(dl_prob, 4),
+            "dl_samples": int(dl_model.get("samples", 0)),
+        }
+
+    # Confidence is the primary learned signal.  Momentum/trend are supporting
+    # context, not a replacement for the learned direction.
+    score = round(50.0 + max(0.0, confidence - 0.50) * 100.0, 2)
+    if direction == "UP":
+        context = max(0.0, min(1.0, ((trend - 12.5) + (momentum - 12.5)) / 25.0 + 0.5))
+    else:
+        context = max(0.0, min(1.0, ((12.5 - trend) + (12.5 - momentum)) / 25.0 + 0.5))
+    score = round(min(100.0, score * 0.85 + context * 15.0), 2)
+    if score < AI_DIRECTIONAL_MIN_SCORE:
+        return None, {"error": f"direction score {score:.1f} below {AI_DIRECTIONAL_MIN_SCORE:.1f}", "decision": "WAIT", "p_up": round(dl_prob, 4)}
+
+    candidates = [x for x in chain if x.get("instrument_type") == option_type and x.get("delta") is not None]
+    if not candidates:
+        return None, {"error": f"No {option_type} contracts with delta", "decision": "WAIT"}
+    target = min(candidates, key=lambda x: abs(abs(float(x.get("delta") or 0)) - AI_DIRECTIONAL_TARGET_DELTA))
+
+    bid = target.get("bid")
+    ask = target.get("ask")
+    ltp = target.get("ltp")
+    spread_pct = target.get("spread_pct")
+    volume_opt = int(target.get("volume") or 0)
+    if volume_opt < AI_DIRECTIONAL_MIN_VOLUME:
+        return None, {"error": f"No traded volume for {target.get('tradingsymbol')}", "decision": "WAIT"}
+    if ask is None or float(ask) <= 0:
+        return None, {"error": f"No executable ASK for {target.get('tradingsymbol')}", "decision": "WAIT"}
+    if spread_pct is not None and float(spread_pct) > AI_DIRECTIONAL_MAX_SPREAD_PCT:
+        return None, {"error": f"Spread {float(spread_pct):.1f}% too wide", "decision": "WAIT"}
+
+    entry = float(ask)  # BUY option -> pay the live ask, never midpoint/LTP.
+    stop = entry * (1 - float(params.get("stop_pct", 0.75)) / 100.0)
+    target_price = entry * (1 + float(params.get("target_pct", 1.50)) / 100.0)
+    lot = int(data.get("lot_size") or target.get("lot_size") or 1)
+    setup = {
+        "strategy_type": "INDEX_DIRECTIONAL_LONG_OPTION",
+        "learning_target": "INDEX_DIRECTION",
+        "direction": direction,
+        "option_type": option_type,
+        "p_up": round(float(dl_prob), 6),
+        "direction_confidence": round(float(confidence), 6),
+        "score": score,
+        "spot": spot,
+        "iv": iv, "pcr": pcr, "volume": volume,
+        "trend": trend, "momentum": momentum, "volatility": volatility,
+        "ml_probability": round(float(ml_prob), 6),
+        "ml_samples": int(ml_model.get("samples", 0)),
+        "dl_probability": round(float(dl_prob), 6),
+        "dl_samples": int(dl_model.get("samples", 0)),
+        "dl_sequence": seq,
+        "ml_features": features,
+        "historical_model_status": dl_model.get("status"),
+        "paper_only": True,
+    }
+    return {
+        "symbol": symbol,
+        "spot": spot,
+        "score": score,
+        "side": "LONG",
+        "direction": direction,
+        "option_type": option_type,
+        "option_symbol": target.get("tradingsymbol"),
+        "token": int(target.get("instrument_token") or target.get("token") or 0),
+        "entry": entry,
+        "entry_price_source": "ASK",
+        "option_ltp": ltp,
+        "option_bid": bid,
+        "option_ask": ask,
+        "option_volume": volume_opt,
+        "option_oi": int(target.get("oi") or 0),
+        "spread_pct": spread_pct,
+        "bid_qty": int(target.get("bid_qty") or 0),
+        "ask_qty": int(target.get("ask_qty") or 0),
+        "liquidity_status": "EXECUTABLE",
+        "stop": stop,
+        "target": target_price,
+        "lot_size": lot,
+        "iv": iv, "pcr": pcr, "volume": volume,
+        "trend": trend, "momentum": momentum, "volatility": volatility,
+        "components": {"learned_direction_confidence": round(confidence * 100, 2), "trend": round(trend, 2), "momentum": round(momentum, 2)},
+        "rr": round((target_price - entry) / max(entry - stop, 0.0001), 2),
+        "ml_features": features,
+        "ml_probability": round(float(ml_prob), 4),
+        "dl_probability": round(float(dl_prob), 4),
+        "research_probability": 0.5,
+        "research_uncertainty": 0.5,
+        "market_regime": "INDEX_DIRECTIONAL",
+        "research_auc": 0.0,
+        "research_samples": 0,
+        "dl_samples": int(dl_model.get("samples", 0)),
+        "ml_samples": int(ml_model.get("samples", 0)),
+        "dl_sequence": seq,
+        "setup_json_extra": setup,
+    }, None
 
 # ---------------------------------------------------------------------------
 # Market-pattern ML layer
@@ -7633,7 +7806,7 @@ def ai_dl_train():
 def _ai_dl_persist(params,acc,auc,samples,train_samples,val_samples,status="TRAINED"):
     updated=datetime.now(IST).isoformat();blob=json.dumps(_gru_to_json(params),separators=(",",":"));c=ai_db()
     c.execute("""INSERT OR REPLACE INTO ai_dl_model(id,updated_at,w1,b1,w2,b2,w3,b3,samples,accuracy,auc,status) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)""",
-              (updated,blob,None,None,None,None,None,0.0,samples,acc,auc,status))
+              (updated,blob,None,None,None,None,0.0,samples,acc,auc,status))
     c.commit();c.close();ai_log("LEARNING","DL_GRU_TRAIN",f"GRU sequence model samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}")
     return {**ai_dl_model(),"train_samples":train_samples,"validation_samples":val_samples}
 
@@ -7807,8 +7980,14 @@ def ai_open_trade(x,ver):
         ai_log("TRADE","PAPER_REJECTED_LIQUIDITY",f'{x.get("symbol")} {x.get("option_symbol")} no executable entry quote')
         return False
     if len(ai_open_trades())>=int(p["max_positions"]):return False
+    setup=dict(x)
+    extra=setup.pop("setup_json_extra",None) or {}
+    setup.update(extra)
+    # This engine is permanently paper-only: there is no live-order branch here.
+    setup["paper_only"]=True
+    setup["execution_mode"]="track"
     c=ai_db();c.execute("INSERT INTO ai_trades(version,ts,symbol,option_symbol,token,side,entry,stop,target,qty,score,setup_json,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      (ver,datetime.now(IST).isoformat(),x["symbol"],x["option_symbol"],x["token"],x["side"],x["entry"],x["stop"],x["target"],x["lot_size"],x["score"],json.dumps(x),"OPEN"));c.commit();c.close();ai_log("TRADE","AUTO_PAPER_OPEN",f'{x["symbol"]} {x["option_symbol"]} score={x["score"]} entry={x["entry"]:.2f} {x.get("entry_price_source")} vol={x.get("option_volume",0)} ML={x.get("ml_probability",0):.3f}');return True
+      (ver,datetime.now(IST).isoformat(),x["symbol"],x["option_symbol"],x["token"],x["side"],x["entry"],x["stop"],x["target"],x["lot_size"],x["score"],json.dumps(setup),"OPEN"));c.commit();c.close();ai_log("TRADE","AUTO_PAPER_OPEN",f'{x["symbol"]} BUY {x.get("option_type")} {x["option_symbol"]} score={x["score"]} entry={x["entry"]:.2f} ASK vol={x.get("option_volume",0)} p_up={x.get("dl_probability",0):.3f}');return True
 
 def ai_close_trades():
     if not require_session():return
@@ -7858,10 +8037,13 @@ def ai_close_trades():
                 if entry_ts.tzinfo is None: entry_ts=entry_ts.replace(tzinfo=IST)
                 horizon=max(0,(exit_ts-entry_ts).total_seconds())
                 c=ai_db();c.execute("UPDATE ai_trades SET status='CLOSED',exit=?,exit_ts=?,pnl=?,r_multiple=?,exit_reason=? WHERE id=?",(exitp,exit_ts.isoformat(),pnl,rm,hit[0],t["id"]));c.commit();c.close()
-                ai_ml_record_sample(t["id"],t["version"],t["symbol"],setup.get("ml_features") or {},1 if pnl>0 else 0,rm,horizon)
+                # Live learning target matches historical training: 1 = index moved UP, 0 = DOWN.
+                entry_spot=float(setup.get("spot") or 0.0)
+                direction_label=1 if (spot is not None and entry_spot > 0 and float(spot) > entry_spot) else 0
+                ai_ml_record_sample(t["id"],t["version"],t["symbol"],setup.get("ml_features") or {},direction_label,rm,horizon)
                 dl_seq=setup.get("dl_sequence") or ai_dl_sequence(t["symbol"], setup.get("ml_features") or {})
-                ai_dl_record_sample(t["id"],t["version"],t["symbol"],dl_seq,1 if pnl>0 else 0,rm,horizon)
-                ai_log("TRADE","AUTO_PAPER_CLOSE",f'id={t["id"]} {hit[0]} pnl={pnl:.2f} R={rm:.2f}; ML sample recorded')
+                ai_dl_record_sample(t["id"],t["version"],t["symbol"],dl_seq,direction_label,rm,horizon)
+                ai_log("TRADE","AUTO_PAPER_CLOSE",f'id={t["id"]} {hit[0]} pnl={pnl:.2f} R={rm:.2f}; index_direction_label={direction_label}; learning sample recorded')
         except Exception as e:ai_log("ERROR","AI_MONITOR",str(e))
 
 def ai_record_decision(ver,x,decision,reason):
@@ -7987,70 +8169,51 @@ def ai_learning_state():
 
 
 def ai_cycle():
-    c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('last_cycle_at',?)",(datetime.now(IST).isoformat(),)); c.commit(); c.close()
-    # The browser tab is NOT involved in this loop. Once the Python process is
-    # running, it operates whenever a valid Zerodha session exists and the NSE
-    # market is open. Outside market hours it simply sleeps and resumes next day.
-    if not ai_market_open() or not require_session():
+    """Run the intended index-direction -> CE/PE paper-learning cycle."""
+    c = ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('last_cycle_at',?)", (datetime.now(IST).isoformat(),)); c.commit(); c.close()
+    if not ai_market_open() or not require_session() or not AI_DIRECTIONAL_ENABLED:
         return
-    c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('last_activity_at',?)",(datetime.now(IST).isoformat(),)); c.commit(); c.close()
-    ai_close_trades()
-    ch=ai_champion()
-    champion_ver=ch["version"] if ch else '1.0'
-    champion_params=ai_params()
-    challenger=None
-    c=ai_db(); row=c.execute("SELECT * FROM ai_versions WHERE status='CHALLENGER' ORDER BY id LIMIT 1").fetchone(); c.close()
-    if row:
-        challenger=dict(row)
+    c = ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('last_activity_at',?)", (datetime.now(IST).isoformat(),)); c.commit(); c.close()
 
-    batch,total,cursor=ai_scan_batch()
-    c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('last_scan_at',?)",(datetime.now(IST).isoformat(),)); c.commit(); c.close()
-    ai_log('SCAN','AI_UNIVERSE',f'Batch {len(batch)} / universe {total}; cursor={cursor}; mode={AI_UNIVERSE_MODE}')
-    open_now=ai_open_trades()
+    # First manage existing paper positions using executable bid prices.
+    ai_close_trades()
+    ch = ai_champion()
+    champion_ver = ch["version"] if ch else "1.0"
+    params = ai_params()
+    batch, total, cursor = ai_scan_batch()
+    c = ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('last_scan_at',?)", (datetime.now(IST).isoformat(),)); c.commit(); c.close()
+    ai_log("SCAN", "DIRECTIONAL_UNIVERSE", f"Batch {len(batch)} / universe {total}; cursor={cursor}; INDEX_DIRECTION -> LONG CE/PE; PAPER ONLY")
+
+    open_now = ai_open_trades()
     for sym in batch:
         try:
-            # Build one market snapshot, then test the same opportunity against
-            # Champion and Challenger rules. This makes the challenger a real
-            # paper experiment instead of merely a database record.
-            x,err=ai_snapshot(sym, champion_params)
+            x, err = ai_directional_snapshot(sym, params)
             if err:
-                ai_log('ERROR','AI_SCAN',f'{sym}: {err}')
+                detail = err if isinstance(err, str) else str(err.get("error", "WAIT"))
+                ai_log("SCAN", "DIRECTIONAL_WAIT", f"{sym}: {detail}")
                 continue
-            ai_store_market(sym,x)
-            for ver,params,role in [(champion_ver,champion_params,'CHAMPION')]+(
-                    [(challenger['version'],json.loads(challenger['params']),'CHALLENGER')] if challenger else []):
-                # Use the current version's model thresholds, but the learning stage is
-                # global because the samples are produced by the same paper-trade engine.
-                ls = ai_learning_state()
-                ml_ready=ls["ml_ready"]
-                dl_ready=ls["dl_ready"]
-                ml_prob=float(x.get("ml_probability",0.5))
-                dl_prob=float(x.get("dl_probability",0.5))
-                if ls["bootstrap"]:
-                    effective_threshold=max(float(params.get("bootstrap_min_score",55.0)), ls["effective_score"])
-                    approved=(x["score"]>=effective_threshold and x["rr"]>=float(params["min_rr"]))
-                    gate_label=f'bootstrap gate={effective_threshold:.1f}'
-                else:
-                    effective_threshold=float(params["min_score"])
-                    ml_ok=ml_prob>=float(params.get("ml_min_probability",0.58))
-                    dl_ok=dl_prob>=float(params.get("ml_min_probability",0.58))
-                    rp=float(x.get("research_probability",0.5)); ru=float(x.get("research_uncertainty",0.5))
-                    research_ok=rp>=float(params.get("research_min_probability",0.60)) and ru<=float(params.get("research_max_uncertainty",0.16))
-                    approved=(x["score"]>=effective_threshold and x["rr"]>=float(params["min_rr"]) and ml_ok and dl_ok and research_ok)
-                    gate_label=f'mature gate={effective_threshold:.1f} ensemble={rp:.3f}±{ru:.3f}'
-                reason=f'{role}: {ls["stage"]} score={x["score"]} rr={x["rr"]} ML={ml_prob:.3f} ({"active" if ml_ready else "warming"}) DL={dl_prob:.3f} ({"active" if dl_ready else "warming"}) {gate_label}'
-                ai_record_decision(ver,x,'APPROVE' if approved else 'REJECT',reason)
-                already=any(t['symbol']==sym and t['version']==ver for t in open_now)
-                if approved and not already and len(open_now)<int(champion_params["max_positions"]):
-                    xp=dict(x)
-                    xp["stop"]=xp["entry"]*(1-float(params["stop_pct"])/100)
-                    xp["target"]=xp["entry"]*(1+float(params["target_pct"])/100)
-                    xp["rr"]=round((xp["target"]-xp["entry"])/max(xp["entry"]-xp["stop"],0.0001),2)
-                    if ai_open_trade(xp,ver):
-                        open_now=ai_open_trades()
+            if not x:
+                continue
+            # One decision per symbol/version.  Existing trades are never duplicated.
+            already = any(t["symbol"] == sym and t["version"] == champion_ver for t in open_now)
+            reason = (f"INDEX_DIRECTION: {x['direction']} p_up={x['dl_probability']:.3f} "
+                      f"confidence={max(x['dl_probability'], 1-x['dl_probability']):.3f} "
+                      f"score={x['score']:.1f} -> BUY {x['option_type']} {x['option_symbol']} "
+                      f"historical_GRU_samples={x['dl_samples']} PAPER_ONLY")
+            ai_record_decision(champion_ver, x, "APPROVE" if not already else "REJECT", reason if not already else reason + " duplicate open position")
+            if already or len(open_now) >= int(params.get("max_positions", 6)):
+                continue
+            # Hard safety: directional engine can only create a LONG option paper trade.
+            x["side"] = "LONG"
+            x["setup_json_extra"]["execution_mode"] = "track"
+            if ai_open_trade(x, champion_ver):
+                open_now = ai_open_trades()
         except Exception as e:
-            ai_log('ERROR','AI_SCAN',f'{sym}: {e}')
-    ai_learn(); ai_research_train(); ai_evaluate_challenger()
+            ai_log("ERROR", "DIRECTIONAL_SCAN", f"{sym}: {type(e).__name__}: {e}")
+
+    ai_learn()
+    ai_research_train()
+    ai_evaluate_challenger()
 
 # ---------------------------------------------------------------------------
 # Persistent live option-chain recorder.
@@ -8282,7 +8445,7 @@ def ai_hist_train_deep(force=False):
         params,acc,auc,samples,train_samples,val_samples=trained
         _ai_dl_persist(params,acc,auc,samples,train_samples,val_samples,status="HISTORICAL_PRETRAINED")
         now=datetime.now(IST).isoformat();c=ai_db();hist_status="PRETRAINED" if val_samples and len(set(Y[-val_samples:].astype(int).tolist()))>=2 else "PRETRAINED — AUC UNAVAILABLE"
-        c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days) VALUES(1,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS))
+        c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS))
         c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_train_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("PRETRAINED — LIVE GRU LEARNING CONTINUES",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_collector_status',?)",("HISTORY COLLECTION COMPLETE",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_train_detail',?)",(f"architecture=GRU-{DL_GRU_HIDDEN} sequence={DL_SEQUENCE_LEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",));c.commit();c.close()
         ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}");return ai_hist_status()
     except Exception as e:
@@ -8426,6 +8589,98 @@ def ai_loop():
             if ai_settings().get('enabled',1):ai_cycle()
         except Exception as e:ai_log('ERROR','AI_ENGINE',str(e))
         time.sleep(AI_POLL_SECONDS)
+
+@app.route('/api/ai-evolution/directional-latest')
+def ai_directional_latest():
+    """Return the latest directional AI decision for each index.
+    The dashboard uses this endpoint for the three live decision cards.
+    """
+    ai_init_db()
+    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+    latest = {}
+    c = ai_db()
+    rows = c.execute(
+        "SELECT id,ts,version,symbol,score,decision,reason,setup_json "
+        "FROM ai_decisions ORDER BY id DESC LIMIT 500"
+    ).fetchall()
+    c.close()
+
+    for r in rows:
+        sym = r["symbol"]
+        if sym not in symbols or sym in latest:
+            continue
+        try:
+            setup = json.loads(r["setup_json"] or "{}")
+        except Exception:
+            setup = {}
+        if setup.get("strategy_type") != "INDEX_DIRECTIONAL_LONG_OPTION":
+            continue
+
+        p_up = setup.get("p_up", setup.get("dl_probability"))
+        direction = setup.get("direction")
+        option_type = setup.get("option_type")
+        latest[sym] = {
+            "symbol": sym,
+            "ts": r["ts"],
+            "version": r["version"],
+            "score": float(r["score"] or 0),
+            "decision": r["decision"],
+            "reason": r["reason"] or "",
+            "direction": direction or ("UP" if option_type == "CE" else "DOWN" if option_type == "PE" else "WAIT"),
+            "option_type": option_type,
+            "option_symbol": setup.get("option_symbol"),
+            "p_up": float(p_up) if p_up is not None else None,
+            "dl_probability": float(setup.get("dl_probability")) if setup.get("dl_probability") is not None else None,
+            "ml_probability": float(setup.get("ml_probability")) if setup.get("ml_probability") is not None else None,
+            "dl_samples": int(setup.get("dl_samples", 0) or 0),
+            "ml_samples": int(setup.get("ml_samples", 0) or 0),
+            "spot": setup.get("spot"),
+            "paper_only": True
+        }
+
+    # Always return all three cards, even before the first qualifying decision.
+    result = []
+    for sym in symbols:
+        result.append(latest.get(sym, {
+            "symbol": sym,
+            "ts": None,
+            "version": None,
+            "score": None,
+            "decision": "WAIT",
+            "reason": "No directional decision yet — waiting for the next AI scan.",
+            "direction": "WAIT",
+            "option_type": None,
+            "option_symbol": None,
+            "p_up": None,
+            "dl_probability": None,
+            "ml_probability": None,
+            "dl_samples": 0,
+            "ml_samples": 0,
+            "spot": None,
+            "paper_only": True
+        }))
+    return jsonify({"symbols": result})
+
+
+@app.route('/api/ai-evolution/directional-status')
+def ai_directional_status():
+    ai_init_db()
+    c=ai_db(); rt={r['key']:r['value'] for r in c.execute('SELECT key,value FROM ai_runtime').fetchall()}; c.close()
+    dl=ai_dl_model(); ml=ai_ml_model(); hs=ai_hist_status()
+    return jsonify({
+        "enabled": AI_DIRECTIONAL_ENABLED,
+        "paper_only": True,
+        "logic": "INDEX_DIRECTION -> BUY CE/PE",
+        "up_probability": AI_DIRECTIONAL_UP_PROB,
+        "down_probability": AI_DIRECTIONAL_DOWN_PROB,
+        "min_score": AI_DIRECTIONAL_MIN_SCORE,
+        "historical_gru": dl,
+        "live_ml": ml,
+        "historical": hs,
+        "open_directional_trades": [t for t in ai_open_trades() if (json.loads(t.get('setup_json') or '{}').get('strategy_type') == 'INDEX_DIRECTIONAL_LONG_OPTION')],
+        "last_cycle_at": rt.get('last_cycle_at'),
+        "last_activity_at": rt.get('last_activity_at'),
+    })
 
 @app.route('/api/ai-evolution/status')
 def ai_status():
