@@ -2172,8 +2172,12 @@ function switchTopTab(which) {
     window.__niftyBreakoutInitedOnce = true;
     initNiftyBreakoutTab();
   }
-  if (isAIEvolution && typeof initAIEvolutionUI === "function") {
-    initAIEvolutionUI();
+  if (isAIEvolution) {
+    if (typeof initAIEvolutionUI === "function") {
+      initAIEvolutionUI();
+    } else {
+      console.error('[AI-EVOLUTION] initAIEvolutionUI is not defined — the page is likely running a cached/stale copy of this HTML. Hard-refresh (Ctrl+Shift+R) or clear cache.');
+    }
   }
 }
 
@@ -2412,6 +2416,6 @@ async function refreshAIEvolution(){
     const db=document.getElementById('aiNDecisionTable');if(db)db.innerHTML=(decs||[]).slice(0,40).map(x=>`<tr><td>${aiEscN(x.ts)}</td><td>${aiEscN(x.symbol)}</td><td>${aiEscN(x.decision)}</td><td>${aiEscN(x.reason)}</td></tr>`).join('')||'<tr><td colspan="4">No decisions yet.</td></tr>';
   }catch(e){setN('aiNStatus','AI status error: '+e.message)}
 }
-function initAIEvolutionUI(){if(window.__aiNewInit)return;window.__aiNewInit=true;const b=document.getElementById('aiNRun');if(b)b.onclick=async()=>{setN('aiNStatus','Running…');try{await aiGet('/api/ai-evolution/cycle',{method:'POST'});await refreshAIEvolution();setN('aiNStatus','Cycle complete · PAPER ONLY')}catch(e){setN('aiNStatus',e.message)}};refreshAIEvolution();window.__aiNewTimer=setInterval(refreshAIEvolution,10000)}
+function initAIEvolutionUI(){if(window.__aiNewInit)return;window.__aiNewInit=true;console.info('[AI-EVOLUTION] init running');window.addEventListener('error',ev=>{console.error('[AI-EVOLUTION] uncaught error:',ev.message,ev.filename,ev.lineno);setN('aiNStatus','JS error: '+ev.message+' ('+ev.filename+':'+ev.lineno+')')});const b=document.getElementById('aiNRun');if(b)b.onclick=async()=>{setN('aiNStatus','Running…');try{await aiGet('/api/ai-evolution/cycle',{method:'POST'});await refreshAIEvolution();setN('aiNStatus','Cycle complete · PAPER ONLY')}catch(e){setN('aiNStatus',e.message)}};refreshAIEvolution();window.__aiNewTimer=setInterval(refreshAIEvolution,10000);console.info('[AI-EVOLUTION] init complete, button bound:',!!b)}
 </body>
 </html>
