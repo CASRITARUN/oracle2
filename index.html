@@ -458,6 +458,11 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 @media(max-width:700px){#autoTradingNew .cockpit{grid-template-columns:1fr;margin-left:14px;margin-right:14px}.decision-stage{min-height:330px}.visual-panel{min-height:280px}}
 </style>
 
+<style id="realLiveChartCSS">
+#liveMonitorCanvas{width:100%;height:128px;display:block}
+#liveMonitorPanel .visual-title{margin-bottom:8px}
+#liveMonitorPanel.live{border-color:#1c647b;box-shadow:0 0 35px rgba(64,216,244,.05),inset 0 0 35px rgba(64,216,244,.025)}
+</style>
 </head>
 <body>
 
@@ -1165,6 +1170,23 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
         PAPER mode is the default. Live execution remains locked until the strategy passes independent validation.
       </div>
     </section>
+
+    <section class="ai-card" id="aatHistTraining">
+      <div class="ai-sub">HISTORICAL MODEL TRAINING · 12-YEAR ARCHIVE</div>
+      <div class="ai-metric-grid" style="margin-top:10px">
+        <div class="ai-metric"><small>ARCHIVE</small><b id="aatHistCandles">—</b></div>
+        <div class="ai-metric"><small>GRU</small><b id="aatHistGRU">NOT TRAINED</b></div>
+        <div class="ai-metric"><small>HISTORICAL ML</small><b id="aatHistML">NOT TRAINED</b></div>
+        <div class="ai-metric"><small>GRU AUC</small><b id="aatHistGRUAUC">—</b></div>
+        <div class="ai-metric"><small>ML AUC</small><b id="aatHistMLAUC">—</b></div>
+        <div class="ai-metric"><small>VALIDATION</small><b id="aatHistValidation">—</b></div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 24px 12px">
+        <button class="secondary" id="aatTrainHistoricalBtn">TRAIN HISTORICAL GRU + ML</button>
+        <span class="ai-pill" id="aatHistTrainStatus">WAITING</span>
+      </div>
+      <div class="ai-note" id="aatHistDetail" style="margin:0 24px 20px">Historical directional ML + GRU status will appear here. No live trade should be considered validated until the historical and out-of-sample gates are satisfied.</div>
+    </section>
 <!-- VISUAL TRADING COCKPIT — LIVE DATA ONLY -->
 <div id="liveCockpit" class="cockpit">
   <div class="decision-stage">
@@ -1220,21 +1242,13 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
   </div>
 </div>
 
-<div class="visual-panel" style="margin:0 24px 14px;min-height:190px">
-  <div class="visual-title">EXPECTED MOVE vs OPTION PREMIUM — LIVE MONITOR</div>
-  <svg class="mini-chart" viewBox="0 0 900 120" preserveAspectRatio="none">
-    <defs>
-      <linearGradient id="chartFillAt" x1="0" x2="0" y1="0" y2="1">
-        <stop offset="0" stop-color="#26c7e8" stop-opacity=".22"/>
-        <stop offset="1" stop-color="#26c7e8" stop-opacity="0"/>
-      </linearGradient>
-    </defs>
-    <path d="M0 92 C55 85 70 60 125 72 S205 98 255 62 S330 28 380 51 S455 86 510 47 S580 34 625 57 S705 91 760 42 S835 27 900 20 L900 120 L0 120Z" fill="url(#chartFillAt)"/>
-    <path d="M0 92 C55 85 70 60 125 72 S205 98 255 62 S330 28 380 51 S455 86 510 47 S580 34 625 57 S705 91 760 42 S835 27 900 20" fill="none" stroke="#40d8f4" stroke-width="2.5"/>
-    <path d="M0 102 C65 99 95 91 150 94 S230 76 280 82 S360 94 410 76 S500 69 555 72 S640 64 700 70 S805 52 900 49" fill="none" stroke="#a98bff" stroke-width="1.7" stroke-dasharray="5 5"/>
-    <line x1="0" y1="105" x2="900" y2="105" stroke="#17374b"/>
-  </svg>
-  <div class="chart-labels"><span>OPEN</span><span>+15M</span><span>+30M</span><span>+45M</span><span>+60M</span><span>HORIZON</span></div>
+<div class="visual-panel" id="liveMonitorPanel" style="margin:0 24px 14px;min-height:190px">
+  <div class="visual-title">EXPECTED MOVE vs OPTION PREMIUM — LIVE MONITOR <span id="liveTimestampLabel" style="float:right;letter-spacing:.08em">WAITING</span></div>
+  <div id="liveMonitorClosed" style="height:128px;display:flex;align-items:center;justify-content:center;text-align:center;color:#668398;font:800 10px ui-monospace,monospace;letter-spacing:.12em">MARKET CLOSED · NO LIVE KITE DATA</div>
+  <div id="liveMonitorData" style="display:none">
+    <canvas id="liveMonitorCanvas" class="mini-chart" height="150"></canvas>
+    <div class="chart-labels"><span>LIVE HISTORY</span><span id="liveSpotLabel">SPOT —</span><span id="liveIvLabel">IV —</span><span id="livePcrLabel">PCR —</span><span id="liveOptionLtp">OPTION —</span><span id="liveMoveVal">MOVE —</span></div>
+  </div>
 </div>
 
 
@@ -1367,6 +1381,33 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
   function set(id,v){ if($(id)) $(id).textContent = v ?? '—'; }
 
   
+  const liveChart={points:[],max:60};
+  function drawLiveChart(){
+    const c=document.getElementById('liveMonitorCanvas'); if(!c)return;
+    const box=c.getBoundingClientRect(), dpr=window.devicePixelRatio||1, w=Math.max(300,box.width), h=128;
+    c.width=Math.round(w*dpr); c.height=Math.round(h*dpr); const x=c.getContext('2d'); x.scale(dpr,dpr);
+    x.clearRect(0,0,w,h); x.strokeStyle='#17374b'; x.lineWidth=1;
+    for(let i=1;i<4;i++){const yy=i*h/4;x.beginPath();x.moveTo(0,yy);x.lineTo(w,yy);x.stroke()}
+    if(liveChart.points.length<2){x.fillStyle='#587589';x.font='800 9px ui-monospace,monospace';x.textAlign='center';x.fillText('COLLECTING LIVE KITE OBSERVATIONS …',w/2,h/2);return;}
+    const a=liveChart.points.slice(-liveChart.max);
+    const vals=a.flatMap(p=>[p.premiumNorm,p.moveNorm]); const lo=Math.min(...vals), hi=Math.max(...vals); const span=Math.max(.001,hi-lo);
+    const px=i=>i*(w-18)/(a.length-1)+9, py=v=>h-10-((v-lo)/span)*(h-25);
+    function line(key,stroke,dash){x.beginPath();x.strokeStyle=stroke;x.lineWidth=key==='premiumNorm'?2.4:1.8;if(dash)x.setLineDash([5,5]);a.forEach((p,i)=>{const xx=px(i),yy=py(p[key]);i?x.lineTo(xx,yy):x.moveTo(xx,yy)});x.stroke();x.setLineDash([])}
+    line('premiumNorm','#40d8f4',false); line('moveNorm','#a98bff',true);
+    const last=a[a.length-1]; x.fillStyle='#40d8f4';x.beginPath();x.arc(px(a.length-1),py(last.premiumNorm),3.5,0,Math.PI*2);x.fill();
+    x.fillStyle='#a98bff';x.beginPath();x.arc(px(a.length-1),py(last.moveNorm),3,0,Math.PI*2);x.fill();
+    x.fillStyle='#5f7f93';x.font='700 8px ui-monospace,monospace';x.textAlign='left';x.fillText('OPTION PREMIUM',10,11);x.fillStyle='#a98bff';x.fillText('EXPECTED MOVE',10,23);
+  }
+  function pushLiveChartPoint(r){
+    if(!r || r.live!==true || r.option_ltp==null || r.expected_move==null)return;
+    const premium=Number(r.option_ltp), move=Number(r.expected_move);
+    if(!Number.isFinite(premium)||!Number.isFinite(move))return;
+    const baseP=liveChart.points[0]?.rawPremium ?? premium, baseM=liveChart.points[0]?.rawMove ?? move;
+    liveChart.points.push({rawPremium:premium,rawMove:move,premiumNorm:(premium/(baseP||1)-1)*100,moveNorm:(move/(baseM||1)-1)*100});
+    if(liveChart.points.length>liveChart.max)liveChart.points.shift();
+    drawLiveChart();
+  }
+
   function updateCockpitLive(payload){
     const open=!!payload.market_open, rows=payload.decisions||[];
     const r=rows.find(x=>x.symbol==='NIFTY')||rows[0]||{};
@@ -1380,14 +1421,16 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
     if($('cockpitAction'))$('cockpitAction').style.color=col;
     const setBar=(id,val)=>{const e=$(id);if(e)e.style.width=val==null?'0%':Math.max(0,Math.min(100,Number(val)*100))+'%'};
     const setPct=(id,val)=>setN(id,val==null?'—':(Number(val)*100).toFixed(1)+'%');
-    if(closed){ ['liveGruBar','liveMlBar','liveEnsBar','liveConfBar','liveMoveBar','livePremiumBar','liveLiquidityBar'].forEach(id=>setBar(id,null)); ['liveGruVal','liveMlVal','liveEnsVal','liveConfVal','liveGaugeValue','liveCeDelta','livePeDelta','liveOptionLtp','liveSpread','liveMoveVal','livePremiumVal','liveLiquidityVal'].forEach(id=>setN(id,'—')); setN('liveGaugeCaption','WAITING FOR LIVE KITE DATA'); setN('liveRegimeText','—');setN('liveRegimeSub','MARKET CLOSED');setN('liveSpotLabel','SPOT —');setN('liveIvLabel','IV —');setN('livePcrLabel','PCR —');setN('liveTimestampLabel','CLOSED');$('liveMonitorClosed').style.display='flex';$('liveMonitorData').style.display='none';return; }
+    if(closed){ liveChart.points=[]; const lc=document.getElementById('liveMonitorCanvas'); if(lc) setTimeout(drawLiveChart,0); ['liveGruBar','liveMlBar','liveEnsBar','liveConfBar','liveMoveBar','livePremiumBar','liveLiquidityBar'].forEach(id=>setBar(id,null)); ['liveGruVal','liveMlVal','liveEnsVal','liveConfVal','liveGaugeValue','liveCeDelta','livePeDelta','liveOptionLtp','liveSpread','liveMoveVal','livePremiumVal','liveLiquidityVal'].forEach(id=>setN(id,'—')); setN('liveGaugeCaption','WAITING FOR LIVE KITE DATA'); setN('liveRegimeText','—');setN('liveRegimeSub','MARKET CLOSED');setN('liveSpotLabel','SPOT —');setN('liveIvLabel','IV —');setN('livePcrLabel','PCR —');setN('liveTimestampLabel','CLOSED');$('liveMonitorClosed').style.display='flex';$('liveMonitorData').style.display='none';document.getElementById('liveMonitorPanel')?.classList.remove('live');return; }
     setPct('liveGruVal',r.dl_probability);setPct('liveMlVal',r.ml_probability);setPct('liveEnsVal',r.ensemble_confidence);setPct('liveConfVal',r.confidence);setBar('liveGruBar',r.dl_probability);setBar('liveMlBar',r.ml_probability);setBar('liveEnsBar',r.ensemble_confidence);setBar('liveConfBar',r.confidence);
     setN('liveGaugeValue',r.confidence==null?'—':(Number(r.confidence)*100).toFixed(1)+'%');setN('liveGaugeCaption',r.reason||'LIVE MODEL STATE');
     setN('liveRegimeText',r.market_regime||'—');setN('liveRegimeSub',r.direction||'WAIT');
     const dot=$('liveOrbitDot'); if(dot){dot.style.left=(Math.max(8,Math.min(88,50+(Number(r.momentum||12.5)-12.5)*3)))+'%';dot.style.top=(Math.max(8,Math.min(88,50-(Number(r.trend||12.5)-12.5)*3)))+'%';}
     setN('liveCeDelta',r.direction==='UP'&&r.option_delta!=null?Number(r.option_delta).toFixed(2)+' Δ':'—');setN('livePeDelta',r.direction==='DOWN'&&r.option_delta!=null?Number(r.option_delta).toFixed(2)+' Δ':'—');setN('liveOptionLtp',r.option_ltp==null?'—':'₹'+Number(r.option_ltp).toFixed(2));setN('liveSpread',r.spread_pct==null?'—':Number(r.spread_pct).toFixed(2)+'%');
-    setBar('liveMoveBar',r.expected_move_pct==null?0:Math.min(1,Number(r.expected_move_pct)/2));setN('liveMoveVal',r.expected_move==null?'—':Number(r.expected_move).toFixed(1)+' pts');setBar('livePremiumBar',r.option_ltp==null?0:Math.min(1,Number(r.option_ltp)/500));setN('livePremiumVal',r.option_ltp==null?'—':'₹'+Number(r.option_ltp).toFixed(2));const liq=Math.min(1,Math.log1p(Number(r.option_volume||0)+Number(r.option_oi||0))/12);setBar('liveLiquidityBar',liq);setN('liveLiquidityVal',(liq*100).toFixed(0)+'%');setN('liveSpotLabel','SPOT '+(r.spot==null?'—':Number(r.spot).toLocaleString('en-IN')));setN('liveIvLabel','IV '+(r.iv==null?'—':Number(r.iv).toFixed(2)));setN('livePcrLabel','PCR '+(r.pcr==null?'—':Number(r.pcr).toFixed(2)));setN('liveTimestampLabel','LIVE '+(payload.timestamp||'').replace('T',' ').slice(0,19));$('liveMonitorClosed').style.display='none';$('liveMonitorData').style.display='block';
+    setBar('liveMoveBar',r.expected_move_pct==null?0:Math.min(1,Number(r.expected_move_pct)/2));setN('liveMoveVal',r.expected_move==null?'—':Number(r.expected_move).toFixed(1)+' pts');setBar('livePremiumBar',r.option_ltp==null?0:Math.min(1,Number(r.option_ltp)/500));setN('livePremiumVal',r.option_ltp==null?'—':'₹'+Number(r.option_ltp).toFixed(2));const liq=Math.min(1,Math.log1p(Number(r.option_volume||0)+Number(r.option_oi||0))/12);setBar('liveLiquidityBar',liq);setN('liveLiquidityVal',(liq*100).toFixed(0)+'%');setN('liveSpotLabel','SPOT '+(r.spot==null?'—':Number(r.spot).toLocaleString('en-IN')));setN('liveIvLabel','IV '+(r.iv==null?'—':Number(r.iv).toFixed(2)));setN('livePcrLabel','PCR '+(r.pcr==null?'—':Number(r.pcr).toFixed(2)));setN('liveTimestampLabel','LIVE '+(payload.timestamp||'').replace('T',' ').slice(0,19));$('liveMonitorClosed').style.display='none';$('liveMonitorData').style.display='block';document.getElementById('liveMonitorPanel')?.classList.add('live');pushLiveChartPoint(r);
   }
+
+  window.addEventListener('resize',drawLiveChart);
 
   function setMode(mode){
     set('autoModeBadge', mode === 'LIVE' ? 'LIVE TRADE — ARMED' : 'PAPER TRADE'); set('autoHeroMode', mode === 'LIVE' ? 'LIVE' : 'PAPER');
@@ -3110,6 +3153,15 @@ async function refreshAIAutoTrader(){
     const [st,dec,tr]=await Promise.all([aiGet('/api/ai-auto/status'),aiGet('/api/ai-auto/decision'),aiGet('/api/ai-auto/trades')]);
     updateCockpitLive(dec);
     const p=st.settings||{}, m=st.metrics||{}, edge=st.edge||{};
+    const ht=st.historical_training||{}, hg=ht.gru||{}, hm=ht.historical_ml||{}, ha=ht.archive||{};
+    setN('aatHistCandles',Number(ha.candles||0).toLocaleString('en-IN'));
+    setN('aatHistGRU',hg.samples?`${Number(hg.samples).toLocaleString('en-IN')} samples · ${hg.status||'TRAINED'}`:(hg.status||'NOT TRAINED'));
+    setN('aatHistML',hm.samples?`${Number(hm.samples).toLocaleString('en-IN')} samples · ${hm.status||'TRAINED'}`:(hm.status||'NOT TRAINED'));
+    setN('aatHistGRUAUC',hg.auc==null?'—':Number(hg.auc).toFixed(3));
+    setN('aatHistMLAUC',hm.auc==null?'—':Number(hm.auc).toFixed(3));
+    setN('aatHistValidation',`${Number(hg.validation_samples||0).toLocaleString('en-IN')} GRU / ${Number(hm.validation_samples||0).toLocaleString('en-IN')} ML`);
+    setN('aatHistDetail',ht.ml_runtime?.hist_ml_detail||`Archive: ${ha.status||'WAITING'} · GRU: ${hg.status||'NOT TRAINED'} · Historical ML: ${hm.status||'NOT TRAINED'}`);
+    setN('aatHistTrainStatus',hm.status||hg.status||'WAITING');
     setN('aatMode',String(p.execution_mode||'paper').toUpperCase());
     document.getElementById('aatMode')?.classList.toggle('live',p.execution_mode==='live');document.getElementById('aatMode')?.classList.toggle('paper',p.execution_mode!=='live');
     setN('aatEngine',Number(p.auto_enabled)?'ON':'OFF');setN('aatOpen',(st.open_trades||[]).length);setN('aatClosed',m.trades||0);setN('aatWin',m.trades?Number(m.win_rate||0).toFixed(1)+'%':'—');setN('aatAvgR',m.trades?Number(m.avg_r||0).toFixed(2)+'R':'—');setN('aatPF',m.trades?Number(m.profit_factor||0).toFixed(2):'—');setN('aatDayPnl','₹'+Number(st.daily_pnl||0).toLocaleString('en-IN',{maximumFractionDigits:0}));
@@ -3127,6 +3179,7 @@ function initAIAutoTrader(){
   document.getElementById('aatLiveBtn').onclick=async()=>{const phrase=prompt('Live trading is locked behind the proven-edge gate. If the gate is qualified, enter the live-arm phrase:');if(phrase===null)return;try{await aiGet('/api/ai-auto/arm-live',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phrase})});setN('aatStatus','LIVE ARMED · automatic BUY/SELL execution enabled');refreshAIAutoTrader()}catch(e){setN('aatStatus',e.message);refreshAIAutoTrader()}};
   document.getElementById('aatDisarmBtn').onclick=async()=>{try{await aiGet('/api/ai-auto/disarm-live',{method:'POST'});refreshAIAutoTrader()}catch(e){setN('aatStatus',e.message)}};
   document.getElementById('aatEngineBtn').onclick=async()=>{try{const st=await aiGet('/api/ai-auto/status');await aiGet('/api/ai-auto/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({execution_mode:st.settings.execution_mode,auto_enabled:!Number(st.settings.auto_enabled)})});refreshAIAutoTrader()}catch(e){setN('aatStatus',e.message)}};
+  document.getElementById('aatTrainHistoricalBtn')?.addEventListener('click',async()=>{const b=document.getElementById('aatTrainHistoricalBtn');if(b)b.disabled=true;setN('aatHistTrainStatus','STARTING');try{await aiGet('/api/ai-evolution/train-historical',{method:'POST'});setN('aatHistTrainStatus','TRAINING');await refreshAIAutoTrader()}catch(e){setN('aatHistTrainStatus','ERROR');setN('aatHistDetail',e.message)}finally{if(b)b.disabled=false}});
   refreshAIAutoTrader();window.__aatTimer=setInterval(refreshAIAutoTrader,10000);
 }
 function initAIEvolutionUI(){if(window.__aiNewInit)return;window.__aiNewInit=true;console.info('[AI-EVOLUTION] init running');initAIAutoTrader();window.addEventListener('error',ev=>{console.error('[AI-EVOLUTION] uncaught error:',ev.message,ev.filename,ev.lineno);setN('aiNStatus','JS error: '+ev.message+' ('+ev.filename+':'+ev.lineno+')')});const b=document.getElementById('aiNRun');if(b)b.onclick=async()=>{setN('aiNStatus','Running…');try{await aiGet('/api/ai-evolution/cycle',{method:'POST'});await refreshAIEvolution();setN('aiNStatus','Cycle complete · PAPER ONLY')}catch(e){setN('aiNStatus',e.message)}};refreshAIEvolution();window.__aiNewTimer=setInterval(refreshAIEvolution,10000);console.info('[AI-EVOLUTION] init complete, button bound:',!!b)}
