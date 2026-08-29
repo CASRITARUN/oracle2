@@ -1165,61 +1165,58 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
         PAPER mode is the default. Live execution remains locked until the strategy passes independent validation.
       </div>
     </section>
-<!-- VISUAL TRADING COCKPIT -->
-<div class="cockpit">
+<!-- VISUAL TRADING COCKPIT — LIVE DATA ONLY -->
+<div id="liveCockpit" class="cockpit">
   <div class="decision-stage">
     <div class="cockpit-gridlines"></div>
     <div class="decision-center">
-      <div class="decision-label">AI EXECUTION DECISION</div>
+      <div class="decision-label">LIVE AI EXECUTION DECISION</div>
       <div class="decision-ring" id="autoDecisionRing">
         <div class="decision-ring-inner">
-          <div class="decision-action" id="cockpitAction">WAIT</div>
-          <div class="decision-conf" id="cockpitConfidence">CONFIDENCE 0%</div>
+          <div class="decision-action" id="cockpitAction">MARKET CLOSED</div>
+          <div class="decision-conf" id="cockpitConfidence">NO LIVE DATA</div>
         </div>
       </div>
       <div class="decision-foot">
-        <span>INDEX <b id="cockpitIndex">NIFTY</b></span>
-        <span>EDGE <b id="cockpitEdge">0.00R</b></span>
-        <span>REGIME <b id="cockpitRegime">MIXED</b></span>
+        <span>INDEX <b id="cockpitIndex">—</b></span>
+        <span>EDGE <b id="cockpitEdge">—</b></span>
+        <span>REGIME <b id="cockpitRegime">—</b></span>
       </div>
     </div>
     <div class="signal-rail">
-      <span>← DOWN <b>BUY PE</b></span>
-      <span>NEUTRAL <b>WAIT</b></span>
-      <span><b>BUY CE</b> UP →</span>
+      <span>← DOWN <b>BUY PE</b></span><span>NEUTRAL <b>WAIT</b></span><span><b>BUY CE</b> UP →</span>
     </div>
   </div>
 
   <div class="visual-panel">
-    <div class="visual-title">MODEL CONSENSUS</div>
-    <div class="bar-row"><span>GRU</span><div class="bar up"><i style="width:68%"></i></div><b>68%</b></div>
-    <div class="bar-row"><span>ML</span><div class="bar up"><i style="width:64%"></i></div><b>64%</b></div>
-    <div class="bar-row"><span>ENSEMBLE</span><div class="bar"><i style="width:66%"></i></div><b>66%</b></div>
-    <div class="bar-row"><span>REGIME</span><div class="bar"><i style="width:72%"></i></div><b>72%</b></div>
+    <div class="visual-title">LIVE MODEL CONSENSUS</div>
+    <div class="bar-row"><span>GRU</span><div class="bar up"><i id="liveGruBar" style="width:0%"></i></div><b id="liveGruVal">—</b></div>
+    <div class="bar-row"><span>ML</span><div class="bar up"><i id="liveMlBar" style="width:0%"></i></div><b id="liveMlVal">—</b></div>
+    <div class="bar-row"><span>ENSEMBLE</span><div class="bar"><i id="liveEnsBar" style="width:0%"></i></div><b id="liveEnsVal">—</b></div>
+    <div class="bar-row"><span>CONFIDENCE</span><div class="bar"><i id="liveConfBar" style="width:0%"></i></div><b id="liveConfVal">—</b></div>
     <div class="visual-title" style="margin-top:20px">SIGNAL BALANCE</div>
-    <svg class="gauge" viewBox="0 0 240 120">
-      <path d="M30 105 A90 90 0 0 1 210 105" fill="none" stroke="#102c3d" stroke-width="18" stroke-linecap="round"/>
-      <path d="M30 105 A90 90 0 0 1 160 45" fill="none" stroke="#40d8f4" stroke-width="18" stroke-linecap="round"/>
-      <circle cx="160" cy="45" r="5" fill="#dffaff"/>
-    </svg>
-    <div class="gauge-value">66%</div>
-    <div class="gauge-caption">DIRECTIONAL CONSENSUS</div>
+    <svg class="gauge" viewBox="0 0 240 120"><path d="M30 105 A90 90 0 0 1 210 105" fill="none" stroke="#102c3d" stroke-width="18" stroke-linecap="round"/><path id="liveGaugeArc" d="M30 105 A90 90 0 0 1 30 105" fill="none" stroke="#607d8b" stroke-width="18" stroke-linecap="round"/></svg>
+    <div class="gauge-value" id="liveGaugeValue">—</div><div class="gauge-caption" id="liveGaugeCaption">WAITING FOR LIVE KITE DATA</div>
   </div>
 
   <div class="visual-panel">
-    <div class="visual-title">MARKET REGIME MAP</div>
-    <div class="regime-orbit">
-      <div class="orbit-axis-x"></div><div class="orbit-axis-y"></div>
-      <div class="orbit-dot"></div>
-      <div class="orbit-center"><b>TREND</b><small>MODERATE</small></div>
-    </div>
-    <div class="chart-labels"><span>RANGE</span><span>VOLATILITY</span><span>TREND</span></div>
+    <div class="visual-title">LIVE MARKET / OPTION STATE</div>
+    <div class="regime-orbit" id="liveRegimeMap"><div class="orbit-axis-x"></div><div class="orbit-axis-y"></div><div class="orbit-dot" id="liveOrbitDot"></div><div class="orbit-center"><b id="liveRegimeText">—</b><small id="liveRegimeSub">NO LIVE DATA</small></div></div>
+    <div class="chart-labels"><span>SPOT</span><span>VOLATILITY</span><span>REGIME</span></div>
     <div class="option-ladder">
-      <div class="ce">CE<br><b>0.62 Δ</b></div>
-      <div class="atm">ATM<br><b>0.50 Δ</b></div>
-      <div class="pe">PE<br><b>0.38 Δ</b></div>
-      <div>SPREAD<br><b>LOW</b></div>
+      <div class="ce">CE<br><b id="liveCeDelta">—</b></div><div class="atm">OPTION<br><b id="liveOptionLtp">—</b></div><div class="pe">PE<br><b id="livePeDelta">—</b></div><div>SPREAD<br><b id="liveSpread">—</b></div>
     </div>
+  </div>
+</div>
+
+<div class="visual-panel" id="liveMonitorPanel" style="margin:0 24px 14px;min-height:190px">
+  <div class="visual-title">LIVE EXPECTED MOVE / OPTION PREMIUM MONITOR</div>
+  <div id="liveMonitorClosed" style="height:120px;display:flex;align-items:center;justify-content:center;color:#5d7c8f;font:800 10px ui-monospace,monospace;letter-spacing:.12em">MARKET CLOSED · NO LIVE CHART DATA</div>
+  <div id="liveMonitorData" style="display:none;padding-top:12px">
+    <div class="bar-row"><span>EXPECTED MOVE</span><div class="bar"><i id="liveMoveBar" style="width:0%"></i></div><b id="liveMoveVal">—</b></div>
+    <div class="bar-row"><span>OPTION PREMIUM</span><div class="bar up"><i id="livePremiumBar" style="width:0%"></i></div><b id="livePremiumVal">—</b></div>
+    <div class="bar-row"><span>LIQUIDITY</span><div class="bar up"><i id="liveLiquidityBar" style="width:0%"></i></div><b id="liveLiquidityVal">—</b></div>
+    <div class="chart-labels"><span id="liveSpotLabel">SPOT —</span><span id="liveIvLabel">IV —</span><span id="livePcrLabel">PCR —</span><span id="liveTimestampLabel">LIVE —</span></div>
   </div>
 </div>
 
@@ -1370,20 +1367,26 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
   function set(id,v){ if($(id)) $(id).textContent = v ?? '—'; }
 
   
-  function updateCockpit(action="WAIT", confidence=0, index="NIFTY", edge="0.00R", regime="MIXED"){
-    set('cockpitAction', action);
-    set('cockpitConfidence', 'CONFIDENCE ' + Math.round(Number(confidence)||0) + '%');
-    set('cockpitIndex', index);
-    set('cockpitEdge', edge);
-    set('cockpitRegime', regime);
-    var ring = $('autoDecisionRing');
-    var col = action === 'BUY CE' ? '#52e0a0' : action === 'BUY PE' ? '#ff667d' : '#ffc65a';
-    if(ring){
-      var deg = Math.max(8, Math.min(355, (Number(confidence)||0)*3.6));
-      ring.style.background = 'conic-gradient('+col+' 0deg,'+col+' '+deg+'deg,#183b4d '+deg+'deg,#183b4d 360deg)';
-      ring.style.boxShadow = '0 0 42px '+col+'22,inset 0 0 25px #02070b';
-    }
-    if($('cockpitAction')) $('cockpitAction').style.color = col;
+  function updateCockpitLive(payload){
+    const open=!!payload.market_open, rows=payload.decisions||[];
+    const r=rows.find(x=>x.symbol==='NIFTY')||rows[0]||{};
+    const closed=!open || r.decision==='MARKET_CLOSED';
+    const action=closed?'MARKET CLOSED':(r.decision==='BUY'?(r.direction==='DOWN'?'BUY PE':'BUY CE'):'WAIT');
+    const conf=r.confidence==null?null:Number(r.confidence);
+    const col=closed?'#7892a3':action==='BUY CE'?'#52e0a0':action==='BUY PE'?'#ff667d':'#ffc65a';
+    set('cockpitAction',action); set('cockpitConfidence',closed?'NO LIVE DATA':('CONFIDENCE '+(conf*100).toFixed(1)+'%'));
+    set('cockpitIndex',closed?'—':(r.symbol||'—')); set('cockpitEdge',r.expected_value_r==null?'—':Number(r.expected_value_r).toFixed(2)+'R'); set('cockpitRegime',closed?'—':(r.market_regime||'—'));
+    const ring=$('autoDecisionRing'); if(ring){ const deg=closed?0:Math.max(4,Math.min(355,(conf||0)*360)); ring.style.background=`conic-gradient(${col} 0deg,${col} ${deg}deg,#183b4d ${deg}deg,#183b4d 360deg)`; ring.style.boxShadow=`0 0 42px ${col}22,inset 0 0 25px #02070b`; }
+    if($('cockpitAction'))$('cockpitAction').style.color=col;
+    const setBar=(id,val)=>{const e=$(id);if(e)e.style.width=val==null?'0%':Math.max(0,Math.min(100,Number(val)*100))+'%'};
+    const setPct=(id,val)=>setN(id,val==null?'—':(Number(val)*100).toFixed(1)+'%');
+    if(closed){ ['liveGruBar','liveMlBar','liveEnsBar','liveConfBar','liveMoveBar','livePremiumBar','liveLiquidityBar'].forEach(id=>setBar(id,null)); ['liveGruVal','liveMlVal','liveEnsVal','liveConfVal','liveGaugeValue','liveCeDelta','livePeDelta','liveOptionLtp','liveSpread','liveMoveVal','livePremiumVal','liveLiquidityVal'].forEach(id=>setN(id,'—')); setN('liveGaugeCaption','WAITING FOR LIVE KITE DATA'); setN('liveRegimeText','—');setN('liveRegimeSub','MARKET CLOSED');setN('liveSpotLabel','SPOT —');setN('liveIvLabel','IV —');setN('livePcrLabel','PCR —');setN('liveTimestampLabel','CLOSED');$('liveMonitorClosed').style.display='flex';$('liveMonitorData').style.display='none';return; }
+    setPct('liveGruVal',r.dl_probability);setPct('liveMlVal',r.ml_probability);setPct('liveEnsVal',r.ensemble_confidence);setPct('liveConfVal',r.confidence);setBar('liveGruBar',r.dl_probability);setBar('liveMlBar',r.ml_probability);setBar('liveEnsBar',r.ensemble_confidence);setBar('liveConfBar',r.confidence);
+    setN('liveGaugeValue',r.confidence==null?'—':(Number(r.confidence)*100).toFixed(1)+'%');setN('liveGaugeCaption',r.reason||'LIVE MODEL STATE');
+    setN('liveRegimeText',r.market_regime||'—');setN('liveRegimeSub',r.direction||'WAIT');
+    const dot=$('liveOrbitDot'); if(dot){dot.style.left=(Math.max(8,Math.min(88,50+(Number(r.momentum||12.5)-12.5)*3)))+'%';dot.style.top=(Math.max(8,Math.min(88,50-(Number(r.trend||12.5)-12.5)*3)))+'%';}
+    setN('liveCeDelta',r.direction==='UP'&&r.option_delta!=null?Number(r.option_delta).toFixed(2)+' Δ':'—');setN('livePeDelta',r.direction==='DOWN'&&r.option_delta!=null?Number(r.option_delta).toFixed(2)+' Δ':'—');setN('liveOptionLtp',r.option_ltp==null?'—':'₹'+Number(r.option_ltp).toFixed(2));setN('liveSpread',r.spread_pct==null?'—':Number(r.spread_pct).toFixed(2)+'%');
+    setBar('liveMoveBar',r.expected_move_pct==null?0:Math.min(1,Number(r.expected_move_pct)/2));setN('liveMoveVal',r.expected_move==null?'—':Number(r.expected_move).toFixed(1)+' pts');setBar('livePremiumBar',r.option_ltp==null?0:Math.min(1,Number(r.option_ltp)/500));setN('livePremiumVal',r.option_ltp==null?'—':'₹'+Number(r.option_ltp).toFixed(2));const liq=Math.min(1,Math.log1p(Number(r.option_volume||0)+Number(r.option_oi||0))/12);setBar('liveLiquidityBar',liq);setN('liveLiquidityVal',(liq*100).toFixed(0)+'%');setN('liveSpotLabel','SPOT '+(r.spot==null?'—':Number(r.spot).toLocaleString('en-IN')));setN('liveIvLabel','IV '+(r.iv==null?'—':Number(r.iv).toFixed(2)));setN('livePcrLabel','PCR '+(r.pcr==null?'—':Number(r.pcr).toFixed(2)));setN('liveTimestampLabel','LIVE '+(payload.timestamp||'').replace('T',' ').slice(0,19));$('liveMonitorClosed').style.display='none';$('liveMonitorData').style.display='block';
   }
 
   function setMode(mode){
@@ -1402,7 +1405,6 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
   $('autoStartBtn')?.addEventListener('click',()=>{
     set('autoEngineStatus','Automatic trading engine START requested.');
   });
-  updateCockpit('WAIT', 0, 'NIFTY', '0.00R', 'MIXED');
 
   $('autoStopBtn')?.addEventListener('click',()=>{
     set('autoEngineStatus','Automatic trading engine STOP requested. Existing positions remain subject to risk/exit management.');
@@ -3106,6 +3108,7 @@ async function refreshAIEvolution(){
 async function refreshAIAutoTrader(){
   try{
     const [st,dec,tr]=await Promise.all([aiGet('/api/ai-auto/status'),aiGet('/api/ai-auto/decision'),aiGet('/api/ai-auto/trades')]);
+    updateCockpitLive(dec);
     const p=st.settings||{}, m=st.metrics||{}, edge=st.edge||{};
     setN('aatMode',String(p.execution_mode||'paper').toUpperCase());
     document.getElementById('aatMode')?.classList.toggle('live',p.execution_mode==='live');document.getElementById('aatMode')?.classList.toggle('paper',p.execution_mode!=='live');
