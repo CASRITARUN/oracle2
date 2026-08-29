@@ -2907,8 +2907,12 @@ function switchTopTab(which) {
   }
 
   if (isAutoTrading) {
-    // Independent tab initialization hook.
-    if (typeof initAutoTradingTab === "function") initAutoTradingTab();
+    // Bind the actual AUTO BUY/SELL controls when this tab is opened.
+    // Previously initAIAutoTrader() was only reached through the AI Evolution
+    // initializer, so opening AUTO BUY/SELL directly left the training button
+    // without an onclick handler.
+    if (typeof initAIAutoTrader === "function") initAIAutoTrader();
+    if (typeof refreshAIAutoTrader === "function") refreshAIAutoTrader();
     window.scrollTo({top: 0, behavior: "smooth"});
   }
 }
@@ -3187,8 +3191,8 @@ function initAIAutoTrader(){
   if(trainBtn){ trainBtn.onclick=async()=>{
     if(trainBtn.dataset.busy==='1') return;
     trainBtn.dataset.busy='1'; trainBtn.disabled=true;
-    setN('aatHistTrainStatus','QUEUED');
-    setN('aatHistDetail','Request accepted. Checking Kite connection and starting historical archive collection…');
+    setN('aatHistTrainStatus','STARTING…');
+    setN('aatHistDetail','Sending the historical training request to the backend…');
     try{
       const r=await aiGet('/api/ai-evolution/train-historical',{method:'POST'});
       setN('aatHistTrainStatus',r.status||'QUEUED');
