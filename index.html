@@ -236,6 +236,228 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 <style id="ai-directional-theme">
 .ai-directional-panel{margin-top:12px!important;padding:17px 18px!important;border:1px solid #16344a!important;border-radius:16px!important;background:linear-gradient(145deg,#0a141e,#071019)!important;color:#dbe7f5}.ai-dir-flow{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:10px 12px;border:1px solid #17364a;border-radius:10px;background:#08131d;color:#7d9bb0;font-size:9px;font-weight:800}.ai-dir-flow span{padding:5px 8px;border-radius:999px;background:#0c1924;border:1px solid #1b384b}.ai-dir-flow i{font-style:normal;color:#2bc9ef}.ai-dir-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}.ai-dir-card{padding:13px;border:1px solid #17364a;border-radius:11px;background:linear-gradient(145deg,#0b1722,#08111a)}.ai-dir-head{display:flex;justify-content:space-between;align-items:center}.ai-dir-head b{font-size:13px;color:#edf7fc}.ai-dir-action{margin:12px 0;padding:10px;border-radius:9px;background:#091923;border:1px solid #173a4e;color:#40d8f4;font-size:16px;font-weight:900}.ai-dir-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.ai-dir-metrics div{padding:8px;border:1px solid #17364a;border-radius:8px}.ai-dir-metrics small{display:block;color:#5f7d91;font-size:7px}.ai-dir-metrics strong{display:block;color:#e8f4fa;font-size:13px;margin-top:3px}.ai-dir-card p{margin:9px 0 0;color:#617d91;font-size:9px;line-height:1.45;min-height:27px}.ai-dir-bottom{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:10px}.ai-dir-bottom>div{padding:9px;border:1px solid #17364a;border-radius:9px;background:#09141e}.ai-dir-bottom small{display:block;color:#5d7b90;font-size:7px;letter-spacing:.08em}.ai-dir-bottom b{display:block;color:#dcecf4;font-size:10px;margin-top:4px}.ai-dir-card.up .ai-dir-action{color:#4ee0ad;border-color:#1b604c}.ai-dir-card.down .ai-dir-action{color:#ff7b84;border-color:#71303a}.ai-dir-card.wait .ai-dir-action{color:#ffc65a;border-color:#705020}@media(max-width:900px){.ai-dir-grid{grid-template-columns:1fr}.ai-dir-bottom{grid-template-columns:1fr 1fr}}
 </style>
+<style id="autoTradingNavFix">
+#tabBtnAutoTrading.active{color:#f2fbff!important;border-bottom-color:#20c8ee!important}
+#tabBtnAutoTrading{white-space:nowrap}
+#autoTradingTab.active{display:block!important}
+</style>
+
+<style id="autoTradingVisualUpgrade">
+/* ===== AUTO BUY / SELL — MARKET TERMINAL VISUAL UPGRADE ===== */
+#autoTradingNew{
+  background:
+    radial-gradient(circle at 8% 0%,rgba(34,211,238,.07),transparent 28%),
+    radial-gradient(circle at 92% 8%,rgba(124,92,255,.07),transparent 24%);
+  border-radius:24px;
+}
+#autoTradingNew .ai-card{
+  border-radius:20px!important;
+  background:linear-gradient(145deg,rgba(11,22,33,.97),rgba(5,12,19,.99))!important;
+  border:1px solid #18364b!important;
+  box-shadow:0 20px 70px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.025)!important;
+}
+#autoTradingNew .ai-card:first-child{
+  background:
+    radial-gradient(circle at 85% 30%,rgba(35,213,244,.13),transparent 25%),
+    radial-gradient(circle at 65% 120%,rgba(119,86,255,.10),transparent 30%),
+    linear-gradient(135deg,#0c1b29,#050d15)!important;
+  min-height:205px;
+}
+#autoTradingNew .ai-title{
+  font-size:30px!important;letter-spacing:-.04em!important;
+  text-shadow:0 0 30px rgba(64,216,244,.12);
+}
+#autoTradingNew .ai-sub{color:#63839a!important}
+#autoTradingNew .ai-top{padding:27px 28px 20px!important}
+#autoTradingNew .ai-top:after{
+  content:"AUTONOMOUS INDEX OPTIONS • PAPER-FIRST • RISK CONTROLLED";
+  display:block;margin-top:9px;color:#45677d;font:800 8px/1.4 ui-monospace,monospace;letter-spacing:.15em;
+}
+#autoTradingNew .ai-pill.paper{
+  box-shadow:0 0 20px rgba(82,224,160,.08);
+}
+#autoTradingNew .ai-metric{
+  position:relative;overflow:hidden;
+  background:linear-gradient(145deg,#0d1d2b,#08131d)!important;
+  border:1px solid #1a3b51!important;
+  border-radius:14px!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.025);
+}
+#autoTradingNew .ai-metric:after{
+  content:"";position:absolute;right:-25px;bottom:-35px;width:85px;height:85px;
+  border-radius:50%;background:rgba(64,216,244,.035);
+}
+#autoTradingNew .ai-metric b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+#autoTradingNew .ai-card:nth-of-type(2){
+  background:linear-gradient(180deg,#07121c,#050d15)!important;
+}
+#autoTradingNew .dir-card{
+  min-height:225px!important;
+  border-radius:18px!important;
+  padding:20px!important;
+  background:
+    linear-gradient(160deg,rgba(16,34,49,.98),rgba(6,16,25,.98))!important;
+  border-color:#1b4057!important;
+  box-shadow:0 12px 35px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.025);
+}
+#autoTradingNew .dir-card:before{
+  content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:#ffc65a;box-shadow:0 0 16px rgba(255,198,90,.2);
+}
+#autoTradingNew .dir-card.up:before{background:#52e0a0;box-shadow:0 0 16px rgba(82,224,160,.25)}
+#autoTradingNew .dir-card.down:before{background:#ff667d;box-shadow:0 0 16px rgba(255,102,125,.25)}
+#autoTradingNew .dir-head b{font-size:17px!important}
+#autoTradingNew .dir-action{
+  font-size:30px!important;margin:18px 0!important;
+  letter-spacing:.08em!important;
+  text-shadow:0 0 22px currentColor;
+}
+#autoTradingNew .dir-stats>div{
+  background:rgba(2,9,15,.72)!important;
+  border:1px solid #183449!important;
+  border-radius:10px!important;
+  min-height:51px;
+}
+#autoTradingNew .dir-reason{
+  border-top:1px solid #173247;padding-top:10px;
+}
+#autoTradingNew .ai-flow{
+  padding:4px 24px 25px!important;
+  align-items:stretch;
+}
+#autoTradingNew .ai-flow>div{
+  border-radius:14px!important;
+  background:linear-gradient(145deg,#0c1c29,#07121b)!important;
+  border-color:#18394e!important;
+  min-height:72px!important;
+  display:flex;flex-direction:column;justify-content:center;
+}
+#autoTradingNew .ai-flow>div:nth-child(1){border-top:2px solid #547bff}
+#autoTradingNew .ai-flow>div:nth-child(2){border-top:2px solid #a98bff}
+#autoTradingNew .ai-flow>div:nth-child(3){border-top:2px solid #40d8f4}
+#autoTradingNew .ai-flow>div:nth-child(4){border-top:2px solid #52e0a0}
+#autoTradingNew .ai-flow>div:nth-child(5){border-top:2px solid #ffc65a}
+#autoTradingNew .ai-flow>div:nth-child(6){border-top:2px solid #ff9a62}
+#autoTradingNew .ai-flow>div:nth-child(7){border-top:2px solid #52e0a0}
+#autoTradingNew .ai-flow>div:not(:last-child):after{color:#40d8f4!important}
+#autoTradingNew .ai-table-wrap{
+  background:#050c13;border-color:#17374c!important;border-radius:14px!important;
+}
+#autoTradingNew .ai-table tbody tr{
+  background:linear-gradient(90deg,#091620,#07121b)!important;
+}
+#autoTradingNew .ai-table tbody tr:hover td{
+  background:#0d202d!important;
+}
+#autoTradingNew .ai-table tbody td{
+  padding:12px 10px!important;
+}
+#autoTradingNew .ai-card .ai-sub{
+  padding:20px 24px 4px;
+  position:relative;
+}
+#autoTradingNew .ai-card .ai-sub:before{
+  content:"";display:inline-block;width:18px;height:2px;background:#40d8f4;
+  vertical-align:middle;margin-right:7px;box-shadow:0 0 10px rgba(64,216,244,.5);
+}
+#autoTradingNew .ai-note{
+  background:rgba(64,216,244,.025);border-left:2px solid #1c7e99;
+  padding:11px 13px;border-radius:0 9px 9px 0;
+}
+#autoTradingNew .ai-card:nth-of-type(4) .ai-metric b{
+  font-size:18px!important;
+}
+#autoTradingNew .ai-card:nth-of-type(7) .ai-metric{
+  text-align:center;
+}
+#autoTradingNew .ai-card:nth-of-type(7) .ai-metric b{
+  font-size:20px!important;
+}
+#autoTradingNew .ai-card:nth-of-type(7) .ai-metric:first-child{
+  border-color:#245a4a!important;
+}
+#autoTradingNew .ai-card:nth-of-type(7) .ai-metric:last-child{
+  border-color:#60462a!important;
+}
+@media(max-width:1000px){
+  #autoTradingNew .ai-flow{grid-template-columns:repeat(4,1fr)!important}
+}
+@media(max-width:700px){
+  #autoTradingNew .ai-flow{grid-template-columns:1fr 1fr!important}
+  #autoTradingNew .ai-title{font-size:24px!important}
+}
+</style>
+
+
+<style id="autoTradingCockpitCSS">
+/* ===== VISUAL COCKPIT ===== */
+#autoTradingNew .cockpit{
+  display:grid;grid-template-columns:1.25fr .72fr .72fr;gap:12px;margin:0 24px 18px;
+}
+#autoTradingNew .decision-stage{
+  min-height:360px;position:relative;overflow:hidden;border:1px solid #17445c;
+  border-radius:20px;background:
+   radial-gradient(circle at 50% 48%,rgba(38,210,239,.11),transparent 25%),
+   radial-gradient(circle at 50% 50%,rgba(18,73,100,.16),transparent 55%),
+   linear-gradient(145deg,#07131e,#030a11);
+  box-shadow:inset 0 0 70px rgba(16,171,218,.045),0 20px 60px rgba(0,0,0,.3);
+}
+#autoTradingNew .decision-stage:before{
+ content:"";position:absolute;inset:18px;border:1px solid rgba(65,174,205,.10);
+ border-radius:50%;box-shadow:0 0 0 42px rgba(46,190,222,.018),0 0 0 84px rgba(46,190,222,.012);
+}
+#autoTradingNew .decision-stage:after{
+ content:"";position:absolute;left:50%;top:50%;width:300px;height:1px;
+ background:linear-gradient(90deg,transparent,#1e7e9b,transparent);
+ box-shadow:0 0 18px #1c7791;transform:translate(-50%,-50%);
+}
+.cockpit-gridlines{position:absolute;inset:0;background:
+ linear-gradient(rgba(54,139,164,.045) 1px,transparent 1px),
+ linear-gradient(90deg,rgba(54,139,164,.045) 1px,transparent 1px);
+ background-size:36px 36px;mask-image:radial-gradient(circle,#000 25%,transparent 78%);}
+.decision-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2}
+.decision-label{font-size:9px;letter-spacing:.22em;color:#648ba0;font-weight:900}
+.decision-ring{width:184px;height:184px;border-radius:50%;display:grid;place-items:center;margin:12px 0;
+ background:conic-gradient(#ffc65a 0deg,#ffc65a 220deg,#183b4d 220deg,#183b4d 360deg);
+ box-shadow:0 0 40px rgba(255,198,90,.08),inset 0 0 25px #02070b;
+ position:relative}
+.decision-ring:before{content:"";position:absolute;inset:9px;border-radius:50%;background:#07121b;border:1px solid #21485c}
+.decision-ring-inner{position:relative;text-align:center}
+.decision-action{font-size:29px;font-weight:950;letter-spacing:.08em;color:#ffc65a;text-shadow:0 0 24px currentColor}
+.decision-conf{font:800 11px ui-monospace,monospace;color:#83a4b5;margin-top:5px}
+.decision-foot{display:flex;gap:22px;color:#5e7d91;font:800 8px ui-monospace,monospace}
+.decision-foot b{color:#d9edf5}
+.signal-rail{position:absolute;left:18px;right:18px;bottom:15px;display:flex;justify-content:space-between;z-index:3}
+.signal-rail span{font:800 8px ui-monospace,monospace;color:#53758a;letter-spacing:.08em}
+.signal-rail b{color:#8caabc}
+.visual-panel{border:1px solid #17394e;border-radius:18px;background:linear-gradient(145deg,#091722,#050d14);padding:16px;min-height:360px;position:relative;overflow:hidden}
+.visual-title{font-size:9px;color:#638399;letter-spacing:.16em;font-weight:900;margin-bottom:12px}
+.gauge{width:100%;height:145px;display:block}
+.gauge-value{text-align:center;margin-top:-45px;font:900 25px ui-monospace,monospace;color:#eef9fd}
+.gauge-caption{text-align:center;color:#587589;font-size:8px;letter-spacing:.1em;margin-top:3px}
+.bar-row{display:grid;grid-template-columns:70px 1fr 38px;gap:8px;align-items:center;margin:13px 0;font:800 8px ui-monospace,monospace;color:#7895a8}
+.bar{height:8px;background:#0b1b27;border-radius:10px;overflow:hidden;border:1px solid #17384c}
+.bar i{display:block;height:100%;border-radius:10px;background:linear-gradient(90deg,#1b88a8,#42d9f2);box-shadow:0 0 12px rgba(64,216,244,.3)}
+.bar.down i{background:linear-gradient(90deg,#8b3149,#ff667d)}
+.bar.up i{background:linear-gradient(90deg,#19785d,#52e0a0)}
+.mini-chart{height:120px;width:100%;display:block}
+.chart-labels{display:flex;justify-content:space-between;color:#46677b;font:7px ui-monospace,monospace;margin-top:3px}
+.regime-orbit{width:180px;height:180px;margin:6px auto;position:relative;border-radius:50%;border:1px dashed #22506a}
+.regime-orbit:before,.regime-orbit:after{content:"";position:absolute;border:1px solid #173c50;border-radius:50%}
+.regime-orbit:before{inset:25px}.regime-orbit:after{inset:52px}
+.orbit-dot{position:absolute;width:11px;height:11px;border-radius:50%;background:#40d8f4;box-shadow:0 0 18px #40d8f4;left:73%;top:22%}
+.orbit-axis-x,.orbit-axis-y{position:absolute;background:#1b4054}
+.orbit-axis-x{left:0;right:0;top:50%;height:1px}.orbit-axis-y{top:0;bottom:0;left:50%;width:1px}
+.orbit-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center}
+.orbit-center b{display:block;color:#edf8fc;font-size:12px}.orbit-center small{color:#5e7d91;font-size:7px}
+.option-ladder{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:12px}
+.option-ladder div{padding:7px;border:1px solid #17374b;background:#08131d;border-radius:8px;text-align:center;font:800 8px ui-monospace,monospace}
+.option-ladder .atm{border-color:#26bddc;color:#40d8f4;box-shadow:0 0 12px rgba(64,216,244,.06)}
+.option-ladder .ce{color:#52e0a0}.option-ladder .pe{color:#ff7787}
+@media(max-width:1100px){#autoTradingNew .cockpit{grid-template-columns:1fr 1fr}.decision-stage{grid-column:1/-1}}
+@media(max-width:700px){#autoTradingNew .cockpit{grid-template-columns:1fr;margin-left:14px;margin-right:14px}.decision-stage{min-height:330px}.visual-panel{min-height:280px}}
+</style>
+
 </head>
 <body>
 
@@ -255,6 +477,7 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
   <button class="top-tab-btn" id="tabBtnNiftyBreakout" onclick="switchTopTab('niftyBreakout')">🎯 NIFTY Bullish Breakout</button>
   
 <button class="top-tab-btn" id="tabBtnAIEvolution" onclick="switchTopTab('aiEvolution')">🧠 AI Evolution Engine</button>
+<button class="top-tab-btn" id="tabBtnAutoTrading" onclick="switchTopTab('autoTrading')">🤖 AUTO BUY / SELL</button>
   
 </div>
 
@@ -709,6 +932,15 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 #aiNew .conf-track .fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#1d5c73,#2bc9ef);border-radius:99px;transition:width .6s}
 #aiNew .conf-legend{display:flex;justify-content:space-between;font-size:9px;color:#7d94a8;margin-top:5px}
 </style>
+
+<style id="ai-auto-trader-theme">
+#aiAutoTrader{margin-top:16px;border:1px solid #214a62;border-radius:16px;background:linear-gradient(145deg,#07121d,#0a1722);box-shadow:0 18px 50px rgba(0,0,0,.24);overflow:hidden}
+#aiAutoTrader .aat-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:18px 20px;border-bottom:1px solid #17364a}
+#aiAutoTrader .aat-title{font-size:18px;font-weight:900;color:#f0f8ff}.aat-sub{font-size:10px;color:#7894aa;text-transform:uppercase;letter-spacing:.13em;font-weight:800;margin-bottom:5px}
+#aiAutoTrader .aat-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.aat-btn{border:1px solid #28516a;background:#0d1d2a;color:#b9d0df;padding:8px 12px;border-radius:8px;font-weight:800;font-size:11px;cursor:pointer}.aat-btn.active{background:#0b5f52;border-color:#2dd7ae;color:#b9ffe9}.aat-btn.live{background:#5a1820;border-color:#e75b69;color:#ffdfe3}.aat-btn.live.active{background:#a3212d;color:#fff}.aat-btn:disabled{opacity:.45;cursor:not-allowed}
+#aiAutoTrader .aat-body{padding:16px 20px}.aat-kpis{display:grid;grid-template-columns:repeat(8,1fr);gap:8px}.aat-kpi{background:#0b1824;border:1px solid #1c384d;border-radius:10px;padding:10px}.aat-kpi small{display:block;color:#66859c;font-size:8px;letter-spacing:.1em;text-transform:uppercase}.aat-kpi b{display:block;margin-top:5px;color:#eef7ff;font-size:16px}.aat-kpi .good{color:#43e0aa}.aat-kpi .bad{color:#ff6b77}.aat-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:12px;margin-top:12px}.aat-card{background:#091521;border:1px solid #1b3548;border-radius:11px;padding:12px}.aat-card h4{margin:0 0 9px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#7e9bb0}.aat-table{width:100%;border-collapse:collapse;font-size:10px}.aat-table th,.aat-table td{padding:8px;border-bottom:1px solid #172d3e;text-align:left}.aat-table th{color:#648399;font-size:8px;text-transform:uppercase}.aat-table td{color:#cfe0ec}.aat-state{display:inline-block;padding:3px 7px;border-radius:99px;font-size:8px;font-weight:900}.aat-buy{background:#093326;color:#54e5b2;border:1px solid #1d7258}.aat-wait{background:#1b1b14;color:#e7c764;border:1px solid #66572b}.aat-sell{background:#39151a;color:#ff8791;border:1px solid #7d3039}.aat-hold{background:#12243a;color:#82c6ff;border:1px solid #2a5579}.aat-note{font-size:10px;line-height:1.55;color:#7894aa;margin-top:9px}.aat-edge{padding:10px;border-radius:9px;background:#0d1b27;border:1px solid #24445a;margin-bottom:10px}.aat-edge strong{color:#edf7ff}.aat-checks{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:7px}.aat-check{font-size:9px;padding:5px 7px;border-radius:6px;background:#0a141e;color:#849caf}.aat-check.ok{color:#55dfad;background:#08291f}.aat-check.fail{color:#ff8b93;background:#32151a}.aat-mode{font-weight:900;color:#f5fbff}.aat-mode.paper{color:#54e5b2}.aat-mode.live{color:#ff6f7a}.aat-warning{color:#ffd36a;font-size:10px}.aat-status{font-size:10px;color:#8ca6b8;margin-top:7px;min-height:14px}
+@media(max-width:1100px){.aat-kpis{grid-template-columns:repeat(4,1fr)}.aat-grid{grid-template-columns:1fr}}@media(max-width:650px){.aat-kpis{grid-template-columns:repeat(2,1fr)}#aiAutoTrader .aat-head{flex-direction:column}}
+</style>
 <div id="aiNew"><div class="ai-wrap">
   <section class="ai-card">
     <div class="ai-top"><div><div class="ai-sub">AI EVOLUTION · INDEX DIRECTIONAL LEARNING</div><div class="ai-title">Index Movement Intelligence → CE / PE Paper Execution</div><div class="ai-sub">ML and GRU learn the underlying index from the historical archive. The option is only the execution instrument.</div></div><div style="display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end"><span class="ai-pill paper">PAPER ONLY</span><span class="ai-pill lock">LIVE EXECUTION LOCKED</span></div></div>
@@ -726,6 +958,36 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
     <div class="dir-card wait" data-sym="FINNIFTY"><div class="dir-head"><b>FINNIFTY</b><span id="dFINNIFTYState" class="ai-pill">WAIT</span></div><div id="dFINNIFTYAction" class="dir-action">WAIT</div><div class="dir-stats"><div><small>P(UP)</small><b id="dFINNIFTYUp">—</b></div><div><small>ML</small><b id="dFINNIFTYML">—</b></div><div><small>GRU</small><b id="dFINNIFTYDL">—</b></div><div><small>CONF.</small><b id="dFINNIFTYConf">—</b></div></div><p id="dFINNIFTYReason" class="dir-reason">No decision yet.</p></div>
   </div></section>
 
+
+  <section id="aiAutoTrader">
+    <div class="aat-head">
+      <div><div class="aat-sub">AUTONOMOUS EXECUTION · PAPER FIRST</div><div class="aat-title">AI Automatic BUY / HOLD / REDUCE / SELL</div><div class="aat-note">The engine learns the index first, prices the option as the execution instrument, and continuously reassesses direction, expected move, option EV, liquidity and risk. It never trades just to stay active.</div></div>
+      <div class="aat-controls">
+        <button class="aat-btn active" id="aatPaperBtn">PAPER TRADE</button>
+        <button class="aat-btn live" id="aatLiveBtn">LIVE TRADE</button>
+        <button class="aat-btn" id="aatEngineBtn">AUTO: ON</button>
+        <button class="aat-btn" id="aatDisarmBtn">DISARM LIVE</button>
+      </div>
+    </div>
+    <div class="aat-body">
+      <div class="aat-kpis">
+        <div class="aat-kpi"><small>MODE</small><b id="aatMode" class="aat-mode paper">PAPER</b></div>
+        <div class="aat-kpi"><small>ENGINE</small><b id="aatEngine">ON</b></div>
+        <div class="aat-kpi"><small>OPEN</small><b id="aatOpen">0</b></div>
+        <div class="aat-kpi"><small>CLOSED</small><b id="aatClosed">0</b></div>
+        <div class="aat-kpi"><small>WIN RATE</small><b id="aatWin">—</b></div>
+        <div class="aat-kpi"><small>AVG R</small><b id="aatAvgR">—</b></div>
+        <div class="aat-kpi"><small>PROFIT FACTOR</small><b id="aatPF">—</b></div>
+        <div class="aat-kpi"><small>DAY P&L</small><b id="aatDayPnl">₹0</b></div>
+      </div>
+      <div class="aat-grid">
+        <div class="aat-card"><h4>Live decision matrix</h4><div style="overflow:auto"><table class="aat-table"><thead><tr><th>Index</th><th>Decision</th><th>Contract</th><th>Confidence</th><th>EV / R</th><th>Expected move</th><th>Reason</th></tr></thead><tbody id="aatDecisionRows"><tr><td colspan="7">Waiting for live AI cycle…</td></tr></tbody></table></div></div>
+        <div class="aat-card"><h4>Live eligibility gate</h4><div class="aat-edge"><strong id="aatEdgeHeadline">PAPER MODE — learning and validation continue</strong><div class="aat-checks" id="aatEdgeChecks"></div></div><div class="aat-note">LIVE is not enabled merely because the model is confident. It requires sufficient completed paper trades, chronological holdout evidence, positive expectancy, acceptable profit factor and win rate. Then LIVE must be explicitly armed.</div><div class="aat-status" id="aatStatus">Starting paper-first engine…</div></div>
+      </div>
+      <div class="aat-card" style="margin-top:12px"><h4>Open automatic positions</h4><div style="overflow:auto"><table class="aat-table"><thead><tr><th>Time</th><th>Index</th><th>Option</th><th>Direction</th><th>Entry</th><th>Stop</th><th>Target</th><th>Qty</th><th>Action</th><th>P&L</th></tr></thead><tbody id="aatOpenRows"><tr><td colspan="10">No automatic positions.</td></tr></tbody></table></div></div>
+      <div class="aat-note"><span class="aat-warning">Safety architecture:</span> PAPER is the default. LIVE remains locked until the statistical edge gate is passed and the user explicitly arms it. Daily loss limits, maximum concurrent positions, liquidity filters, reversal exits, target/stop exits and time exits remain active in both modes.</div>
+    </div>
+  </section>
   <section class="ai-card"><div class="ai-sub">LEARNING PROGRESS</div><div id="aiNStages" style="margin-top:12px"></div><div class="ai-note" style="margin-top:10px">The historical archive pre-trains the GRU on index movement labels. Live ML learns from completed paper CE/PE outcomes; it is 0 until paper evidence exists.</div></section>
   <section class="ai-card"><div class="ai-sub">MODEL COMPARISON</div>
     <div class="model-legend">
@@ -753,6 +1015,401 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
   <section class="ai-card"><div class="ai-sub">AI AUDIT / DECISIONS</div><div class="ai-table-wrap" style="margin-top:10px"><table class="ai-table"><thead><tr><th>TIME</th><th>INDEX</th><th>DECISION</th><th>DETAIL</th></tr></thead><tbody id="aiNDecisionTable"><tr><td colspan="4">No decisions yet.</td></tr></tbody></table></div></section>
 </div></div></div><!-- /tabPageAIEvolution -->
 
+
+
+<!-- ================================================================
+     NEW, INDEPENDENT TAB — AI AUTO BUY / SELL
+     This is intentionally separate from the existing AI EVOLUTION tab.
+     ================================================================ -->
+
+<style id="autoTradingPremiumCSS">
+/* ===== PREMIUM AUTO TRADING TAB ===== */
+#autoTradingNew{
+  --at-bg:#071019; --at-panel:#0b1621; --at-panel2:#0e1c29;
+  --at-border:#1c3447; --at-text:#edf6fc; --at-muted:#7f96aa;
+  --at-cyan:#40d8f4; --at-green:#52e0a0; --at-red:#ff667d;
+  --at-yellow:#ffc65a; --at-purple:#a98bff;
+  max-width:1500px; margin:0 auto; padding:18px 4px 42px;
+  font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+#autoTradingNew .ai-card{
+  background:linear-gradient(145deg,rgba(14,28,41,.98),rgba(7,16,25,.98));
+  border:1px solid rgba(64,216,244,.12); border-radius:18px;
+  box-shadow:0 18px 55px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.025);
+  margin-bottom:15px; overflow:hidden; position:relative;
+}
+#autoTradingNew .ai-card:before{
+  content:""; position:absolute; left:0; top:0; right:0; height:1px;
+  background:linear-gradient(90deg,transparent,rgba(64,216,244,.42),transparent);
+}
+#autoTradingNew .ai-top{padding:23px 24px 18px; align-items:center}
+#autoTradingNew .ai-title{font-size:25px;letter-spacing:-.025em;font-weight:800;color:var(--at-text)}
+#autoTradingNew .ai-sub{color:#6f899e;letter-spacing:.13em;font-size:10px;font-weight:800}
+#autoTradingNew .ai-note{color:#8ba2b5;line-height:1.55}
+#autoTradingNew .ai-flow{
+  display:grid;grid-template-columns:repeat(7,1fr);gap:8px;padding:0 24px 22px;
+}
+#autoTradingNew .ai-flow>div{
+  background:rgba(255,255,255,.025);border:1px solid #183044;border-radius:12px;
+  padding:13px 10px;min-height:55px;position:relative;
+}
+#autoTradingNew .ai-flow>div:not(:last-child):after{
+  content:"›";position:absolute;right:-9px;top:18px;color:#36566c;font-size:18px;z-index:2;
+}
+#autoTradingNew .ai-flow b{display:block;color:#dcecf6;font-size:10px;letter-spacing:.06em}
+#autoTradingNew .ai-flow small{display:block;color:#71899b;font-size:9px;margin-top:5px}
+#autoTradingNew .ai-pill{
+  border-radius:999px;padding:6px 11px;font-size:9px;font-weight:900;
+  letter-spacing:.08em;border:1px solid #29445a;background:#101e2b;color:#91aabd;
+}
+#autoTradingNew .ai-pill.paper{background:rgba(82,224,160,.09);color:var(--at-green);border-color:rgba(82,224,160,.28)}
+#autoTradingNew .danger{
+  background:rgba(255,102,125,.08)!important;color:#ff8b9c!important;
+  border:1px solid rgba(255,102,125,.28)!important;border-radius:10px!important;
+}
+#autoTradingNew button{
+  transition:.18s ease; font-weight:800!important; letter-spacing:.03em;
+}
+#autoTradingNew button:hover{transform:translateY(-1px);filter:brightness(1.08)}
+#autoTradingNew .dir-card{
+  background:linear-gradient(145deg,#0d1d2b,#09141f)!important;
+  border:1px solid #1c394d!important;border-radius:16px!important;
+  padding:17px!important;min-height:165px;position:relative;overflow:hidden;
+}
+#autoTradingNew .dir-card:after{
+  content:"";position:absolute;width:110px;height:110px;right:-45px;top:-45px;
+  border-radius:50%;background:rgba(64,216,244,.05);filter:blur(2px);
+}
+#autoTradingNew .dir-head b{font-size:15px;letter-spacing:.04em}
+#autoTradingNew .dir-action{font-size:23px!important;font-weight:900!important;letter-spacing:.03em;margin:15px 0 12px}
+#autoTradingNew .dir-stats{
+  display:grid!important;grid-template-columns:repeat(4,1fr);gap:7px!important;
+}
+#autoTradingNew .dir-stats>div{
+  background:#08131e;border:1px solid #162d3e;border-radius:9px;padding:8px 7px;
+}
+#autoTradingNew .dir-stats small{font-size:8px;color:#6f8799}
+#autoTradingNew .dir-stats b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#eaf5fb}
+#autoTradingNew .dir-reason{font-size:10px!important;color:#8098aa!important;margin:11px 0 0!important}
+#autoTradingNew .ai-metric-grid{
+  padding:0 24px 22px;gap:9px!important;
+}
+#autoTradingNew .ai-metric{
+  background:rgba(255,255,255,.025)!important;border:1px solid #183044!important;
+  border-radius:12px!important;padding:14px!important;
+}
+#autoTradingNew .ai-metric small{color:#6f879a!important;font-size:8px!important;letter-spacing:.1em;font-weight:800}
+#autoTradingNew .ai-metric b{color:#edf6fc!important;font-size:16px!important}
+#autoTradingNew .ai-table-wrap{padding:0 24px 22px}
+#autoTradingNew .ai-table{border-collapse:separate!important;border-spacing:0 5px!important}
+#autoTradingNew .ai-table thead th{
+  color:#617b8f!important;font-size:8px!important;letter-spacing:.11em!important;
+  border:0!important;padding:7px 9px!important;
+}
+#autoTradingNew .ai-table tbody tr{background:#0a1621}
+#autoTradingNew .ai-table tbody td{
+  border-top:1px solid #142c3d!important;border-bottom:1px solid #142c3d!important;
+  padding:10px 9px!important;font-size:10px!important;color:#c7d8e2;
+}
+#autoTradingNew .ai-table tbody td:first-child{border-left:1px solid #142c3d!important;border-radius:9px 0 0 9px}
+#autoTradingNew .ai-table tbody td:last-child{border-right:1px solid #142c3d!important;border-radius:0 9px 9px 0}
+#autoTradingNew .section-kicker{
+  display:flex;align-items:center;gap:8px;margin:0 24px 12px;color:#6d8799;
+  font-size:9px;font-weight:900;letter-spacing:.12em;
+}
+#autoTradingNew .section-kicker:before{content:"";width:22px;height:2px;background:var(--at-cyan);border-radius:2px}
+#autoTradingNew .hero-glow{
+  position:absolute;right:-130px;top:-150px;width:420px;height:420px;border-radius:50%;
+  background:radial-gradient(circle,rgba(64,216,244,.11),transparent 66%);pointer-events:none;
+}
+@media(max-width:900px){
+ #autoTradingNew .ai-flow{grid-template-columns:repeat(2,1fr)}
+ #autoTradingNew .ai-flow>div:not(:last-child):after{display:none}
+}
+@media(max-width:650px){
+ #autoTradingNew{padding:8px 0 25px}
+ #autoTradingNew .ai-top,#autoTradingNew .ai-metric-grid,#autoTradingNew .ai-table-wrap{padding-left:14px;padding-right:14px}
+ #autoTradingNew .ai-flow{padding:0 14px 15px}
+ #autoTradingNew .dir-stats{grid-template-columns:repeat(2,1fr)!important}
+ #autoTradingNew .ai-title{font-size:21px}
+}
+</style>
+
+<section id="autoTradingTab" class="tab-page" style="display:none">
+  <div class="ai-wrap" id="autoTradingNew">
+    <div class="hero-glow"></div>
+    <section class="ai-card">
+      <div class="ai-top">
+        <div>
+          <div class="ai-sub">AUTONOMOUS TRADING LAB</div>
+          <div class="ai-title">AI Automatic BUY / SELL</div>
+          <div class="ai-sub">Independent paper-first execution engine for NIFTY · BANKNIFTY · FINNIFTY</div>
+        </div>
+        <div class="ai-pill paper" id="autoModeBadge">PAPER TRADE</div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 24px 4px">
+        <div class="ai-metric"><small>ENGINE</small><b>READY</b></div>
+        <div class="ai-metric"><small>MODE</small><b id="autoHeroMode">PAPER</b></div>
+        <div class="ai-metric"><small>RISK</small><b>GUARDED</b></div>
+        <div class="ai-metric"><small>LIVE</small><b>LOCKED</b></div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin:16px 24px 0">
+        <button class="secondary" id="autoPaperBtn">PAPER TRADE</button>
+        <button class="danger" id="autoLiveBtn">LIVE TRADE — LOCKED</button>
+        <button class="secondary" id="autoStartBtn">START ENGINE</button>
+        <button class="secondary" id="autoStopBtn">STOP ENGINE</button>
+      </div>
+
+      <div class="ai-note" id="autoEngineStatus" style="margin-top:12px">
+        PAPER mode is the default. Live execution remains locked until the strategy passes independent validation.
+      </div>
+    </section>
+<!-- VISUAL TRADING COCKPIT -->
+<div class="cockpit">
+  <div class="decision-stage">
+    <div class="cockpit-gridlines"></div>
+    <div class="decision-center">
+      <div class="decision-label">AI EXECUTION DECISION</div>
+      <div class="decision-ring" id="autoDecisionRing">
+        <div class="decision-ring-inner">
+          <div class="decision-action" id="cockpitAction">WAIT</div>
+          <div class="decision-conf" id="cockpitConfidence">CONFIDENCE 0%</div>
+        </div>
+      </div>
+      <div class="decision-foot">
+        <span>INDEX <b id="cockpitIndex">NIFTY</b></span>
+        <span>EDGE <b id="cockpitEdge">0.00R</b></span>
+        <span>REGIME <b id="cockpitRegime">MIXED</b></span>
+      </div>
+    </div>
+    <div class="signal-rail">
+      <span>← DOWN <b>BUY PE</b></span>
+      <span>NEUTRAL <b>WAIT</b></span>
+      <span><b>BUY CE</b> UP →</span>
+    </div>
+  </div>
+
+  <div class="visual-panel">
+    <div class="visual-title">MODEL CONSENSUS</div>
+    <div class="bar-row"><span>GRU</span><div class="bar up"><i style="width:68%"></i></div><b>68%</b></div>
+    <div class="bar-row"><span>ML</span><div class="bar up"><i style="width:64%"></i></div><b>64%</b></div>
+    <div class="bar-row"><span>ENSEMBLE</span><div class="bar"><i style="width:66%"></i></div><b>66%</b></div>
+    <div class="bar-row"><span>REGIME</span><div class="bar"><i style="width:72%"></i></div><b>72%</b></div>
+    <div class="visual-title" style="margin-top:20px">SIGNAL BALANCE</div>
+    <svg class="gauge" viewBox="0 0 240 120">
+      <path d="M30 105 A90 90 0 0 1 210 105" fill="none" stroke="#102c3d" stroke-width="18" stroke-linecap="round"/>
+      <path d="M30 105 A90 90 0 0 1 160 45" fill="none" stroke="#40d8f4" stroke-width="18" stroke-linecap="round"/>
+      <circle cx="160" cy="45" r="5" fill="#dffaff"/>
+    </svg>
+    <div class="gauge-value">66%</div>
+    <div class="gauge-caption">DIRECTIONAL CONSENSUS</div>
+  </div>
+
+  <div class="visual-panel">
+    <div class="visual-title">MARKET REGIME MAP</div>
+    <div class="regime-orbit">
+      <div class="orbit-axis-x"></div><div class="orbit-axis-y"></div>
+      <div class="orbit-dot"></div>
+      <div class="orbit-center"><b>TREND</b><small>MODERATE</small></div>
+    </div>
+    <div class="chart-labels"><span>RANGE</span><span>VOLATILITY</span><span>TREND</span></div>
+    <div class="option-ladder">
+      <div class="ce">CE<br><b>0.62 Δ</b></div>
+      <div class="atm">ATM<br><b>0.50 Δ</b></div>
+      <div class="pe">PE<br><b>0.38 Δ</b></div>
+      <div>SPREAD<br><b>LOW</b></div>
+    </div>
+  </div>
+</div>
+
+<div class="visual-panel" style="margin:0 24px 14px;min-height:190px">
+  <div class="visual-title">EXPECTED MOVE vs OPTION PREMIUM — LIVE MONITOR</div>
+  <svg class="mini-chart" viewBox="0 0 900 120" preserveAspectRatio="none">
+    <defs>
+      <linearGradient id="chartFillAt" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0" stop-color="#26c7e8" stop-opacity=".22"/>
+        <stop offset="1" stop-color="#26c7e8" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <path d="M0 92 C55 85 70 60 125 72 S205 98 255 62 S330 28 380 51 S455 86 510 47 S580 34 625 57 S705 91 760 42 S835 27 900 20 L900 120 L0 120Z" fill="url(#chartFillAt)"/>
+    <path d="M0 92 C55 85 70 60 125 72 S205 98 255 62 S330 28 380 51 S455 86 510 47 S580 34 625 57 S705 91 760 42 S835 27 900 20" fill="none" stroke="#40d8f4" stroke-width="2.5"/>
+    <path d="M0 102 C65 99 95 91 150 94 S230 76 280 82 S360 94 410 76 S500 69 555 72 S640 64 700 70 S805 52 900 49" fill="none" stroke="#a98bff" stroke-width="1.7" stroke-dasharray="5 5"/>
+    <line x1="0" y1="105" x2="900" y2="105" stroke="#17374b"/>
+  </svg>
+  <div class="chart-labels"><span>OPEN</span><span>+15M</span><span>+30M</span><span>+45M</span><span>+60M</span><span>HORIZON</span></div>
+</div>
+
+
+    <section class="ai-card">
+      <div class="ai-sub">REAL-TIME AI COMMAND CENTER</div>
+      <div class="ai-grid" style="margin-top:12px">
+        <div class="dir-card wait">
+          <div class="dir-head"><b>NIFTY</b><span class="ai-pill" id="autoNiftyState">WAIT</span></div>
+          <div class="dir-action" id="autoNiftyAction">WAIT</div>
+          <div class="dir-stats">
+            <div><small>P(UP)</small><b id="autoNiftyUp">—</b></div>
+            <div><small>MOVE</small><b id="autoNiftyMove">—</b></div>
+            <div><small>CONF.</small><b id="autoNiftyConf">—</b></div>
+            <div><small>EDGE</small><b id="autoNiftyEdge">—</b></div>
+          </div>
+          <p class="dir-reason" id="autoNiftyReason">Waiting for AI cycle.</p>
+        </div>
+        <div class="dir-card wait">
+          <div class="dir-head"><b>BANKNIFTY</b><span class="ai-pill" id="autoBankState">WAIT</span></div>
+          <div class="dir-action" id="autoBankAction">WAIT</div>
+          <div class="dir-stats">
+            <div><small>P(UP)</small><b id="autoBankUp">—</b></div>
+            <div><small>MOVE</small><b id="autoBankMove">—</b></div>
+            <div><small>CONF.</small><b id="autoBankConf">—</b></div>
+            <div><small>EDGE</small><b id="autoBankEdge">—</b></div>
+          </div>
+          <p class="dir-reason" id="autoBankReason">Waiting for AI cycle.</p>
+        </div>
+        <div class="dir-card wait">
+          <div class="dir-head"><b>FINNIFTY</b><span class="ai-pill" id="autoFinState">WAIT</span></div>
+          <div class="dir-action" id="autoFinAction">WAIT</div>
+          <div class="dir-stats">
+            <div><small>P(UP)</small><b id="autoFinUp">—</b></div>
+            <div><small>MOVE</small><b id="autoFinMove">—</b></div>
+            <div><small>CONF.</small><b id="autoFinConf">—</b></div>
+            <div><small>EDGE</small><b id="autoFinEdge">—</b></div>
+          </div>
+          <p class="dir-reason" id="autoFinReason">Waiting for AI cycle.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="ai-card">
+      <div class="ai-sub">AUTOMATIC TRADE DECISION PIPELINE</div>
+      <div class="ai-flow">
+        <div><b>MARKET STATE</b><small>price · volatility · breadth</small></div>
+        <div><b>GRU</b><small>sequence direction</small></div>
+        <div><b>ML ENSEMBLE</b><small>probability + calibration</small></div>
+        <div><b>EXPECTED MOVE</b><small>distribution / regime</small></div>
+        <div><b>OPTION SEARCH</b><small>delta · IV · OI · spread</small></div>
+        <div><b>EV / RISK</b><small>net edge after costs</small></div>
+        <div><b>EXECUTE</b><small>BUY / HOLD / REDUCE / SELL</small></div>
+      </div>
+    </section>
+
+    <section class="ai-card">
+      <div class="ai-sub">SELECTED CONTRACT</div>
+      <div class="ai-metric-grid" style="margin-top:10px">
+        <div class="ai-metric"><small>INDEX</small><b id="autoSelIndex">—</b></div>
+        <div class="ai-metric"><small>OPTION</small><b id="autoSelOption">—</b></div>
+        <div class="ai-metric"><small>ENTRY</small><b id="autoSelEntry">—</b></div>
+        <div class="ai-metric"><small>EXPECTED MOVE</small><b id="autoSelMove">—</b></div>
+        <div class="ai-metric"><small>STOP</small><b id="autoSelStop">—</b></div>
+        <div class="ai-metric"><small>TARGET</small><b id="autoSelTarget">—</b></div>
+        <div class="ai-metric"><small>EXPECTED R</small><b id="autoSelR">—</b></div>
+        <div class="ai-metric"><small>LIQUIDITY</small><b id="autoSelLiquidity">—</b></div>
+      </div>
+    </section>
+
+    <section class="ai-card">
+      <div class="ai-sub">OPEN AUTO POSITIONS</div>
+      <div class="ai-table-wrap" style="margin-top:10px">
+        <table class="ai-table">
+          <thead><tr>
+            <th>INDEX</th><th>OPTION</th><th>ENTRY</th><th>LTP</th><th>P&L</th>
+            <th>EDGE</th><th>AI ACTION</th><th>RISK</th><th>STATUS</th>
+          </tr></thead>
+          <tbody id="autoOpenTable"><tr><td colspan="9">No automatic positions.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="ai-card">
+      <div class="ai-sub">AUTOMATIC EXIT ENGINE</div>
+      <div class="ai-grid" style="margin-top:12px">
+        <div class="ai-metric"><small>HOLD</small><b id="autoHold">—</b></div>
+        <div class="ai-metric"><small>REDUCE</small><b id="autoReduce">—</b></div>
+        <div class="ai-metric"><small>SELL / EXIT</small><b id="autoExit">—</b></div>
+        <div class="ai-metric"><small>STOP EVENTS</small><b id="autoStops">—</b></div>
+      </div>
+      <div class="ai-note" style="margin-top:12px">
+        Exit decisions are continuously re-evaluated from updated direction, expected move,
+        option premium behaviour, volatility, liquidity, time decay, risk budget and realised P&L.
+      </div>
+    </section>
+
+    <section class="ai-card">
+      <div class="ai-sub">PAPER → LIVE READINESS GATE</div>
+      <div class="ai-metric-grid" style="margin-top:10px">
+        <div class="ai-metric"><small>PAPER TRADES</small><b id="autoPaperTrades">0</b></div>
+        <div class="ai-metric"><small>WIN RATE</small><b id="autoWinRate">—</b></div>
+        <div class="ai-metric"><small>AVG R</small><b id="autoAvgR">—</b></div>
+        <div class="ai-metric"><small>PROFIT FACTOR</small><b id="autoPF">—</b></div>
+        <div class="ai-metric"><small>OUT-OF-SAMPLE AUC</small><b id="autoAUC">—</b></div>
+        <div class="ai-metric"><small>LIVE ELIGIBILITY</small><b id="autoLiveEligibility">LOCKED</b></div>
+      </div>
+      <div class="ai-note" style="margin-top:12px">
+        Live mode requires sustained out-of-sample evidence. The engine must not trade merely
+        because the model reports high confidence.
+      </div>
+    </section>
+
+    <section class="ai-card">
+      <div class="ai-sub">AI DECISION AUDIT</div>
+      <div class="ai-table-wrap" style="margin-top:10px">
+        <table class="ai-table">
+          <thead><tr><th>TIME</th><th>INDEX</th><th>AI DECISION</th><th>OPTION</th><th>CONF.</th><th>EXPECTED MOVE</th><th>EDGE</th><th>REASON</th></tr></thead>
+          <tbody id="autoDecisionTable"><tr><td colspan="8">No automatic decisions yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</section>
+
+<script>
+(function(){
+  // Independent UI shell. Backend integration can be wired to dedicated
+  // /api/auto-trading/* endpoints without modifying the existing AI Evolution tab.
+  const $ = id => document.getElementById(id);
+  function set(id,v){ if($(id)) $(id).textContent = v ?? '—'; }
+
+  
+  function updateCockpit(action="WAIT", confidence=0, index="NIFTY", edge="0.00R", regime="MIXED"){
+    set('cockpitAction', action);
+    set('cockpitConfidence', 'CONFIDENCE ' + Math.round(Number(confidence)||0) + '%');
+    set('cockpitIndex', index);
+    set('cockpitEdge', edge);
+    set('cockpitRegime', regime);
+    var ring = $('autoDecisionRing');
+    var col = action === 'BUY CE' ? '#52e0a0' : action === 'BUY PE' ? '#ff667d' : '#ffc65a';
+    if(ring){
+      var deg = Math.max(8, Math.min(355, (Number(confidence)||0)*3.6));
+      ring.style.background = 'conic-gradient('+col+' 0deg,'+col+' '+deg+'deg,#183b4d '+deg+'deg,#183b4d 360deg)';
+      ring.style.boxShadow = '0 0 42px '+col+'22,inset 0 0 25px #02070b';
+    }
+    if($('cockpitAction')) $('cockpitAction').style.color = col;
+  }
+
+  function setMode(mode){
+    set('autoModeBadge', mode === 'LIVE' ? 'LIVE TRADE — ARMED' : 'PAPER TRADE'); set('autoHeroMode', mode === 'LIVE' ? 'LIVE' : 'PAPER');
+    set('autoEngineStatus',
+      mode === 'LIVE'
+        ? 'LIVE mode selected, but execution remains blocked unless the backend readiness gate is satisfied.'
+        : 'Paper-first mode active. No real orders are permitted.');
+  }
+
+  $('autoPaperBtn')?.addEventListener('click',()=>setMode('PAPER'));
+  $('autoLiveBtn')?.addEventListener('click',()=>{
+    setMode('LIVE');
+    set('autoLiveEligibility','BACKEND GATE REQUIRED');
+  });
+  $('autoStartBtn')?.addEventListener('click',()=>{
+    set('autoEngineStatus','Automatic trading engine START requested.');
+  });
+  updateCockpit('WAIT', 0, 'NIFTY', '0.00R', 'MIXED');
+
+  $('autoStopBtn')?.addEventListener('click',()=>{
+    set('autoEngineStatus','Automatic trading engine STOP requested. Existing positions remain subject to risk/exit management.');
+  });
+})();
+</script>
+<!-- /NEW INDEPENDENT AI AUTO BUY / SELL TAB -->
 
 <!-- Execute confirmation modal -->
 <div class="modal-overlay" id="execModal">
@@ -2154,33 +2811,62 @@ function switchTopTab(which) {
   const isCondor = which === "condor";
   const isNiftyBreakout = which === "niftyBreakout";
   const isAIEvolution = which === "aiEvolution";
+  const isAutoTrading = which === "autoTrading";
 
-  // Switch the page content.
-  document.getElementById("tabPageCondor").classList.toggle("active", isCondor);
-  document.getElementById("tabPageNiftyBreakout").classList.toggle("active", isNiftyBreakout);
-  document.getElementById("tabPageAIEvolution").classList.toggle("active", isAIEvolution);
+  // Explicitly switch ALL top-level pages.
+  const pages = {
+    condor: document.getElementById("tabPageCondor"),
+    niftyBreakout: document.getElementById("tabPageNiftyBreakout"),
+    aiEvolution: document.getElementById("tabPageAIEvolution"),
+    autoTrading: document.getElementById("autoTradingTab")
+  };
 
-  // Switch the top navigation state.
-  document.getElementById("tabBtnCondor").classList.toggle("active", isCondor);
-  document.getElementById("tabBtnNiftyBreakout").classList.toggle("active", isNiftyBreakout);
-  document.getElementById("tabBtnAIEvolution").classList.toggle("active", isAIEvolution);
+  Object.keys(pages).forEach(k => {
+    if (pages[k]) pages[k].classList.toggle("active", k === which);
+  });
 
-  // AI gets its own light workspace. All other tabs restore the original dark theme.
+  // Keep the existing inline display:none from fighting the .active class.
+  if (pages.autoTrading) {
+    pages.autoTrading.style.display = isAutoTrading ? "block" : "none";
+  }
+  if (pages.condor) {
+    pages.condor.style.display = isCondor ? "block" : "none";
+  }
+  if (pages.niftyBreakout) {
+    pages.niftyBreakout.style.display = isNiftyBreakout ? "block" : "none";
+  }
+  if (pages.aiEvolution) {
+    pages.aiEvolution.style.display = isAIEvolution ? "block" : "none";
+  }
+
+  // Switch navigation state.
+  document.getElementById("tabBtnCondor")?.classList.toggle("active", isCondor);
+  document.getElementById("tabBtnNiftyBreakout")?.classList.toggle("active", isNiftyBreakout);
+  document.getElementById("tabBtnAIEvolution")?.classList.toggle("active", isAIEvolution);
+  document.getElementById("tabBtnAutoTrading")?.classList.toggle("active", isAutoTrading);
+
+  // AI Evolution gets its special workspace theme.
   document.body.classList.toggle("ai-evolution-mode", isAIEvolution);
 
   if (isNiftyBreakout && !window.__niftyBreakoutInitedOnce) {
     window.__niftyBreakoutInitedOnce = true;
-    initNiftyBreakoutTab();
+    if (typeof initNiftyBreakoutTab === "function") initNiftyBreakoutTab();
   }
+
   if (isAIEvolution) {
     if (typeof initAIEvolutionUI === "function") {
       initAIEvolutionUI();
     } else {
-      console.error('[AI-EVOLUTION] initAIEvolutionUI is not defined — the page is likely running a cached/stale copy of this HTML. Hard-refresh (Ctrl+Shift+R) or clear cache.');
+      console.error("[AI-EVOLUTION] initAIEvolutionUI is not defined.");
     }
   }
-}
 
+  if (isAutoTrading) {
+    // Independent tab initialization hook.
+    if (typeof initAutoTradingTab === "function") initAutoTradingTab();
+    window.scrollTo({top: 0, behavior: "smooth"});
+  }
+}
 let bmTimer = null;
 function fmtMoney(v) { return v == null ? "—" : "₹" + Number(v).toLocaleString("en-IN", {maximumFractionDigits:2}); }
 function fmtTime(v) { return v ? new Date(v).toLocaleTimeString() : "—"; }
@@ -2416,7 +3102,31 @@ async function refreshAIEvolution(){
     const db=document.getElementById('aiNDecisionTable');if(db)db.innerHTML=(decs||[]).slice(0,40).map(x=>`<tr><td>${aiEscN(x.ts)}</td><td>${aiEscN(x.symbol)}</td><td>${aiEscN(x.decision)}</td><td>${aiEscN(x.reason)}</td></tr>`).join('')||'<tr><td colspan="4">No decisions yet.</td></tr>';
   }catch(e){setN('aiNStatus','AI status error: '+e.message)}
 }
-function initAIEvolutionUI(){if(window.__aiNewInit)return;window.__aiNewInit=true;console.info('[AI-EVOLUTION] init running');window.addEventListener('error',ev=>{console.error('[AI-EVOLUTION] uncaught error:',ev.message,ev.filename,ev.lineno);setN('aiNStatus','JS error: '+ev.message+' ('+ev.filename+':'+ev.lineno+')')});const b=document.getElementById('aiNRun');if(b)b.onclick=async()=>{setN('aiNStatus','Running…');try{await aiGet('/api/ai-evolution/cycle',{method:'POST'});await refreshAIEvolution();setN('aiNStatus','Cycle complete · PAPER ONLY')}catch(e){setN('aiNStatus',e.message)}};refreshAIEvolution();window.__aiNewTimer=setInterval(refreshAIEvolution,10000);console.info('[AI-EVOLUTION] init complete, button bound:',!!b)}
+
+async function refreshAIAutoTrader(){
+  try{
+    const [st,dec,tr]=await Promise.all([aiGet('/api/ai-auto/status'),aiGet('/api/ai-auto/decision'),aiGet('/api/ai-auto/trades')]);
+    const p=st.settings||{}, m=st.metrics||{}, edge=st.edge||{};
+    setN('aatMode',String(p.execution_mode||'paper').toUpperCase());
+    document.getElementById('aatMode')?.classList.toggle('live',p.execution_mode==='live');document.getElementById('aatMode')?.classList.toggle('paper',p.execution_mode!=='live');
+    setN('aatEngine',Number(p.auto_enabled)?'ON':'OFF');setN('aatOpen',(st.open_trades||[]).length);setN('aatClosed',m.trades||0);setN('aatWin',m.trades?Number(m.win_rate||0).toFixed(1)+'%':'—');setN('aatAvgR',m.trades?Number(m.avg_r||0).toFixed(2)+'R':'—');setN('aatPF',m.trades?Number(m.profit_factor||0).toFixed(2):'—');setN('aatDayPnl','₹'+Number(st.daily_pnl||0).toLocaleString('en-IN',{maximumFractionDigits:0}));
+    document.getElementById('aatPaperBtn')?.classList.toggle('active',p.execution_mode==='paper');document.getElementById('aatLiveBtn')?.classList.toggle('active',p.execution_mode==='live');document.getElementById('aatEngineBtn').textContent=Number(p.auto_enabled)?'AUTO: ON':'AUTO: OFF';
+    const ec=document.getElementById('aatEdgeChecks');const checks=edge.checks||{};if(ec)ec.innerHTML=Object.entries(checks).map(([k,v])=>`<span class="aat-check ${v?'ok':'fail'}">${v?'✓':'✕'} ${aiEscN(k.replaceAll('_',' '))}</span>`).join('');
+    setN('aatEdgeHeadline',edge.qualified?'OUT-OF-SAMPLE EDGE QUALIFIED':'PAPER MODE — LIVE EDGE NOT PROVEN');
+    const dr=document.getElementById('aatDecisionRows');if(dr)dr.innerHTML=(dec.decisions||[]).map(x=>`<tr><td><b>${aiEscN(x.symbol)}</b></td><td><span class="aat-state ${x.decision==='BUY'?'aat-buy':'aat-wait'}">${aiEscN(x.decision)}</span></td><td>${aiEscN(x.option_symbol||'—')}</td><td>${x.confidence==null?'—':(Number(x.confidence)*100).toFixed(1)+'%'}</td><td>${x.expected_value_r==null?'—':Number(x.expected_value_r).toFixed(2)}</td><td>${x.expected_move==null?'—':Number(x.expected_move).toFixed(1)}</td><td>${aiEscN(x.reason||'')}</td></tr>`).join('')||'<tr><td colspan="7">No qualifying signal.</td></tr>';
+    const or=document.getElementById('aatOpenRows');or.innerHTML=(st.open_trades||[]).map(x=>`<tr><td>${aiEscN(x.ts)}</td><td>${aiEscN(x.symbol)}</td><td>${aiEscN(x.option_symbol)}</td><td>${aiEscN(x.direction)}</td><td>${x.entry??'—'}</td><td>${x.stop??'—'}</td><td>${x.target??'—'}</td><td>${x.qty??'—'}</td><td><span class="aat-state aat-hold">${aiEscN(x.last_action||'HOLD')}</span></td><td>${x.pnl??'0'}</td></tr>`).join('')||'<tr><td colspan="10">No automatic positions.</td></tr>';
+    setN('aatStatus',p.execution_mode==='live'?(st.live_allowed?'LIVE ARMED · automatic execution permitted':'LIVE selected but execution gate is locked'):'PAPER MODE · no broker order is sent');
+  }catch(e){setN('aatStatus','Auto engine error: '+e.message)}
+}
+function initAIAutoTrader(){
+  if(window.__aatInit)return;window.__aatInit=true;
+  document.getElementById('aatPaperBtn').onclick=async()=>{try{await aiGet('/api/ai-auto/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({execution_mode:'paper'})});refreshAIAutoTrader()}catch(e){setN('aatStatus',e.message)}};
+  document.getElementById('aatLiveBtn').onclick=async()=>{const phrase=prompt('Live trading is locked behind the proven-edge gate. If the gate is qualified, enter the live-arm phrase:');if(phrase===null)return;try{await aiGet('/api/ai-auto/arm-live',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phrase})});setN('aatStatus','LIVE ARMED · automatic BUY/SELL execution enabled');refreshAIAutoTrader()}catch(e){setN('aatStatus',e.message);refreshAIAutoTrader()}};
+  document.getElementById('aatDisarmBtn').onclick=async()=>{try{await aiGet('/api/ai-auto/disarm-live',{method:'POST'});refreshAIAutoTrader()}catch(e){setN('aatStatus',e.message)}};
+  document.getElementById('aatEngineBtn').onclick=async()=>{try{const st=await aiGet('/api/ai-auto/status');await aiGet('/api/ai-auto/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({execution_mode:st.settings.execution_mode,auto_enabled:!Number(st.settings.auto_enabled)})});refreshAIAutoTrader()}catch(e){setN('aatStatus',e.message)}};
+  refreshAIAutoTrader();window.__aatTimer=setInterval(refreshAIAutoTrader,10000);
+}
+function initAIEvolutionUI(){if(window.__aiNewInit)return;window.__aiNewInit=true;console.info('[AI-EVOLUTION] init running');initAIAutoTrader();window.addEventListener('error',ev=>{console.error('[AI-EVOLUTION] uncaught error:',ev.message,ev.filename,ev.lineno);setN('aiNStatus','JS error: '+ev.message+' ('+ev.filename+':'+ev.lineno+')')});const b=document.getElementById('aiNRun');if(b)b.onclick=async()=>{setN('aiNStatus','Running…');try{await aiGet('/api/ai-evolution/cycle',{method:'POST'});await refreshAIEvolution();setN('aiNStatus','Cycle complete · PAPER ONLY')}catch(e){setN('aiNStatus',e.message)}};refreshAIEvolution();window.__aiNewTimer=setInterval(refreshAIEvolution,10000);console.info('[AI-EVOLUTION] init complete, button bound:',!!b)}
 </script>
 </body>
 </html>
