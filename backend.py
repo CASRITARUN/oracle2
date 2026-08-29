@@ -7169,25 +7169,38 @@ AI_DIRECTIONAL_POLL_SECONDS = int(os.environ.get("AI_DIRECTIONAL_POLL_SECONDS", 
 # Stability/performance controls for the large historical archive.
 AI_HIST_STATUS_CACHE_SECONDS = float(os.environ.get("AI_HIST_STATUS_CACHE_SECONDS", "5"))
 AI_HIST_TRAIN_RETRY_MINUTES = float(os.environ.get("AI_HIST_TRAIN_RETRY_MINUTES", "15"))
-AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL = int(os.environ.get("AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL", "1200"))
-AI_HIST_TRAIN_MAX_SAMPLES = int(os.environ.get("AI_HIST_TRAIN_MAX_SAMPLES", "2400"))
+# STAGE 1 FIX: the old defaults (1200 per symbol / 2400 pooled) capped training
+# to well under 1% of the ~645,000-candle archive, and the final pooled cap in
+# ai_hist_train_deep() then kept only the MOST RECENT 2400 rows -- discarding
+# nearly all of the 12-year span every time it retrained. That combination is
+# the direct cause of the "samples=2400, AUC=0.457" baseline in the audit.
+# New sizing: each sample is (sequence_len=20 x len(SEQUENCE_FEATURE_NAMES)=15)
+# float64 = 2,400 bytes. 60,000 pooled samples ~= 144 MB resident during
+# training -- bounded and safe on a small VM, while using ~25x more of the
+# archive than before. Per-symbol point budget is raised proportionally so the
+# per-symbol stratified stride (already chronological/full-span, see
+# _hist_training_sequences) keeps its span but at much higher resolution.
+AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL = int(os.environ.get("AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL", "25000"))
+AI_HIST_TRAIN_MAX_SAMPLES = int(os.environ.get("AI_HIST_TRAIN_MAX_SAMPLES", "60000"))
 AI_HIST_TRAIN_EPOCHS = int(os.environ.get("AI_HIST_TRAIN_EPOCHS", "24"))
 AI_HIST_TRAIN_LOCK = threading.Lock()
 _AI_HIST_STATUS_CACHE = {"at": 0.0, "value": None}
 _AI_HIST_STATUS_CACHE_LOCK = threading.Lock()
 
 AI_DEFAULTS = {
-    # Mature AI gate. This remains deliberately strict once both learned models
-    # have enough evidence to become entry gates.
+    # STAGE 3: "min_score" / "bootstrap_min_score" are no longer an entry gate
+    # for the INDEX_DIRECTION -> CE/PE engine. That engine now auto-initiates
+    # a paper trade off the live GRU/ML/ensemble read of spot & futures
+    # direction directly, with no fixed or ramping score threshold in the
+    # way. These two fields are kept only (a) for the legacy champion/
+    # challenger self-tuning loop below (ai_learn) which still scores past
+    # trades on its own 0-100 scale, and (b) as an informational confidence
+    # readout shown on the dashboard (see ai_adaptive_min_score).
     "min_score": 72.0, "min_rr": 1.5, "stop_pct": 0.75, "target_pct": 1.50,
     "risk_per_trade_pct": 1.0, "max_positions": 6, "learning_min_trades": 40,
     "challenger_min_trades": 30, "enabled": 1, "ml_min_samples": 40, "ml_min_probability": 0.58,
     "ml_learning_rate": 0.08, "ml_epochs": 180, "dl_min_samples": 80, "dl_probability_weight": 0.50,
     "dl_hidden1": 32, "dl_hidden2": 16, "dl_epochs": 90, "dl_learning_rate": 0.01,
-    # Bootstrap gate: while either learned model is still warming, the engine
-    # paper-trades qualifying setups so that there is real price-path evidence
-    # to learn from. The gate rises smoothly from 55 to the mature 72 as both
-    # ML and Deep-learning sample requirements are approached.
     "bootstrap_min_score": 55.0,
     # Research-grade ensemble layer. It remains advisory during warm-up and becomes a
     # gate only after a chronological holdout has enough observations.
@@ -7255,7 +7268,17 @@ def ai_init_db():
     CREATE INDEX IF NOT EXISTS idx_ai_hist_interval_ts ON ai_hist_candles(interval,ts);
     CREATE INDEX IF NOT EXISTS idx_ai_market_symbol_id ON ai_market(symbol,id);
     CREATE TABLE IF NOT EXISTS ai_research_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,models TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,probability REAL,uncertainty REAL,status TEXT,regime TEXT);
+    CREATE TABLE IF NOT EXISTS ai_tree_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,trees TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,status TEXT);
+    CREATE TABLE IF NOT EXISTS ai_model_compare(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,folds INTEGER,results TEXT,champion TEXT);
     """)
+    # Safe, additive migration (Section 26/38: never destroy existing data, no
+    # duplicate tables). Older DBs won't have this column; ALTER TABLE ADD
+    # COLUMN is idempotent-guarded here since SQLite errors if it already exists.
+    for tbl in ("ai_hist_model", "ai_dl_model"):
+        try:
+            c.execute(f"ALTER TABLE {tbl} ADD COLUMN feature_version TEXT")
+        except Exception:
+            pass  # column already exists
     for k,v in AI_DEFAULTS.items(): c.execute("INSERT OR IGNORE INTO ai_settings VALUES(?,?)",(k,str(v)))
     if not c.execute("SELECT 1 FROM ai_versions LIMIT 1").fetchone():
         c.execute("INSERT INTO ai_versions(version,parent_version,created_at,status,reason,params,metrics) VALUES(?,?,?,?,?,?,?)",
@@ -7404,7 +7427,10 @@ def ai_directional_snapshot(symbol, params=None):
         volatility = 0.0
 
     features = ai_market_pattern_features(symbol, spot, iv, pcr, volume, trend, momentum)
-    seq = ai_dl_sequence(symbol, features)
+    live_seq, seq_err = build_live_index_sequence(symbol)
+    if seq_err:
+        return None, {"error": f"index data not ready: {seq_err}", "decision": "WAIT"}
+    seq = live_seq["sequence"]
     dl_prob, dl_model = ai_dl_predict_sequence(seq)
     ml_prob, ml_model = ai_ml_predict(features)
 
@@ -7427,19 +7453,57 @@ def ai_directional_snapshot(symbol, params=None):
 
     # Confidence is the primary learned signal.  Momentum/trend are supporting
     # context, not a replacement for the learned direction.
-    score = round(50.0 + max(0.0, confidence - 0.50) * 100.0, 2)
+    base_score = round(50.0 + max(0.0, confidence - 0.50) * 100.0, 2)
     if direction == "UP":
         context = max(0.0, min(1.0, ((trend - 12.5) + (momentum - 12.5)) / 25.0 + 0.5))
     else:
         context = max(0.0, min(1.0, ((12.5 - trend) + (12.5 - momentum)) / 25.0 + 0.5))
-    score = round(min(100.0, score * 0.85 + context * 15.0), 2)
-    if score < AI_DIRECTIONAL_MIN_SCORE:
-        return None, {"error": f"direction score {score:.1f} below {AI_DIRECTIONAL_MIN_SCORE:.1f}", "decision": "WAIT", "p_up": round(dl_prob, 4)}
 
+    # STAGE 2: EV-confidence ensemble (Model A logistic + bagged-logistic
+    # research ensemble + Model B tree forest) now actually feeds the score,
+    # instead of the old hardcoded "research_probability": 0.5 placeholder.
+    ensemble_conf, ensemble_detail = ai_ensemble_confidence(features)
+    score = round(min(100.0, base_score * 0.55 + context * 15.0 + ensemble_conf * 30.0), 2)
+
+    # STAGE 3: no fixed/adaptive score gate. The engine no longer blocks a
+    # trade on a hard-coded or ramping threshold (the old 55->72 gate) — it
+    # acts directly on whatever the GRU + ML/ensemble currently believe about
+    # spot/futures direction, and lets live paper-trade outcomes be the
+    # teacher. `min_score` is kept purely as a confidence readout for the
+    # dashboard (see ai_adaptive_min_score) — informational only, never
+    # withholds a decision.
+    min_score = ai_adaptive_min_score(int(ml_model.get("samples") or 0), int(dl_model.get("samples") or 0))
+
+    # STAGE 2: score multiple strikes near the target delta instead of only
+    # ever taking the single nearest-delta contract — weigh delta fit,
+    # liquidity, spread tightness, and the EV-ensemble confidence together.
     candidates = [x for x in chain if x.get("instrument_type") == option_type and x.get("delta") is not None]
     if not candidates:
         return None, {"error": f"No {option_type} contracts with delta", "decision": "WAIT"}
-    target = min(candidates, key=lambda x: abs(abs(float(x.get("delta") or 0)) - AI_DIRECTIONAL_TARGET_DELTA))
+
+    def _candidate_score(o):
+        ask_o = o.get("ask")
+        if ask_o is None or float(ask_o) <= 0:
+            return None
+        delta_o = abs(float(o.get("delta") or 0))
+        spread_o = o.get("spread_pct")
+        vol_o = float(o.get("volume") or 0); oi_o = float(o.get("oi") or 0)
+        delta_fit = 1.0 - min(1.0, abs(delta_o - AI_DIRECTIONAL_TARGET_DELTA) / max(AI_DIRECTIONAL_TARGET_DELTA, 0.05))
+        liquidity = min(1.0, math.log1p(vol_o + oi_o) / 12.0)
+        spread_score = 1.0 - min(1.0, (float(spread_o) if spread_o is not None else 15.0) / 20.0)
+        return delta_fit * 0.35 + liquidity * 0.20 + spread_score * 0.20 + ensemble_conf * 0.25
+
+    scored = []
+    for o in candidates:
+        s = _candidate_score(o)
+        if s is not None:
+            scored.append((s, o))
+    if not scored:
+        return None, {"error": f"No executable {option_type} contracts near target delta", "decision": "WAIT"}
+    scored.sort(key=lambda t: -t[0])
+    target = scored[0][1]
+    alt_candidates = [{"tradingsymbol": o.get("tradingsymbol"), "delta": o.get("delta"),
+                        "composite_score": round(s, 4)} for s, o in scored[:5]]
 
     bid = target.get("bid")
     ask = target.get("ask")
@@ -7454,8 +7518,25 @@ def ai_directional_snapshot(symbol, params=None):
         return None, {"error": f"Spread {float(spread_pct):.1f}% too wide", "decision": "WAIT"}
 
     entry = float(ask)  # BUY option -> pay the live ask, never midpoint/LTP.
-    stop = entry * (1 - float(params.get("stop_pct", 0.75)) / 100.0)
-    target_price = entry * (1 + float(params.get("target_pct", 1.50)) / 100.0)
+
+    # STAGE 2: stop/target derived from the option's own delta and recent
+    # realized index volatility (first-order: option premium % move ~= index
+    # % move * spot/premium * delta), instead of a single fixed percentage
+    # for every trade regardless of how calm or violent the market is. The
+    # configured stop_pct/target_pct now act as a floor, not the value used
+    # on every trade, so a near-zero vol reading can never produce an
+    # unrealistically tight stop. This is a first-order approximation
+    # (ignores gamma/theta) meant to be tuned against real fills, not a
+    # promise of precision.
+    delta_abs = max(0.05, abs(float(target.get("delta") or AI_DIRECTIONAL_TARGET_DELTA)))
+    expected_index_move_pct = max(volatility, 0.05)
+    expected_option_move_pct = max(0.10, expected_index_move_pct * (spot / max(entry, 0.01)) * delta_abs)
+    floor_stop_pct = float(params.get("stop_pct", 0.75))
+    floor_target_pct = float(params.get("target_pct", 1.50))
+    stop_pct = max(floor_stop_pct, min(3.0, expected_option_move_pct * 0.60))
+    target_pct = max(floor_target_pct, min(6.0, expected_option_move_pct * 1.20 * max(ensemble_conf, 0.5) * 2.0))
+    stop = entry * (1 - stop_pct / 100.0)
+    target_price = entry * (1 + target_pct / 100.0)
     lot = int(data.get("lot_size") or target.get("lot_size") or 1)
     setup = {
         "strategy_type": "INDEX_DIRECTIONAL_LONG_OPTION",
@@ -7475,6 +7556,12 @@ def ai_directional_snapshot(symbol, params=None):
         "dl_sequence": seq,
         "ml_features": features,
         "historical_model_status": dl_model.get("status"),
+        "ensemble_confidence": round(float(ensemble_conf), 4),
+        "ensemble_detail": ensemble_detail,
+        "adaptive_min_score": min_score,
+        "stop_pct_used": round(stop_pct, 3),
+        "target_pct_used": round(target_pct, 3),
+        "alt_candidates": alt_candidates,
         "paper_only": True,
     }
     return {
@@ -7507,11 +7594,18 @@ def ai_directional_snapshot(symbol, params=None):
         "ml_features": features,
         "ml_probability": round(float(ml_prob), 4),
         "dl_probability": round(float(dl_prob), 4),
-        "research_probability": 0.5,
-        "research_uncertainty": 0.5,
+        # STAGE 2 FIX: these were hardcoded placeholders (0.5 / 0.5 / 0.0 / 0)
+        # even though the bagged-logistic research ensemble was already being
+        # trained every cycle (ai_research_train() in ai_cycle()) — it just
+        # was never actually consulted here. Now wired through
+        # ai_ensemble_confidence().
+        "research_probability": round(float(ensemble_detail.get("models", {}).get("research_A2", {}).get("probability", 0.5)), 4),
+        "research_uncertainty": round(1.0 - abs(ensemble_conf - 0.5) * 2, 4),
         "market_regime": "INDEX_DIRECTIONAL",
-        "research_auc": 0.0,
-        "research_samples": 0,
+        "research_auc": round(float(ensemble_detail.get("models", {}).get("research_A2", {}).get("auc", 0.0)), 4),
+        "research_samples": int(0 if not ensemble_detail.get("weights_used") else 1),
+        "ensemble_confidence": round(float(ensemble_conf), 4),
+        "tree_probability": round(float(ensemble_detail.get("models", {}).get("tree_B", {}).get("probability", 0.5)), 4),
         "dl_samples": int(dl_model.get("samples", 0)),
         "ml_samples": int(ml_model.get("samples", 0)),
         "dl_sequence": seq,
@@ -7532,6 +7626,28 @@ ML_FEATURE_NAMES = [
     "range_20", "volume_ratio", "trend_score", "momentum_score",
     "pcr_norm", "iv_norm", "time_sin", "time_cos"
 ]
+
+# ---------------------------------------------------------------------------
+# STAGE 1 FIX (feature-engine unification):
+# The historical archive has no option-chain data, so pcr_norm/iv_norm were
+# hard-coded constants (1.0 / 0.0) for every historical training row, while the
+# live path fed real option-chain PCR/IV into the *same* named slots. A model
+# trained mostly on two constant inputs and then run live with real, varying
+# values for those same inputs is a textbook train/live distribution mismatch.
+# SEQUENCE_FEATURE_NAMES is the feature set actually fed to the index-pattern
+# GRU (historical pre-training AND live prediction, from the same function and
+# the same ai_hist_candles table). PCR/IV remain available live and are still
+# used — just downstream, in option/EV scoring context, not inside the learned
+# index-pattern sequence.
+# ---------------------------------------------------------------------------
+FEATURE_ENGINE_VERSION = "fe_v2_2026_08_unified"
+SEQUENCE_FEATURE_NAMES = [
+    "ret_1", "ret_3", "ret_5", "ret_10", "ret_20",
+    "ema_gap_9_20", "ema_gap_20_50", "rsi14", "volatility_10",
+    "range_20", "volume_ratio", "trend_score", "momentum_score",
+    "time_sin", "time_cos"
+]
+AI_LIVE_MAX_BAR_AGE_MIN = float(os.environ.get("AI_LIVE_MAX_BAR_AGE_MIN", "20"))
 
 def _sigmoid(z):
     if z < -40: return 0.0
@@ -7738,8 +7854,10 @@ def ai_dl_model():
     try:
         blob=json.loads(r["w1"] or "{}")
         is_gru=isinstance(blob,dict) and "Wz" in blob and "Wh" in blob
-        status=r["status"] if is_gru else "LEGACY MODEL — REBUILD REQUIRED"
-        return {"status":status,"samples":int(r["samples"] or 0) if is_gru else 0,"accuracy":float(r["accuracy"] or 0) if is_gru else 0.0,"auc":float(r["auc"] or 0) if is_gru else 0.0,"updated_at":r["updated_at"] if is_gru else None,"architecture":"GRU-32 recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN}
+        stored_fv=r["feature_version"] if "feature_version" in r.keys() else None
+        version_ok = (stored_fv == FEATURE_ENGINE_VERSION)
+        status=r["status"] if (is_gru and version_ok) else ("RETRAIN REQUIRED — feature engine upgraded" if is_gru else "LEGACY MODEL — REBUILD REQUIRED")
+        return {"status":status,"samples":int(r["samples"] or 0) if is_gru else 0,"accuracy":float(r["accuracy"] or 0) if is_gru else 0.0,"auc":float(r["auc"] or 0) if is_gru else 0.0,"updated_at":r["updated_at"] if is_gru else None,"architecture":"GRU-32 recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"feature_version":stored_fv,"current_feature_version":FEATURE_ENGINE_VERSION}
     except Exception:return {"status":"NOT_TRAINED","samples":0,"accuracy":0.0,"auc":0.0,"architecture":"GRU-32 recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"updated_at":None}
 
 
@@ -7758,7 +7876,12 @@ def ai_dl_predict_sequence(seq):
     w=_dl_load_weights()
     if w is None:return 0.5,ai_dl_model()
     x=np.asarray(seq,dtype=float)
-    if x.shape!=(DL_SEQUENCE_LEN,len(ML_FEATURE_NAMES)):return 0.5,ai_dl_model()
+    if x.shape!=(DL_SEQUENCE_LEN,len(SEQUENCE_FEATURE_NAMES)):return 0.5,ai_dl_model()
+    # Stage 1 changed the feature set (dropped constant-during-training pcr/iv
+    # slots), so a model persisted under the old dimensionality is no longer
+    # compatible. Detect it instead of letting the matmul silently misbehave.
+    if int(w["Wz"].shape[0]) != len(SEQUENCE_FEATURE_NAMES):
+        m=ai_dl_model();m["status"]="RETRAIN REQUIRED — feature engine upgraded";return 0.5,m
     p=float(_gru_forward(w,x)[0])
     return p,ai_dl_model()
 
@@ -7794,7 +7917,7 @@ def ai_dl_train():
     for r in rows:
         try:
             seq=np.asarray(json.loads(r["sequence"]),dtype=float)
-            if seq.shape==(DL_SEQUENCE_LEN,len(ML_FEATURE_NAMES)):X.append(seq);Y.append(int(r["label"]))
+            if seq.shape==(DL_SEQUENCE_LEN,len(SEQUENCE_FEATURE_NAMES)):X.append(seq);Y.append(int(r["label"]))
         except Exception:pass
     if len(X)>DL_MAX_TRAIN_SAMPLES:
         X=X[-DL_MAX_TRAIN_SAMPLES:];Y=Y[-DL_MAX_TRAIN_SAMPLES:]
@@ -7805,8 +7928,8 @@ def ai_dl_train():
 
 def _ai_dl_persist(params,acc,auc,samples,train_samples,val_samples,status="TRAINED"):
     updated=datetime.now(IST).isoformat();blob=json.dumps(_gru_to_json(params),separators=(",",":"));c=ai_db()
-    c.execute("""INSERT OR REPLACE INTO ai_dl_model(id,updated_at,w1,b1,w2,b2,w3,b3,samples,accuracy,auc,status) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)""",
-              (updated,blob,None,None,None,None,0.0,samples,acc,auc,status))
+    c.execute("""INSERT OR REPLACE INTO ai_dl_model(id,updated_at,w1,b1,w2,b2,w3,b3,samples,accuracy,auc,status,feature_version) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (updated,blob,None,None,None,None,0.0,samples,acc,auc,status,FEATURE_ENGINE_VERSION))
     c.commit();c.close();ai_log("LEARNING","DL_GRU_TRAIN",f"GRU sequence model samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}")
     return {**ai_dl_model(),"train_samples":train_samples,"validation_samples":val_samples}
 
@@ -7921,6 +8044,223 @@ def ai_research_train():
     c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_research_model(id,updated_at,models,samples,train_samples,validation_samples,accuracy,auc,probability,uncertainty,status,regime) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(updated,json.dumps(models),len(X),len(Xtr),len(Xv),acc,auc,float(np.mean(pv)),float(np.std(pv)),"TRAINED","VALIDATION")); c.commit(); c.close()
     ai_log("LEARNING","RESEARCH_RETRAIN",f"ensemble={len(models)} samples={len(X)} train={len(Xtr)} validation={len(Xv)} accuracy={acc:.1f}% auc={auc:.3f}")
     return {"status":"TRAINED","samples":len(X),"train_samples":len(Xtr),"validation_samples":len(Xv),"accuracy":acc,"auc":auc,"probability":float(np.mean(pv)),"uncertainty":float(np.std(pv)),"regime":"VALIDATION","models":models,"updated_at":updated}
+
+# ---------------------------------------------------------------------------
+# STAGE 2 — Model B: tree ensemble ("target-hit" classifier, different model
+# class from the logistic models above). Pure-Python/NumPy CART, bootstrap-
+# bagged with per-split feature subsampling (a small random forest). This is
+# genuinely a different hypothesis class from Model A (linear/logistic), so
+# comparing the two chronologically is a real A/B test, not two copies of the
+# same model with different names.
+# ---------------------------------------------------------------------------
+TREE_MAX_DEPTH = int(os.environ.get("AI_TREE_MAX_DEPTH", "4"))
+TREE_MIN_LEAF = int(os.environ.get("AI_TREE_MIN_LEAF", "6"))
+TREE_N_ESTIMATORS = int(os.environ.get("AI_TREE_N_ESTIMATORS", "25"))
+
+def _gini(y):
+    if len(y) == 0: return 0.0
+    p = float(np.mean(y))
+    return 1.0 - p * p - (1 - p) * (1 - p)
+
+def _tree_build(X, y, depth, feat_subset):
+    n = len(y)
+    base_rate = float(np.mean(y)) if n else 0.5
+    if depth >= TREE_MAX_DEPTH or n < 2 * TREE_MIN_LEAF or len(set(y.tolist())) < 2:
+        return {"leaf": True, "p": base_rate, "n": n}
+    best = None  # (gain, feat, thresh)
+    parent_gini = _gini(y)
+    rng_feats = feat_subset
+    for f in rng_feats:
+        col = X[:, f]
+        # Candidate thresholds: quartile-ish cut points, bounded cost.
+        uniq = np.unique(col)
+        if len(uniq) < 2: continue
+        cuts = np.quantile(uniq, [0.25, 0.5, 0.75]) if len(uniq) > 4 else uniq[:-1]
+        for t in cuts:
+            left = col <= t; right = ~left
+            nl, nr = int(left.sum()), int(right.sum())
+            if nl < TREE_MIN_LEAF or nr < TREE_MIN_LEAF: continue
+            g = parent_gini - (nl / n) * _gini(y[left]) - (nr / n) * _gini(y[right])
+            if best is None or g > best[0]:
+                best = (g, f, float(t))
+    if best is None or best[0] <= 1e-6:
+        return {"leaf": True, "p": base_rate, "n": n}
+    _, f, t = best
+    left = X[:, f] <= t; right = ~left
+    return {
+        "leaf": False, "f": f, "t": t, "n": n,
+        "left": _tree_build(X[left], y[left], depth + 1, feat_subset),
+        "right": _tree_build(X[right], y[right], depth + 1, feat_subset),
+    }
+
+def _tree_predict_one(node, x):
+    while not node["leaf"]:
+        node = node["left"] if x[node["f"]] <= node["t"] else node["right"]
+    return node["p"]
+
+def _forest_train(X, Y, n_trees, seed=20260825):
+    rng = np.random.default_rng(seed)
+    n, d = X.shape
+    k = max(2, int(math.sqrt(d)) + 1)
+    trees = []
+    for _ in range(n_trees):
+        idx = rng.integers(0, n, size=n)
+        feat_subset = sorted(rng.choice(d, size=min(k, d), replace=False).tolist())
+        trees.append(_tree_build(X[idx], Y[idx], 0, feat_subset))
+    return trees
+
+def _forest_predict(trees, x):
+    if not trees: return 0.5
+    return float(np.mean([_tree_predict_one(t, x) for t in trees]))
+
+def ai_tree_model():
+    c = ai_db(); r = c.execute("SELECT * FROM ai_tree_model WHERE id=1").fetchone(); c.close()
+    if not r:
+        return {"status": "NOT_TRAINED", "samples": 0, "accuracy": 0.0, "auc": 0.0,
+                "architecture": f"CART forest x{TREE_N_ESTIMATORS} (depth {TREE_MAX_DEPTH})", "updated_at": None}
+    try:
+        trees = json.loads(r["trees"] or "[]")
+    except Exception:
+        trees = []
+    return {"status": r["status"] or "READY", "samples": int(r["samples"] or 0),
+            "accuracy": float(r["accuracy"] or 0), "auc": float(r["auc"] or 0),
+            "updated_at": r["updated_at"], "trees": trees,
+            "architecture": f"CART forest x{TREE_N_ESTIMATORS} (depth {TREE_MAX_DEPTH})"}
+
+def ai_tree_predict(features):
+    m = ai_tree_model()
+    x = np.asarray(ai_ml_features(features) if isinstance(features, dict) else list(features), dtype=float)
+    trees = m.get("trees") or []
+    return _forest_predict(trees, x), m
+
+def _ai_ml_sample_matrix():
+    """Shared loader: same (features,label) rows used by Model A (ai_ml_train)
+    and the bagged-logistic research ensemble, so every model below is
+    trained/evaluated on identical data and is a fair comparison."""
+    c = ai_db(); rows = c.execute("SELECT id,features,label FROM ai_ml_samples ORDER BY id").fetchall(); c.close()
+    X = []; Y = []
+    for r in rows:
+        try:
+            f = json.loads(r["features"] or "[]")
+            if len(f) == len(ML_FEATURE_NAMES):
+                X.append([float(v) for v in f]); Y.append(int(r["label"]))
+        except Exception:
+            pass
+    return np.asarray(X, dtype=float), np.asarray(Y, dtype=int)
+
+def ai_tree_train():
+    X, Y = _ai_ml_sample_matrix()
+    p = ai_settings(); min_samples = int(p.get("research_min_samples", 120))
+    if len(X) < max(20, min_samples): return ai_tree_model()
+    cut = max(10, int(len(X) * 0.8)); cut = min(cut, len(X) - 1)
+    Xtr, Ytr = X[:cut], Y[:cut]; Xv, Yv = X[cut:], Y[cut:]
+    if len(set(Ytr.tolist())) < 2 or len(set(Yv.tolist())) < 2: return ai_tree_model()
+    trees = _forest_train(Xtr, Ytr, TREE_N_ESTIMATORS)
+    pv = np.asarray([_forest_predict(trees, x) for x in Xv])
+    acc = float(np.mean((pv >= 0.5) == (Yv >= 0.5)) * 100); auc = _dl_auc(Yv, pv)
+    updated = datetime.now(IST).isoformat()
+    c = ai_db()
+    c.execute("INSERT OR REPLACE INTO ai_tree_model(id,updated_at,trees,samples,train_samples,validation_samples,accuracy,auc,status) VALUES(1,?,?,?,?,?,?,?,?)",
+              (updated, json.dumps(trees), len(X), len(Xtr), len(Xv), acc, auc, "TRAINED"))
+    c.commit(); c.close()
+    ai_log("LEARNING", "TREE_RETRAIN", f"trees={TREE_N_ESTIMATORS} samples={len(X)} train={len(Xtr)} validation={len(Xv)} accuracy={acc:.1f}% auc={auc:.3f}")
+    return ai_tree_model()
+
+def ai_model_walkforward(n_folds=4):
+    """Chronological walk-forward comparison of Model A (online logistic),
+    the bagged-logistic research ensemble, and Model B (tree forest) on the
+    *same* expanding-window folds — replaces the old 'only the GRU exists'
+    gap with a real, repeatable A/B/C evaluation, and its output (per-model
+    AUC edge) is what drives the live ensemble weighting in
+    ai_ensemble_confidence(), not a single hand-picked model.
+    """
+    X, Y = _ai_ml_sample_matrix()
+    p = ai_settings(); min_samples = int(p.get("research_min_samples", 120))
+    if len(X) < max(40, min_samples):
+        return {"status": "INSUFFICIENT_SAMPLES", "samples": len(X), "need": max(40, min_samples)}
+    n_folds = max(2, min(n_folds, len(X) // 20))
+    fold_bounds = np.linspace(int(len(X) * 0.4), len(X), n_folds + 1).astype(int)
+    per_model = {"logistic_A": [], "tree_B": []}
+    for i in range(n_folds):
+        tr_end = fold_bounds[i]; val_end = fold_bounds[i + 1]
+        Xtr, Ytr = X[:tr_end], Y[:tr_end]; Xv, Yv = X[tr_end:val_end], Y[tr_end:val_end]
+        if len(Xv) < 5 or len(set(Ytr.tolist())) < 2 or len(set(Yv.tolist())) < 2:
+            continue
+        # Model A: same online-logistic update rule as ai_ml_train(), fold-local.
+        w = np.zeros(len(ML_FEATURE_NAMES)); b = 0.0; lr = 0.08
+        for _ in range(120):
+            pred = _dl_sigmoid_vec(Xtr @ w + b); err = pred - Ytr
+            w -= lr * (Xtr.T @ err) / len(Xtr); b -= lr * float(np.mean(err))
+        pa = _dl_sigmoid_vec(Xv @ w + b)
+        per_model["logistic_A"].append(_dl_auc(Yv, pa))
+        # Model B: fresh forest on the same fold-local training window.
+        trees = _forest_train(Xtr, Ytr, max(10, TREE_N_ESTIMATORS // 2), seed=1000 + i)
+        pb = np.asarray([_forest_predict(trees, x) for x in Xv])
+        per_model["tree_B"].append(_dl_auc(Yv, pb))
+    summary = {k: (round(float(np.mean(v)), 4) if v else 0.0) for k, v in per_model.items()}
+    champion = max(summary, key=summary.get) if any(summary.values()) else None
+    result = {"folds": n_folds, "auc_by_model": summary, "champion": champion, "samples": len(X)}
+    c = ai_db()
+    c.execute("INSERT OR REPLACE INTO ai_model_compare(id,updated_at,folds,results,champion) VALUES(1,?,?,?,?)",
+              (datetime.now(IST).isoformat(), n_folds, json.dumps(result), champion or ""))
+    c.commit(); c.close()
+    ai_log("LEARNING", "MODEL_WALKFORWARD", f"folds={n_folds} auc={summary} champion={champion}")
+    return result
+
+def ai_model_compare_status():
+    c = ai_db(); r = c.execute("SELECT * FROM ai_model_compare WHERE id=1").fetchone(); c.close()
+    if not r: return {"status": "NOT_RUN"}
+    try:
+        results = json.loads(r["results"] or "{}")
+    except Exception:
+        results = {}
+    return {"status": "OK", "updated_at": r["updated_at"], "champion": r["champion"], **results}
+
+def ai_ensemble_confidence(features):
+    """EV-confidence ensemble: how likely THIS setup is to hit target before
+    stop, blending Model A (online logistic), the bagged-logistic research
+    ensemble, and Model B (tree forest) — weighted by each model's own
+    validation AUC edge over a coin flip, so a model with no demonstrated
+    skill yet cannot drag down one that does. Falls back to a neutral 0.5
+    (and 'weights_used': False) until at least one model has been trained,
+    at which point the caller degrades to the GRU-only behaviour that
+    existed before Stage 2."""
+    ml_prob, ml_model = ai_ml_predict(features)
+    research = ai_research_predict(features)
+    tree_prob, tree_model = ai_tree_predict(features)
+    entries = [
+        ("ml_A", ml_prob, float(ml_model.get("auc") or 0), int(ml_model.get("samples") or 0)),
+        ("research_A2", research.get("probability", 0.5), float(research.get("auc") or 0), int(research.get("samples") or 0)),
+        ("tree_B", tree_prob, float(tree_model.get("auc") or 0), int(tree_model.get("samples") or 0)),
+    ]
+    trained = [(name, p, auc) for name, p, auc, n in entries if n > 0]
+    detail = {name: {"probability": round(float(p), 4), "auc": round(float(auc), 4)} for name, p, auc in trained}
+    if not trained:
+        return 0.5, {"models": detail, "weights_used": False}
+    weights = [max(0.0, auc - 0.5) for _, _, auc in trained]
+    wsum = sum(weights)
+    if wsum <= 1e-9:
+        conf = float(np.mean([p for _, p, _ in trained]))
+    else:
+        conf = float(sum(p * w for (_, p, _), w in zip(trained, weights)) / wsum)
+    return conf, {"models": detail, "weights_used": wsum > 1e-9}
+
+def ai_adaptive_min_score(ml_samples, dl_samples):
+    """STAGE 3: this no longer gates any decision. It returns a single
+    "reference confidence" number, ramping from `bootstrap_min_score` to the
+    mature `min_score` as ml/dl sample counts approach their configured
+    minimums, purely so the dashboard can show how much of the way the live
+    models are toward being fully warmed up. ai_directional_snapshot() does
+    not compare the setup's score against this value — direction, entry,
+    and paper-trade initiation are decided entirely by the live GRU/ML/
+    ensemble read of spot and futures, with no score floor in the way."""
+    p = ai_settings()
+    boot = float(p.get("bootstrap_min_score", 55.0))
+    mature = float(p.get("min_score", 72.0))
+    ml_need = max(1.0, float(p.get("ml_min_samples", 40)))
+    dl_need = max(1.0, float(p.get("dl_min_samples", 80)))
+    progress = (min(1.0, ml_samples / ml_need) + min(1.0, dl_samples / dl_need)) / 2.0
+    return round(boot + (mature - boot) * progress, 2)
 
 def ai_market_pattern_features(symbol, spot, iv, pcr, volume, trend_score, momentum_score):
     hist=ai_market_history(symbol,120)
@@ -8041,8 +8381,14 @@ def ai_close_trades():
                 entry_spot=float(setup.get("spot") or 0.0)
                 direction_label=1 if (spot is not None and entry_spot > 0 and float(spot) > entry_spot) else 0
                 ai_ml_record_sample(t["id"],t["version"],t["symbol"],setup.get("ml_features") or {},direction_label,rm,horizon)
-                dl_seq=setup.get("dl_sequence") or ai_dl_sequence(t["symbol"], setup.get("ml_features") or {})
-                ai_dl_record_sample(t["id"],t["version"],t["symbol"],dl_seq,direction_label,rm,horizon)
+                _fallback_seq,_fallback_err = (None, None)
+                if not setup.get("dl_sequence"):
+                    _fallback_seq,_fallback_err = build_live_index_sequence(t["symbol"])
+                dl_seq = setup.get("dl_sequence") or (_fallback_seq["sequence"] if _fallback_seq else None)
+                if dl_seq is None:
+                    ai_log("ERROR","DL_SAMPLE_SKIPPED",f'id={t["id"]} no dl_sequence available ({_fallback_err})')
+                else:
+                    ai_dl_record_sample(t["id"],t["version"],t["symbol"],dl_seq,direction_label,rm,horizon)
                 ai_log("TRADE","AUTO_PAPER_CLOSE",f'id={t["id"]} {hit[0]} pnl={pnl:.2f} R={rm:.2f}; index_direction_label={direction_label}; learning sample recorded')
         except Exception as e:ai_log("ERROR","AI_MONITOR",str(e))
 
@@ -8119,13 +8465,16 @@ def ai_scan_batch():
     return batch, len(universe), new_cursor
 
 def ai_learning_state():
-    """Return the autonomous learning stage and the effective paper-trading gate.
+    """Return the autonomous learning stage and a readout-only confidence score.
 
-    Bootstrap is intentionally data-generating: before ML and Deep Sequence have
-    enough completed paper trades, the old 72/100 gate must not prevent the
-    engine from creating the very samples those models need. The effective gate
-    ramps from bootstrap_min_score (55) to the mature min_score (72) according
-    to the weaker of the two model sample-progress ratios.
+    STAGE 3: there is no gate here anymore — the directional engine always
+    trades qualifying setups regardless of model maturity, so it keeps
+    generating real paper-trade evidence from day one. `effective_score`
+    below is kept purely as a dashboard readout: it ramps from
+    bootstrap_min_score (55) to the mature min_score (72) according to the
+    weaker of the two model sample-progress ratios, as a rough gauge of how
+    "warmed up" the live models are — it is never compared against a trade's
+    score to allow or block it.
     """
     p = ai_params()
     ml = ai_ml_model()
@@ -8213,6 +8562,8 @@ def ai_cycle():
 
     ai_learn()
     ai_research_train()
+    ai_tree_train()
+    ai_model_walkforward()
     ai_evaluate_challenger()
 
 # ---------------------------------------------------------------------------
@@ -8238,7 +8589,7 @@ def ai_capture_option_chain_symbol(symbol):
         c=ai_db();added=0
         for o in data.get("chain",[]):
             try:
-                c.execute("INSERT OR IGNORE INTO ai_option_snapshots(ts,symbol,expiry,strike,option_type,tradingsymbol,token,spot,ltp,bid,ask,mid,spread_pct,volume,oi,iv,delta,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(ts,symbol,str(data["expiry"]),float(o["strike"]),str(o["instrument_type"]),o.get("tradingsymbol"),int(o.get("instrument_token") or o.get("token") or 0),float(data["spot"]),o.get("ltp"),o.get("bid"),o.get("ask"),o.get("mid"),o.get("spread_pct"),o.get("volume") or 0,o.get("oi") or 0,o.get("iv"),o.get("delta"),"KITE_LIVE_QUOTE"));added+=c.rowcount
+                cur=c.execute("INSERT OR IGNORE INTO ai_option_snapshots(ts,symbol,expiry,strike,option_type,tradingsymbol,token,spot,ltp,bid,ask,mid,spread_pct,volume,oi,iv,delta,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(ts,symbol,str(data["expiry"]),float(o["strike"]),str(o["instrument_type"]),o.get("tradingsymbol"),int(o.get("instrument_token") or o.get("token") or 0),float(data["spot"]),o.get("ltp"),o.get("bid"),o.get("ask"),o.get("mid"),o.get("spread_pct"),o.get("volume") or 0,o.get("oi") or 0,o.get("iv"),o.get("delta"),"KITE_LIVE_QUOTE"));added+=cur.rowcount
             except Exception as e:
                 ai_log("ERROR","OPTION_CAPTURE_ROW",f"{symbol}: {e}")
         c.commit();c.close()
@@ -8354,6 +8705,67 @@ def _hist_feature_row(rows, i, arrays=None):
         "time_sin":sinv,"time_cos":cosv,
     }
 
+# Public name: this is now THE single shared feature engine (Section 5 of the
+# spec). Historical training, live prediction, and paper-trade learning must
+# all call this same function against the same ai_hist_candles-shaped rows so
+# there is exactly one definition of every feature, in one place.
+compute_index_features = _hist_feature_row
+
+def _get_recent_index_bars(symbol, n):
+    """Read the most recent n bars for `symbol` from ai_hist_candles — the exact
+    same table/columns used for historical training — so live prediction reads
+    from the identical data source as training, not a separately-maintained
+    snapshot cache."""
+    c = ai_db()
+    rows = c.execute(
+        "SELECT ts,close,high,low,volume FROM ai_hist_candles WHERE symbol=? AND interval=? ORDER BY ts DESC LIMIT ?",
+        (symbol, AI_HIST_INTERVAL, int(n))).fetchall()
+    c.close()
+    return list(reversed(rows))
+
+def build_live_index_sequence(symbol):
+    """Stage 1 fix: build the live GRU input sequence from the same table and
+    the same compute_index_features() function used for historical training.
+    This replaces the old ai_dl_sequence()/ai_market_pattern_features() path,
+    which computed the 'same' feature names with different formulas — the
+    train/live mismatch flagged in the audit."""
+    need = DL_SEQUENCE_LEN + 5
+    rows = _get_recent_index_bars(symbol, need)
+    if len(rows) < DL_SEQUENCE_LEN:
+        return None, f"insufficient recent {AI_HIST_INTERVAL} bars for {symbol}: have {len(rows)}, need {DL_SEQUENCE_LEN}"
+    age_min = None
+    try:
+        last_ts = _ai_ts_naive(rows[-1]["ts"])
+        age_min = (now_ist().replace(tzinfo=None) - last_ts).total_seconds() / 60.0
+    except Exception:
+        pass
+    # Data-quality gate (Section 24): a stale index feed must produce WAIT, not
+    # a prediction built on old bars.
+    if ai_market_open() and age_min is not None and age_min > AI_LIVE_MAX_BAR_AGE_MIN:
+        return None, f"stale index data for {symbol}: last bar is {age_min:.1f} min old (max {AI_LIVE_MAX_BAR_AGE_MIN:.0f})"
+    arrays = {
+        "close": np.asarray([float(r["close"]) for r in rows], dtype=float),
+        "high": np.asarray([float(r["high"]) for r in rows], dtype=float),
+        "low": np.asarray([float(r["low"]) for r in rows], dtype=float),
+        "volume": np.asarray([float(r["volume"] or 0) for r in rows], dtype=float),
+    }
+    n = len(rows)
+    seq = []
+    latest_features = {}
+    for i in range(n - DL_SEQUENCE_LEN, n):
+        f = compute_index_features(rows, i, arrays)
+        if not f:
+            return None, f"feature build failed for {symbol} at bar index {i}"
+        seq.append([_norm_feature(name, f.get(name, 0)) for name in SEQUENCE_FEATURE_NAMES])
+        latest_features = f
+    return {
+        "sequence": seq,
+        "features": latest_features,
+        "last_bar_ts": str(rows[-1]["ts"]),
+        "bar_age_min": age_min,
+        "feature_engine_version": FEATURE_ENGINE_VERSION,
+    }, None
+
 def _hist_training_sequences(symbol):
     c=ai_db()
     # Fetch only the fields required by the historical feature builder.  The old
@@ -8390,7 +8802,7 @@ def _hist_training_sequences(symbol):
             if j not in feature_rows:feature_rows[j]=_hist_feature_row(rows,j,arrays)
             f=feature_rows[j]
             if not f:ok=False;break
-            fseq.append([_norm_feature(n,f.get(n,0)) for n in ML_FEATURE_NAMES])
+            fseq.append([_norm_feature(n,f.get(n,0)) for n in SEQUENCE_FEATURE_NAMES])
         if not ok:continue
         cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
         if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):continue
@@ -8437,7 +8849,15 @@ def ai_hist_train_deep(force=False):
         if len(set(ally))<2:
             detail=f"only one target class in historical labels; samples={len(ally)}";_hist_set_model_status("READY — TARGET CLASS INSUFFICIENT",detail);return ai_hist_status()
         X=np.asarray(allx,dtype=float);Y=np.asarray(ally,dtype=float)
-        if len(X)>AI_HIST_TRAIN_MAX_SAMPLES:X=X[-AI_HIST_TRAIN_MAX_SAMPLES:];Y=Y[-AI_HIST_TRAIN_MAX_SAMPLES:]
+        if len(X)>AI_HIST_TRAIN_MAX_SAMPLES:
+            # STAGE 1 FIX: previously `X[-AI_HIST_TRAIN_MAX_SAMPLES:]` kept only the
+            # most recent slice after chronological sort, silently discarding most
+            # of the 12-year archive on every retrain. A uniform stride preserves
+            # full-span coverage (early, middle, and recent years all represented)
+            # while still respecting the same memory-bounded sample budget.
+            keep_idx=np.linspace(0,len(X)-1,AI_HIST_TRAIN_MAX_SAMPLES).round().astype(int)
+            keep_idx=np.unique(keep_idx)
+            X=X[keep_idx];Y=Y[keep_idx]
         _hist_set_model_status("TRAINING GRU SEQUENCE MODEL",f"GRU hidden={DL_GRU_HIDDEN} sequence_len={DL_SEQUENCE_LEN} samples={len(X)} epochs={AI_HIST_TRAIN_EPOCHS}")
         trained=_ai_dl_train_arrays(X,Y,"HISTORICAL_PRETRAINED",seed=20260825,epochs_override=AI_HIST_TRAIN_EPOCHS)
         if not trained:
@@ -8445,7 +8865,7 @@ def ai_hist_train_deep(force=False):
         params,acc,auc,samples,train_samples,val_samples=trained
         _ai_dl_persist(params,acc,auc,samples,train_samples,val_samples,status="HISTORICAL_PRETRAINED")
         now=datetime.now(IST).isoformat();c=ai_db();hist_status="PRETRAINED" if val_samples and len(set(Y[-val_samples:].astype(int).tolist()))>=2 else "PRETRAINED — AUC UNAVAILABLE"
-        c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS))
+        c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days,feature_version) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS,FEATURE_ENGINE_VERSION))
         c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_train_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("PRETRAINED — LIVE GRU LEARNING CONTINUES",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_collector_status',?)",("HISTORY COLLECTION COMPLETE",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_train_detail',?)",(f"architecture=GRU-{DL_GRU_HIDDEN} sequence={DL_SEQUENCE_LEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",));c.commit();c.close()
         ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}");return ai_hist_status()
     except Exception as e:
@@ -8461,11 +8881,17 @@ def _hist_insert_candles(symbol, candles):
     c=ai_db()
     for x in candles:
         try:
-            c.execute("INSERT OR IGNORE INTO ai_hist_candles(ts,symbol,interval,open,high,low,close,volume,oi) VALUES(?,?,?,?,?,?,?,?,?)",
+            cur=c.execute("INSERT OR IGNORE INTO ai_hist_candles(ts,symbol,interval,open,high,low,close,volume,oi) VALUES(?,?,?,?,?,?,?,?,?)",
                       (str(x["date"]),symbol,AI_HIST_INTERVAL,float(x["open"]),float(x["high"]),float(x["low"]),float(x["close"]),float(x.get("volume") or 0),float(x.get("oi") or 0)))
-            added += c.rowcount
-        except Exception:
-            pass
+            # STAGE 1 FIX: sqlite3.Connection has no .rowcount attribute (only the
+            # cursor returned by execute() does). The old `c.rowcount` line raised
+            # AttributeError on every row, silently caught below, so rows_added
+            # has always reported 0 here regardless of how much data actually
+            # landed -- exactly the false-zero display the spec prohibits (Sec 29),
+            # just one layer down in the ingestion telemetry rather than the UI.
+            added += cur.rowcount
+        except Exception as e:
+            ai_log("ERROR","HIST_CANDLE_INSERT",f"{symbol}: {type(e).__name__}: {e}")
     c.commit(); c.close()
     return added
 
@@ -8634,6 +9060,11 @@ def ai_directional_latest():
             "ml_probability": float(setup.get("ml_probability")) if setup.get("ml_probability") is not None else None,
             "dl_samples": int(setup.get("dl_samples", 0) or 0),
             "ml_samples": int(setup.get("ml_samples", 0) or 0),
+            "ensemble_confidence": setup.get("ensemble_confidence"),
+            "adaptive_min_score": setup.get("adaptive_min_score"),
+            "stop_pct_used": setup.get("stop_pct_used"),
+            "target_pct_used": setup.get("target_pct_used"),
+            "alt_candidates": setup.get("alt_candidates"),
             "spot": setup.get("spot"),
             "paper_only": True
         }
@@ -8673,9 +9104,17 @@ def ai_directional_status():
         "logic": "INDEX_DIRECTION -> BUY CE/PE",
         "up_probability": AI_DIRECTIONAL_UP_PROB,
         "down_probability": AI_DIRECTIONAL_DOWN_PROB,
-        "min_score": AI_DIRECTIONAL_MIN_SCORE,
+        # STAGE 3: no gate. Both fields below are informational-only —
+        # a confidence readout for the dashboard, not a threshold applied to
+        # any trade decision. See ai_adaptive_min_score / ai_directional_snapshot.
+        "min_score_floor": AI_DIRECTIONAL_MIN_SCORE,
+        "adaptive_min_score": ai_adaptive_min_score(int(ml.get("samples") or 0), int(dl.get("samples") or 0)),
+        "gate_removed": True,
         "historical_gru": dl,
-        "live_ml": ml,
+        "live_ml_model_a": ml,
+        "tree_model_b": ai_tree_model(),
+        "research_ensemble": {k: v for k, v in ai_research_predict({}).items() if k != "models"},
+        "model_comparison": ai_model_compare_status(),
         "historical_ml": {
             "samples": 0, "accuracy": None, "auc": None,
             "status": "NOT SEPARATELY PRETRAINED",
@@ -8711,7 +9150,7 @@ def ai_status():
     universe=ai_universe()
     c=ai_db(); rt={r['key']:r['value'] for r in c.execute('SELECT key,value FROM ai_runtime').fetchall()}; c.close(); ml=ai_ml_model()
     learning=ai_learning_state()
-    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now(IST).isoformat(),'last_cycle_at':rt.get('last_cycle_at'),'last_activity_at':rt.get('last_activity_at'),'last_scan_at':rt.get('last_scan_at'),'ml':ml,'deep_learning':ai_dl_model(),'research':ai_research_predict({}),'learning':learning,'historical':ai_hist_status()})
+    return jsonify({'enabled':bool(ai_settings().get('enabled',1)),'mode':'AUTONOMOUS PAPER','connected':bool(SESSION.get('access_token')),'market_open':ai_market_open(),'poll_seconds':AI_POLL_SECONDS,'champion':ch['version'] if ch else None,'params':p,'open_trades':len(ai_open_trades()),'metrics':m,'universe_mode':AI_UNIVERSE_MODE,'universe_size':len(universe),'universe_preview':universe[:20],'timestamp':datetime.now(IST).isoformat(),'last_cycle_at':rt.get('last_cycle_at'),'last_activity_at':rt.get('last_activity_at'),'last_scan_at':rt.get('last_scan_at'),'ml':ml,'deep_learning':ai_dl_model(),'research':ai_research_predict({}),'tree_model_b':ai_tree_model(),'model_comparison':ai_model_compare_status(),'learning':learning,'historical':ai_hist_status()})
 
 @app.route('/api/ai-evolution/trades')
 def ai_trades_api():
