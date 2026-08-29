@@ -7263,6 +7263,7 @@ def ai_init_db():
     CREATE TABLE IF NOT EXISTS ai_hist_candles(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,interval TEXT,open REAL,high REAL,low REAL,close REAL,volume REAL,oi REAL,UNIQUE(symbol,interval,ts));
     CREATE TABLE IF NOT EXISTS ai_hist_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,interval TEXT,rows_added INTEGER,status TEXT,detail TEXT);
     CREATE TABLE IF NOT EXISTS ai_hist_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,symbols TEXT,interval TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,status TEXT,lookback_days INTEGER);
+    CREATE TABLE IF NOT EXISTS ai_hist_ml_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,weights TEXT,bias REAL,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,status TEXT,feature_version TEXT);
     CREATE TABLE IF NOT EXISTS ai_option_snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,expiry TEXT,strike REAL,option_type TEXT,tradingsymbol TEXT,token INTEGER,spot REAL,ltp REAL,bid REAL,ask REAL,mid REAL,spread_pct REAL,volume REAL,oi REAL,iv REAL,delta REAL,source TEXT,UNIQUE(ts,symbol,expiry,strike,option_type));
     CREATE INDEX IF NOT EXISTS idx_ai_option_snapshots_symbol_ts ON ai_option_snapshots(symbol,ts);
     CREATE INDEX IF NOT EXISTS idx_ai_option_snapshots_contract_ts ON ai_option_snapshots(tradingsymbol,ts);
@@ -7434,23 +7435,34 @@ def ai_directional_snapshot(symbol, params=None):
         return None, {"error": f"index data not ready: {seq_err}", "decision": "WAIT"}
     seq = live_seq["sequence"]
     dl_prob, dl_model = ai_dl_predict_sequence(seq)
+    hist_ml_prob, hist_ml_model = ai_hist_ml_predict(features)
     ml_prob, ml_model = ai_ml_predict(features)
 
-    # Historical GRU target: 1 = future index close above current close.
-    if dl_prob >= AI_DIRECTIONAL_UP_PROB:
+    # Direction is a historical-index task. GRU and historical ML both predict
+    # the same target (future index close > current close). The paper-outcome ML
+    # remains separate and is used only downstream for option target/stop EV.
+    if int(hist_ml_model.get("samples",0)) > 0:
+        directional_prob = 0.60*float(dl_prob) + 0.40*float(hist_ml_prob)
+    else:
+        directional_prob = float(dl_prob)
+
+    if directional_prob >= AI_DIRECTIONAL_UP_PROB:
         direction = "UP"
         option_type = "CE"
-        confidence = dl_prob
-    elif dl_prob <= AI_DIRECTIONAL_DOWN_PROB:
+        confidence = directional_prob
+    elif directional_prob <= AI_DIRECTIONAL_DOWN_PROB:
         direction = "DOWN"
         option_type = "PE"
-        confidence = 1.0 - dl_prob
+        confidence = 1.0 - directional_prob
     else:
         return None, {
-            "error": f"GRU direction uncertain: p_up={dl_prob:.3f}",
+            "error": f"Directional consensus uncertain: p_up={directional_prob:.3f} GRU={dl_prob:.3f} HIST_ML={hist_ml_prob:.3f}",
             "decision": "WAIT",
-            "p_up": round(dl_prob, 4),
+            "p_up": round(directional_prob, 4),
+            "dl_probability": round(float(dl_prob),4),
+            "hist_ml_probability": round(float(hist_ml_prob),4),
             "dl_samples": int(dl_model.get("samples", 0)),
+            "hist_ml_samples": int(hist_ml_model.get("samples", 0)),
         }
 
     # Confidence is the primary learned signal.  Momentum/trend are supporting
@@ -7580,6 +7592,7 @@ def ai_directional_snapshot(symbol, params=None):
         "option_ltp": ltp,
         "option_bid": bid,
         "option_ask": ask,
+        "option_delta": target.get("delta"),
         "option_volume": volume_opt,
         "option_oi": int(target.get("oi") or 0),
         "spread_pct": spread_pct,
@@ -7670,7 +7683,106 @@ def _norm_feature(name, value):
 
 def ai_ml_features(snapshot):
     f=snapshot.get("ml_features") or {}
-    return [round(_norm_feature(n,f.get(n,0)),6) for n in ML_FEATURE_NAMES]
+    # Directional ML is trained on index candles; historical candles have no
+    # option-chain PCR/IV. Keep those two slots neutral here as well. PCR/IV
+    # still participate downstream in option selection and EV/risk scoring.
+    vals=[]
+    for n in ML_FEATURE_NAMES:
+        v=f.get(n,0)
+        if n=="pcr_norm": v=1.0
+        elif n=="iv_norm": v=0.0
+        vals.append(round(_norm_feature(n,v),6))
+    return vals
+
+def ai_hist_ml_model():
+    """Historical directional ML model trained only from the index archive.
+
+    Target: future index close > current close after AI_HIST_HORIZON_BARS.
+    This model is deliberately separate from the paper-outcome ML model so
+    target semantics never get mixed.  It is the historical ML companion to
+    the historical GRU and is used for live directional consensus.
+    """
+    c=ai_db(); r=c.execute("SELECT * FROM ai_hist_ml_model WHERE id=1").fetchone(); c.close()
+    if not r:
+        return {"status":"NOT_TRAINED","samples":0,"train_samples":0,"validation_samples":0,"accuracy":0.0,"auc":0.0,"weights":[0.0]*len(ML_FEATURE_NAMES),"bias":0.0,"updated_at":None,"feature_version":FEATURE_ENGINE_VERSION}
+    try: w=json.loads(r["weights"] or "[]")
+    except Exception: w=[]
+    if len(w)!=len(ML_FEATURE_NAMES):
+        return {"status":"RETRAIN_REQUIRED","samples":int(r["samples"] or 0),"train_samples":int(r["train_samples"] or 0),"validation_samples":int(r["validation_samples"] or 0),"accuracy":float(r["accuracy"] or 0),"auc":float(r["auc"] or 0),"weights":[0.0]*len(ML_FEATURE_NAMES),"bias":0.0,"updated_at":r["updated_at"],"feature_version":r["feature_version"] if "feature_version" in r.keys() else None}
+    return {"status":r["status"] or "READY","samples":int(r["samples"] or 0),"train_samples":int(r["train_samples"] or 0),"validation_samples":int(r["validation_samples"] or 0),"accuracy":float(r["accuracy"] or 0),"auc":float(r["auc"] or 0),"weights":w,"bias":float(r["bias"] or 0),"updated_at":r["updated_at"],"feature_version":r["feature_version"] if "feature_version" in r.keys() else None}
+
+def ai_hist_ml_predict(features):
+    m=ai_hist_ml_model()
+    x=np.asarray(ai_ml_features(features),dtype=float)
+    if m.get("status") in ("NOT_TRAINED","RETRAIN_REQUIRED") or int(m.get("samples",0))<=0:
+        return 0.5,m
+    p=_sigmoid(float(m.get("bias",0))+float(np.dot(np.asarray(m.get("weights",[]),dtype=float),x)))
+    return float(p),m
+
+def _hist_ml_training_matrix(symbol):
+    c=ai_db(); rows=c.execute("SELECT ts,close,high,low,volume FROM ai_hist_candles WHERE symbol=? AND interval=? ORDER BY ts",(symbol,AI_HIST_INTERVAL)).fetchall(); c.close()
+    need=AI_HIST_HORIZON_BARS+25
+    if len(rows)<need:return [],[] ,[]
+    arrays={"close":np.asarray([float(r[1]) for r in rows],dtype=float),"high":np.asarray([float(r[2]) for r in rows],dtype=float),"low":np.asarray([float(r[3]) for r in rows],dtype=float),"volume":np.asarray([float(r[4] or 0) for r in rows],dtype=float)}
+    usable=len(rows)-AI_HIST_HORIZON_BARS
+    max_points=AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL
+    step=max(1,usable//max_points)
+    candidates=list(range(20,usable,step))
+    if candidates and candidates[-1] != usable-1:candidates.append(usable-1)
+    X=[];Y=[];T=[]
+    for i in candidates:
+        f=_hist_feature_row(rows,i,arrays)
+        if not f:continue
+        cur=float(rows[i][1]); fut=float(rows[i+AI_HIST_HORIZON_BARS][1])
+        if cur<=0 or fut<=0 or not np.isfinite(cur) or not np.isfinite(fut):continue
+        # Historical ML has no option-chain information. Keep PCR/IV at the same
+        # neutral values that live ML uses after the distribution-unification fix.
+        x=[_norm_feature(n,f.get(n,0)) for n in ML_FEATURE_NAMES]
+        X.append(x);Y.append(1 if fut>cur else 0);T.append(str(rows[i][0]))
+    return X,Y,T
+
+def _hist_ml_train_arrays(Xtr,Ytr,Xv,Yv,epochs=180,lr=0.05):
+    Xtr=np.asarray(Xtr,dtype=float);Ytr=np.asarray(Ytr,dtype=float);Xv=np.asarray(Xv,dtype=float);Yv=np.asarray(Yv,dtype=float)
+    if len(Xtr)<2 or len(set(Ytr.astype(int).tolist()))<2 or len(Xv)<2 or len(set(Yv.astype(int).tolist()))<2:return None
+    w=np.zeros(Xtr.shape[1],dtype=float);b=0.0
+    for _ in range(max(20,int(epochs))):
+        pr=_dl_sigmoid_vec(Xtr@w+b);err=pr-Ytr
+        w-=lr*(Xtr.T@err)/len(Xtr);b-=lr*float(np.mean(err))
+    pv=_dl_sigmoid_vec(Xv@w+b)
+    acc=float(np.mean((pv>=0.5)==(Yv>=0.5))*100);auc=float(_dl_auc(Yv.astype(int),pv))
+    return w,b,acc,auc
+
+def ai_hist_ml_train(force=False):
+    """Train directional ML from the complete available historical archive.
+    Each symbol contributes a chronological 80/20 split; validation is never
+    used for fitting.  The resulting model is the historical ML brain used by
+    the live directional ensemble."""
+    c=ai_db(); r=c.execute("SELECT value FROM ai_runtime WHERE key='hist_ml_training_started_at'").fetchone(); c.close()
+    try:
+        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_training_started_at',?)",(datetime.now(IST).isoformat(),));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("BUILDING HISTORICAL ML DATASET",));c.commit();c.close()
+        pooled_tr=[];pooled_ty=[];pooled_v=[];pooled_vy=[];per_symbol={};total=0
+        for sym in AI_HIST_SYMBOLS:
+            X,Y,T=_hist_ml_training_matrix(sym); per_symbol[sym]=len(X); total+=len(X)
+            if len(X)<20 or len(set(Y))<2:
+                continue
+            # Per-symbol chronological split prevents a large symbol from making
+            # the validation set effectively a single-symbol afterthought.
+            cut=max(10,int(len(X)*0.8));cut=min(cut,len(X)-1)
+            if len(set(Y[:cut]))<2 or len(set(Y[cut:]))<2: continue
+            pooled_tr.extend(X[:cut]);pooled_ty.extend(Y[:cut]);pooled_v.extend(X[cut:]);pooled_vy.extend(Y[cut:])
+        if len(pooled_tr)<AI_HIST_MIN_TRAIN or len(set(pooled_ty))<2 or len(set(pooled_vy))<2:
+            detail=f"samples={total} train={len(pooled_tr)} validation={len(pooled_v)} need={AI_HIST_MIN_TRAIN} per_symbol={per_symbol}"
+            c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("READY — NEED MORE HISTORICAL DATA",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_detail',?)",(detail,));c.commit();c.close();return ai_hist_ml_model()
+        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("TRAINING HISTORICAL ML",));c.commit();c.close()
+        trained=_hist_ml_train_arrays(pooled_tr,pooled_ty,pooled_v,pooled_vy,epochs=int(ai_params().get("historical_ml_epochs",180)),lr=float(ai_params().get("historical_ml_learning_rate",0.05)))
+        if not trained: raise RuntimeError("historical ML training could not form two-class chronological folds")
+        w,b,acc,auc=trained;updated=datetime.now(IST).isoformat()
+        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_hist_ml_model(id,updated_at,weights,bias,samples,train_samples,validation_samples,accuracy,auc,status,feature_version) VALUES(1,?,?,?,?,?,?,?,?,?,?)",(updated,json.dumps(w.tolist()),float(b),total,len(pooled_tr),len(pooled_v),acc,auc,"HISTORICAL_PRETRAINED",FEATURE_ENGINE_VERSION));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("HISTORICAL ML PRETRAINED — PAPER LEARNING CAN CONTINUE",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_detail',?)",(f"samples={total} train={len(pooled_tr)} validation={len(pooled_v)} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_last_train_at',?)",(updated,));c.commit();c.close()
+        ai_log("LEARNING","HISTORICAL_ML_PRETRAIN",f"samples={total} train={len(pooled_tr)} validation={len(pooled_v)} accuracy={acc:.1f}% auc={auc:.3f}")
+        return ai_hist_ml_model()
+    except Exception as e:
+        ai_log("ERROR","HISTORICAL_ML_TRAIN",f"{type(e).__name__}: {e}")
+        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("TRAINING ERROR — RETRYING",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_detail',?)",(str(e),));c.commit();c.close();return ai_hist_ml_model()
 
 def ai_ml_model():
     c=ai_db(); r=c.execute("SELECT * FROM ai_ml_model WHERE id=1").fetchone(); c.close()
@@ -8613,6 +8725,11 @@ def ai_auto_today_pnl():
     today=now_ist().date().isoformat(); c=ai_db(); r=c.execute("SELECT COALESCE(SUM(pnl),0) p FROM ai_auto_trades WHERE status='CLOSED' AND substr(exit_ts,1,10)=?",(today,)).fetchone(); c.close(); return float(r['p'] or 0)
 
 def ai_auto_option_snapshot(symbol):
+    # The autonomous engine is not allowed to start paper entries until both
+    # historical directional brains have been trained from the archive.
+    hs=ai_hist_status(); hm=ai_hist_ml_model(); hgm=hs.get("model") or {}
+    if not int(hgm.get("samples",0) or 0) or not int(hm.get("samples",0) or 0):
+        return None, "WAIT: historical GRU + ML pre-training not complete"
     x,err=ai_directional_snapshot(symbol, ai_params())
     if err or not x: return None, (err or "WAIT")
     conf=float(x.get('direction_confidence') or x.get('dl_probability') or 0.5)
@@ -8740,10 +8857,30 @@ def ai_auto_loop():
         except Exception as e: ai_log('ERROR','AUTO_BUY_SELL_LOOP',str(e))
         time.sleep(max(5,int(ai_auto_settings().get('poll_seconds',20))))
 
+def ai_historical_training_status():
+    hs=ai_hist_status(); hm=ai_hist_ml_model()
+    c=ai_db(); rows=c.execute("SELECT key,value FROM ai_runtime WHERE key IN ('hist_ml_status','hist_ml_detail','hist_ml_last_train_at')").fetchall(); c.close(); rt={r['key']:r['value'] for r in rows}
+    model=hs.get("model") or {}
+    return {
+        "archive": {"candles":int(hs.get("candles",0) or 0),"oldest":hs.get("oldest"),"newest":hs.get("newest"),"status":hs.get("status")},
+        "gru": {"status":hs.get("model_status") or model.get("status") or "NOT_TRAINED","samples":int(model.get("samples",0) or 0),"train_samples":int(model.get("train_samples",0) or 0),"validation_samples":int(model.get("validation_samples",0) or 0),"accuracy":model.get("accuracy"),"auc":model.get("auc"),"last_train_at":hs.get("last_train_at")},
+        "historical_ml": hm,
+        "ml_runtime": rt,
+    }
+
 @app.route('/api/ai-auto/status')
 def ai_auto_status():
     ai_auto_init_db(); p=ai_auto_settings(); m=ai_auto_metrics(); edge=ai_auto_validation_edge()
-    return jsonify({"settings":p,"execution_mode":p['execution_mode'],"paper":p['execution_mode']=='paper',"live":p['execution_mode']=='live',"live_allowed":ai_auto_live_allowed(),"edge":edge,"open_trades":ai_auto_open_trades(),"metrics":m,"daily_pnl":ai_auto_today_pnl(),"market_open":ai_market_open()})
+    return jsonify({"settings":p,"execution_mode":p['execution_mode'],"paper":p['execution_mode']=='paper',"live":p['execution_mode']=='live',"live_allowed":ai_auto_live_allowed(),"edge":edge,"open_trades":ai_auto_open_trades(),"metrics":m,"daily_pnl":ai_auto_today_pnl(),"market_open":ai_market_open(),"historical_training":ai_historical_training_status()})
+
+@app.route('/api/ai-evolution/train-historical',methods=['POST'])
+def ai_train_historical_api():
+    """Start full historical GRU + ML directional training in the background."""
+    ai_init_db(); hs=ai_hist_status(); total=int(hs.get("candles",0) or 0)
+    if total<AI_HIST_MIN_TRAIN:
+        return jsonify({"ok":False,"error":f"Historical archive has {total} candles; at least {AI_HIST_MIN_TRAIN} are required before training.","historical_training":ai_historical_training_status()}),400
+    threading.Thread(target=lambda: ai_train_historical_all(force=True),daemon=True,name="hist-model-train").start()
+    return jsonify({"ok":True,"status":"HISTORICAL TRAINING STARTED","historical_training":ai_historical_training_status()})
 
 @app.route('/api/ai-auto/config',methods=['POST'])
 def ai_auto_config():
@@ -8776,12 +8913,40 @@ def ai_auto_trades_api():
 @app.route('/api/ai-auto/decision')
 def ai_auto_decision_api():
     ai_auto_init_db(); out=[]
+    market_open = ai_market_open()
+    if not market_open:
+        # Never expose stale model/option values as if they were live.
+        for sym in AI_SYMBOLS:
+            out.append({"symbol":sym,"decision":"MARKET_CLOSED","direction":"WAIT","option_symbol":None,
+                        "confidence":None,"expected_value_r":None,"expected_move":None,"reason":"MARKET CLOSED · LIVE KITE DATA NOT AVAILABLE",
+                        "live":False})
+        return jsonify({"market_open":False,"live":False,"timestamp":datetime.now(IST).isoformat(),"decisions":out,"edge":ai_auto_validation_edge()})
     for sym in AI_SYMBOLS:
         try:
             x,err=ai_auto_option_snapshot(sym); p=ai_auto_settings(); ok,why=ai_auto_should_enter(x,p) if x else (False,err)
-            out.append({"symbol":sym,"decision":"BUY" if ok else "WAIT","direction":x.get('direction') if x else 'WAIT',"option_symbol":x.get('option_symbol') if x else None,"confidence":x.get('confidence') if x else None,"expected_value_r":x.get('expected_value_r') if x else None,"expected_move":x.get('expected_move') if x else None,"reason":why})
-        except Exception as e: out.append({"symbol":sym,"decision":"WAIT","reason":str(e)})
-    return jsonify({"decisions":out,"edge":ai_auto_validation_edge()})
+            if x:
+                trend=float(x.get('trend') or 12.5); momentum=float(x.get('momentum') or 12.5)
+                if trend >= 15 and momentum >= 15: regime='TRENDING UP'
+                elif trend <= 10 and momentum <= 10: regime='TRENDING DOWN'
+                elif abs(trend-12.5)<2 and abs(momentum-12.5)<2: regime='NEUTRAL / RANGE'
+                else: regime='MIXED'
+                out.append({"symbol":sym,"decision":"BUY" if ok else "WAIT","direction":x.get('direction') or 'WAIT',
+                    "option_symbol":x.get('option_symbol'),"confidence":x.get('confidence'),"expected_value_r":x.get('expected_value_r'),
+                    "expected_move":x.get('expected_move'),"expected_move_pct":x.get('expected_move_pct'),"reason":why,"live":True,
+                    "spot":x.get('spot'),"option_ltp":x.get('option_ltp'),"option_bid":x.get('option_bid'),"option_ask":x.get('option_ask'),
+                    "option_delta":x.get('option_delta'),"option_volume":x.get('option_volume'),"option_oi":x.get('option_oi'),
+                    "spread_pct":x.get('spread_pct'),"stop":x.get('stop'),"target":x.get('target'),"rr":x.get('rr'),
+                    "p_up":x.get('p_up'),"ml_probability":x.get('ml_probability'),"dl_probability":x.get('dl_probability'),
+                    "ensemble_confidence":x.get('ensemble_confidence'),"market_regime":regime,"trend":trend,"momentum":momentum,
+                    "volatility":x.get('volatility'),"iv":x.get('iv'),"pcr":x.get('pcr')})
+            else:
+                detail = err if isinstance(err,dict) else {}
+                out.append({"symbol":sym,"decision":"WAIT","direction":"WAIT","option_symbol":None,"confidence":None,
+                    "expected_value_r":None,"expected_move":None,"reason":detail.get('error') if detail else str(err or 'NO LIVE SIGNAL'),
+                    "live":True,"p_up":detail.get('p_up'),"dl_probability":detail.get('dl_probability'),"dl_samples":detail.get('dl_samples',0)})
+        except Exception as e:
+            out.append({"symbol":sym,"decision":"WAIT","direction":"WAIT","reason":str(e),"live":True})
+    return jsonify({"market_open":True,"live":True,"timestamp":datetime.now(IST).isoformat(),"decisions":out,"edge":ai_auto_validation_edge()})
 
 def ai_cycle():
     """Run the intended index-direction -> CE/PE paper-learning cycle."""
@@ -9135,7 +9300,10 @@ def ai_hist_train_deep(force=False):
         now=datetime.now(IST).isoformat();c=ai_db();hist_status="PRETRAINED" if val_samples and len(set(Y[-val_samples:].astype(int).tolist()))>=2 else "PRETRAINED — AUC UNAVAILABLE"
         c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days,feature_version) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS,FEATURE_ENGINE_VERSION))
         c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_train_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("PRETRAINED — LIVE GRU LEARNING CONTINUES",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_collector_status',?)",("HISTORY COLLECTION COMPLETE",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_train_detail',?)",(f"architecture=GRU-{DL_GRU_HIDDEN} sequence={DL_SEQUENCE_LEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",));c.commit();c.close()
-        ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}");return ai_hist_status()
+        ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}")
+        # Train the companion directional ML model from the same historical archive.
+        ai_hist_ml_train(force=force)
+        return ai_hist_status()
     except Exception as e:
         logger.exception("historical GRU pre-training failed");detail=f"{type(e).__name__}: {e}";_hist_set_model_status("TRAINING ERROR — RETRYING",detail);ai_log("ERROR","HISTORICAL_GRU_TRAIN",detail);c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",(detail,));c.commit();c.close();return ai_hist_status()
     finally:
@@ -9251,6 +9419,20 @@ def ai_hist_sync():
     c.commit();c.close();_hist_invalidate_status_cache();ai_log("DATA","HISTORICAL_SYNC_COMPLETE",f"status={overall}; results={results}")
     return {"results":results,"training":{"status":"QUEUED" if all_ok else "WAITING FOR COMPLETE HISTORY"},**ai_hist_status()}
 
+def ai_train_historical_all(force=True):
+    """Run the complete historical directional training stack.
+
+    The archive is the source for BOTH brains: chronological GRU + chronological
+    logistic ML. This is intentionally separate from paper-outcome learning.
+    """
+    hs=ai_hist_status(); total=int(hs.get("candles",0) or 0)
+    if total<AI_HIST_MIN_TRAIN:
+        return {"status":"WAITING FOR HISTORICAL ARCHIVE","candles":total,"need":AI_HIST_MIN_TRAIN}
+    model=hs.get("model") or {}
+    if not int(model.get("samples",0) or 0):
+        return ai_hist_train_deep(force=force)
+    return ai_hist_ml_train(force=force)
+
 def ai_hist_loop():
     ai_init_db()
     while True:
@@ -9265,10 +9447,12 @@ def ai_hist_loop():
                 if opt_last:
                     dt=_ai_ts_naive(opt_last);opt_due=not dt or (now_ist()-dt).total_seconds()>=AI_OPTION_CAPTURE_MINUTES*60
                 if opt_due and ai_market_open():ai_capture_option_chains()
-                hs=ai_hist_status();model=hs.get("model") or {};total=int(hs.get("candles") or 0);requested=str(hs.get("training_requested") or "0")=="1";model_missing=not int(model.get("samples") or 0);retry_due=True
+                hs=ai_hist_status();model=hs.get("model") or {};total=int(hs.get("candles") or 0);requested=str(hs.get("training_requested") or "0")=="1";model_missing=not int(model.get("samples") or 0);hist_ml_missing=not int(ai_hist_ml_model().get("samples") or 0);retry_due=True
                 if hs.get("last_train_at"):
                     dt=_ai_ts_naive(hs.get("last_train_at"));retry_due=not dt or (now_ist()-dt).total_seconds()>=AI_HIST_TRAIN_RETRY_MINUTES*60
-                if total>=AI_HIST_MIN_TRAIN and (requested or (model_missing and retry_due)):ai_hist_train_deep()
+                if total>=AI_HIST_MIN_TRAIN and (requested or ((model_missing or hist_ml_missing) and retry_due)):
+                    if model_missing or requested: ai_hist_train_deep()
+                    elif hist_ml_missing: ai_hist_ml_train(force=False)
         except Exception as e:
             ai_log("ERROR","HISTORICAL_ENGINE",f"{type(e).__name__}: {e}")
             try:
@@ -9386,7 +9570,7 @@ def ai_directional_status():
         "historical_ml": {
             "samples": 0, "accuracy": None, "auc": None,
             "status": "NOT SEPARATELY PRETRAINED",
-            "note": "Historical archive is used by the GRU pre-training layer; live ML learns from completed paper outcomes."
+            "note": "Historical archive pre-trains the directional GRU and historical ML; paper outcomes are a separate downstream learning layer."
         },
         "historical": hs,
         "open_directional_trades": [t for t in ai_open_trades() if (json.loads(t.get('setup_json') or '{}').get('strategy_type') == 'INDEX_DIRECTIONAL_LONG_OPTION')],
@@ -9400,7 +9584,7 @@ def ai_learning_progress_api():
     ai_init_db(); hs=ai_hist_status(); ml=ai_ml_model(); dl=ai_dl_model()
     total=int(hs.get('candles',0) or 0); model=hs.get('model') or {}
     hist_samples=int(model.get('samples',0) or 0); train_samples=int(model.get('train_samples',0) or 0); val_samples=int(model.get('validation_samples',0) or 0)
-    ml_samples=int(ml.get('samples',0) or 0); dl_samples=int(dl.get('samples',0) or 0)
+    ml_samples=int(ml.get('samples',0) or 0); dl_samples=int(dl.get('samples',0) or 0); hist_ml=ai_hist_ml_model()
     hist_ready=total>0 and (bool(model) or str(hs.get('status','')).upper().startswith('HISTORY COLLECTION COMPLETE'))
     ml_need=max(1,int(ai_params().get('ml_min_samples',40))); dl_need=max(1,int(ai_params().get('dl_min_samples',80)))
     live_progress=min(100.0,max(ml_samples/ml_need*100.0,dl_samples/dl_need*100.0))
@@ -9408,6 +9592,7 @@ def ai_learning_progress_api():
         'historical': {'progress':100 if hist_ready else (100 if total else 0),'status':hs.get('status','WAITING FOR KITE'),'candles':total,'oldest':hs.get('oldest'),'newest':hs.get('newest')},
         'ml': {'progress':min(100.0,ml_samples/ml_need*100.0),'status':ml.get('status','WAITING FOR PAPER OUTCOMES') if ml_samples else 'WAITING FOR PAPER OUTCOMES','samples':ml_samples,'accuracy':ml.get('accuracy'),'auc':ml.get('auc')},
         'dl': {'progress':100 if hist_samples else min(100.0,dl_samples/dl_need*100.0),'status':model.get('status') or dl.get('status') or 'NOT TRAINED','samples':hist_samples or dl_samples,'train_samples':train_samples,'validation_samples':val_samples,'accuracy':model.get('accuracy',dl.get('accuracy')),'auc':model.get('auc',dl.get('auc'))},
+        'historical_ml': {'progress':100 if int(hist_ml.get('samples',0) or 0)>0 else 0,'status':hist_ml.get('status','NOT_TRAINED'),'samples':int(hist_ml.get('samples',0) or 0),'train_samples':int(hist_ml.get('train_samples',0) or 0),'validation_samples':int(hist_ml.get('validation_samples',0) or 0),'accuracy':hist_ml.get('accuracy'),'auc':hist_ml.get('auc')},
         'validation': {'progress':100 if val_samples else 0,'status':f'{val_samples:,} chronological validation samples' if val_samples else 'WAITING'},
         'live': {'ml_samples':ml_samples,'dl_samples':dl_samples,'progress':live_progress}
     })
