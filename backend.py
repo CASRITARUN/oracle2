@@ -7947,23 +7947,6 @@ def ai_ml_record_sample(trade_id, version, symbol, features, label, outcome_r, h
     ai_ml_train()
 
 
-def ai_dl_record_sample(trade_id,version,symbol,sequence,label,outcome_r,horizon_sec):
-    c=ai_db()
-    c.execute("""INSERT INTO ai_dl_samples(ts,trade_id,version,symbol,sequence,label,outcome_r,horizon_sec)
-                 VALUES(?,?,?,?,?,?,?,?)""",
-              (datetime.now(IST).isoformat(),trade_id,version,symbol,json.dumps(sequence),
-               int(label),float(outcome_r),float(horizon_sec)))
-    c.commit();c.close()
-    model=ai_dl_model()
-    if int(model.get("samples",0))+1 >= 80:
-        return ai_dl_train()
-    return model
-
-def ai_ml_record_sample(trade_id, version, symbol, features, label, outcome_r, horizon_sec):
-    c=ai_db(); c.execute("INSERT INTO ai_ml_samples(ts,trade_id,version,symbol,features,label,outcome_r,horizon_sec) VALUES(?,?,?,?,?,?,?,?)",(datetime.now(IST).isoformat(),trade_id,version,symbol,json.dumps(ai_ml_features(features)),int(label),float(outcome_r),float(horizon_sec))); c.commit(); c.close()
-    ai_ml_train()
-
-
 # ---------------------------------------------------------------------------
 # Research-grade ensemble / regime layer
 # ---------------------------------------------------------------------------
