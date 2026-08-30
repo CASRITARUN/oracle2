@@ -2737,113 +2737,201 @@ def _longvol_market_status():
 
 @app.route("/api/longvol/scan")
 def longvol_scan():
+    """Fast independent Long Vol scanner.
+
+    Important performance design:
+    - Never calls historical_data() once per stock inside the request.
+    - Gets the whole NSE stock quote universe in bulk.
+    - Gets ATM CE/PE quotes for the whole universe in one/few bulk requests.
+    - Uses the local AI market-history DB when available for momentum/volatility context.
+    - Falls back to today's move/range/volume from the bulk quote when history is unavailable.
+    - Does not depend on SCREENER_CACHE or the option-selling screener.
+
+    This avoids the 504 caused by hundreds of sequential historical-data REST calls.
+    """
     if not require_session():
         return jsonify({"error":"not_logged_in"}),401
     strategy_type = request.args.get("strategy_type", LONGVOL_DEFAULT_STRATEGY)
-    if strategy_type not in ("long_straddle", "long_strangle"):
+    if strategy_type not in ("long_straddle","long_strangle"):
         return jsonify({"error":"strategy_type must be long_straddle or long_strangle"}),400
     limit = max(5,min(200,int(request.args.get("limit",50))))
     market_status = _longvol_market_status()
+
     try:
-        # Completely independent of the option-selling screener cache.
+        # 1) Independent F&O universe.
         universe = fo_stock_universe(force=False)
         nfo, nse = get_instruments(force=False)
-        symbol_to_token = {i["tradingsymbol"]: i["instrument_token"] for i in nse
-                           if i.get("exchange") == "NSE"}
+        nse_map = {i["tradingsymbol"]: i for i in nse
+                   if i.get("exchange") == "NSE" and i.get("tradingsymbol")}
+        universe = [s for s in universe if s in nse_map]
+        if not universe:
+            return jsonify({"error":"No F&O stock universe available from Kite instruments."}),503
+
+        # 2) One bulk NSE quote request for current/last-available price, OHLC and volume.
+        nse_keys = [f"NSE:{s}" for s in universe]
+        nse_quotes = kite_quote_bulk(nse_keys, chunk_size=500, retries=1)
+
         raw=[]
-        for name in universe:
-            token=symbol_to_token.get(name)
-            if not token:
+        for symbol in universe:
+            q=nse_quotes.get(f"NSE:{symbol}") or {}
+            spot=extract_price(q)
+            ohlc=q.get("ohlc") or {}
+            prev=ohlc.get("close")
+            high=ohlc.get("high")
+            low=ohlc.get("low")
+            volume=float(q.get("volume") or 0)
+            if spot is None:
+                # Local AI history is a safe closed-market fallback for spot.
+                hist=ai_market_history(symbol,2)
+                if hist and hist[-1].get("spot"):
+                    spot=float(hist[-1]["spot"])
+            if spot is None or spot <= 0:
                 continue
-            try:
-                hv, atr_pct, ltp = historical_vol_and_atr(token)
-            except Exception:
-                continue
-            if hv is None or ltp is None:
-                continue
-            raw.append({"symbol":name,"ltp":round(ltp,2),
-                        "hv_annualized_pct":round(hv,2),
-                        "atr_pct_of_price":round(atr_pct,2)})
-        # Seed the shared quote cache with the latest underlying close so that build/payoff
-        # remains usable after the cash market has closed.
+
+            day_move=((float(spot)/float(prev))-1)*100 if prev and float(prev)>0 else 0.0
+            day_range=((float(high)-float(low))/float(spot))*100 if high and low and spot else 0.0
+
+            # Local history is fast SQLite access, not a broker REST call.
+            hist=ai_market_history(symbol,120)
+            prices=[float(x["spot"]) for x in hist if x.get("spot") is not None]
+            prices.append(float(spot))
+            hv=None; atr_pct=None; ret5=day_move; ret20=day_move; vol10=day_range
+            if len(prices)>=11:
+                rets=np.diff(np.log(np.array(prices[-61:],dtype=float)))
+                if len(rets)>=5:
+                    hv=float(np.std(rets)*math.sqrt(252)*100)
+                if len(prices)>=15:
+                    recent=np.array(prices[-15:],dtype=float)
+                    ranges=np.abs(np.diff(recent))
+                    atr_pct=float(np.mean(ranges[-14:])/max(spot,0.01)*100)
+                if len(prices)>=6:
+                    ret5=(spot/prices[-6]-1)*100
+                if len(prices)>=21:
+                    ret20=(spot/prices[-21]-1)*100
+                m=float(np.mean(prices[-10:])); sd=float(np.std(prices[-10:]))
+                vol10=sd/max(m,0.01)*100
+            raw.append({
+                "symbol":symbol,"ltp":round(float(spot),2),
+                "hv_annualized_pct":round(hv,2) if hv is not None else None,
+                "atr_pct_of_price":round(atr_pct,2) if atr_pct is not None else round(day_range,2),
+                "ret5_pct":round(ret5,2),"ret20_pct":round(ret20,2),
+                "day_move_pct":round(day_move,2),"day_range_pct":round(day_range,2),
+                "volume":int(volume),"history_points":len(prices)
+            })
+
+        if not raw:
+            return jsonify({"error":"Kite returned no usable NSE prices for the F&O universe."}),503
+
+        # Keep the latest/last-close prices available to downstream build functions.
         seed_spot_cache_from_prices(raw)
+
+        # 3) One/few bulk option quote calls for ATM CE/PE liquidity + IV.
         iv_liq = get_atm_iv_and_liquidity_bulk(
             [{"symbol":r["symbol"],"last_close":r["ltp"]} for r in raw], nfo)
+
+        # 4) Cross-sectional scores. This is deliberately Long-Vol logic, not the old
+        # option-selling score (which rewards calmness).
+        hvs=[r.get("hv_annualized_pct") for r in raw if r.get("hv_annualized_pct") is not None]
+        atrs=[r.get("atr_pct_of_price") for r in raw if r.get("atr_pct_of_price") is not None]
+        moves=[abs(r.get("ret5_pct") or 0) for r in raw]
+        ranges=[r.get("day_range_pct") or 0 for r in raw]
+        vols=[r.get("volume") or 0 for r in raw]
+
+        def pct(v, vals):
+            vals=[x for x in vals if x is not None]
+            if v is None or not vals:return 50.0
+            return 100.0*sum(1 for x in vals if x<=v)/len(vals)
+
+        results=[]
         for r in raw:
             q=iv_liq.get(r["symbol"]) or {}
             r.update(q)
-            r["option_data_available"] = bool(q)
-            r["liquidity_ok"] = bool(q.get("liquidity_ok", True))
-            r["fo_banned_today"] = False
-    except Exception as e:
-        return jsonify({"error":f"Could not independently scan the F&O universe: {e}"}),500
+            hv=r.get("hv_annualized_pct"); atr=r.get("atr_pct_of_price")
+            iv=r.get("atm_iv_pct")
+            hv_score=pct(hv,hvs) if hv is not None else 50.0
+            atr_score=pct(atr,atrs) if atr is not None else 50.0
+            move_score=pct(abs(r.get("ret5_pct") or 0),moves)
+            range_score=pct(r.get("day_range_pct") or 0,ranges)
+            volume_score=pct(r.get("volume") or 0,vols)
 
-    results=[]
-    errors=[]
-    # Build actual structures when option quotes are available. If the exchange is closed and
-    # an option quote is temporarily unavailable, DO NOT drop the stock: return a reference
-    # candidate ranked on the movement/volatility data, clearly marked as build_pending.
-    for r in raw:
-        if not r.get("liquidity_ok") or r.get("fo_banned_today"):
-            continue
-        try:
-            built=_longvol_build_from_chain(r["symbol"],strategy_type,None,1)
-        except Exception as e:
-            built={"error":str(e)}
+            # Current movement / breakout proxy from live/last quote + local history.
+            trend_score=50.0
+            reasons=[]
+            hist=ai_market_history(r["symbol"],60)
+            hist_prices=[float(x["spot"]) for x in hist if x.get("spot") is not None]
+            if hist_prices:
+                h20=max(hist_prices[-20:]) if hist_prices else r["ltp"]
+                l20=min(hist_prices[-20:]) if hist_prices else r["ltp"]
+                if r["ltp"]>=h20*0.995:
+                    trend_score+=20; reasons.append("Near/above recent 20-bar high")
+                elif r["ltp"]<=l20*1.005:
+                    trend_score+=20; reasons.append("Near/below recent 20-bar low")
+                ma10=np.mean(hist_prices[-10:]) if len(hist_prices)>=10 else r["ltp"]
+                ma30=np.mean(hist_prices[-30:]) if len(hist_prices)>=30 else ma10
+                if ma30 and abs(ma10/ma30-1)>=0.01:
+                    trend_score+=10; reasons.append("Trend expansion")
+            if abs(r.get("day_move_pct") or 0)>=1.5:
+                trend_score+=8; reasons.append(f"Current move {r['day_move_pct']:+.1f}%")
+            if r.get("day_range_pct",0)>=2.0:
+                trend_score+=6; reasons.append("Wide current range")
+            if volume_score>=75:
+                trend_score+=6; reasons.append("Above-normal volume")
+            if atr_score>=75:
+                trend_score+=5; reasons.append("ATR/range expansion")
+            trend_score=max(0,min(100,trend_score))
 
-        if "error" not in built:
-            built["data_status"] = market_status["data_mode"]
-            built["option_data_available"] = True
-            built["build_pending"] = False
-            built["breakout_score"] = built.get("movement_score")
-            results.append(built)
-            continue
+            iv_rv_score=50.0
+            if hv is not None and iv is not None and iv>0:
+                ratio=hv/iv
+                iv_rv_score=max(0,min(100,50+(ratio-1)*100))
+                if ratio>1.05: reasons.append("Realized volatility exceeds IV")
 
-        # Fallback ranking so the market scan still lists stocks when the market is closed
-        # or a particular option quote/depth is unavailable.
-        movement_score, trend, movement_reasons = _longvol_movement_score(r["symbol"], r)
-        iv = r.get("atm_iv_pct")
-        hv = r.get("hv_annualized_pct")
-        iv_rv_score = 50.0
-        if hv is not None and iv:
-            ratio = hv / max(iv, 0.01)
-            iv_rv_score = max(0.0, min(100.0, 50 + (ratio - 1.0) * 100))
-        oi = float(r.get("atm_oi_total") or 0)
-        liquidity_score = min(100.0, oi / max(LONGVOL_MIN_LIQUIDITY_OI,1) * 50.0) if oi else 45.0
-        score = round(movement_score*0.55 + iv_rv_score*0.25 + liquidity_score*0.20, 1)
-        results.append({
-            "symbol": r["symbol"], "spot": r["ltp"], "strategy_type": strategy_type,
-            "days_to_expiry": None, "total_premium_per_share": None,
-            "max_loss": None, "breakeven_lower": None, "breakeven_upper": None,
-            "probability_of_profit_pct": None, "probability_of_touch_pct": None,
-            "movement_score": movement_score, "breakout_score": movement_score,
-            "movement_reasons": movement_reasons, "liquidity_score": round(liquidity_score,1),
-            "min_leg_oi": int(oi), "max_leg_spread_pct": r.get("atm_spread_pct"),
-            "iv_hv": classify_iv_hv(iv, hv),
-            "expected_move": expected_move(r["ltp"], iv, 30) if iv else None,
-            "trend": trend, "expected_value_per_share": None,
-            "long_vol_score": score, "option_data_available": False,
-            "build_pending": True, "data_status": market_status["data_mode"],
-            "selection_note": "Reference candidate; exact CE/PE structure will be built when option quotes are available.",
-            "model_note": "Reference scan only. POP, breakevens and EV are unavailable until the option chain is quoted.",
-            "scan_error": built.get("error"),
+            liquidity_score=float(q.get("atm_oi_total") or 0)
+            liquidity_score=min(100.0,liquidity_score/max(LONGVOL_MIN_LIQUIDITY_OI,1)*50)
+            sp=q.get("atm_spread_pct")
+            if sp is not None:
+                liquidity_score=(liquidity_score+max(0,100-float(sp)*10))/2
+
+            # Long-vol composite: current movement + historical movement + IV/RV + liquidity.
+            long_score=round(
+                trend_score*0.30 + hv_score*0.15 + atr_score*0.10 +
+                move_score*0.10 + range_score*0.05 + volume_score*0.05 +
+                iv_rv_score*0.15 + liquidity_score*0.10,1)
+
+            # For the fast scan we intentionally do not build every stock's complete chain.
+            # That is the Build button's job. This is what keeps Scan Market below proxy timeout.
+            results.append({
+                "symbol":r["symbol"],"spot":r["ltp"],"strategy_type":strategy_type,
+                "movement_score":round(trend_score,1),"breakout_score":round(trend_score,1),
+                "historical_vol_score":round(hv_score,1),"atr_score":round(atr_score,1),
+                "volume_score":round(volume_score,1),"iv_rv_score":round(iv_rv_score,1),
+                "liquidity_score":round(liquidity_score,1),
+                "hv_annualized_pct":hv,"atr_pct_of_price":atr,"atm_iv_pct":iv,
+                "atm_oi_total":r.get("atm_oi_total"),"atm_spread_pct":r.get("atm_spread_pct"),
+                "iv_hv":classify_iv_hv(iv,hv),
+                "expected_move":expected_move(r["ltp"],iv,30) if iv else None,
+                "probability_of_profit_pct":None,"probability_of_touch_pct":None,
+                "expected_value_per_share":None,"long_vol_score":long_score,
+                "movement_reasons":reasons[:8],"option_data_available":bool(q),
+                "build_pending":True,"data_status":market_status["data_mode"],
+                "selection_note":"Fast scan candidate. Click Build to construct exact CE/PE, POP, breakevens and payoff from the option chain.",
+                "model_note":"Scan ranking is a heuristic. Exact POP/EV are calculated only after building the selected option structure.",
+                "history_points":r.get("history_points",0)
+            })
+
+        # Prefer candidates with usable option liquidity, but keep reference candidates visible.
+        results.sort(key=lambda x:(x.get("long_vol_score",0), x.get("liquidity_score",0)), reverse=True)
+        for i,x in enumerate(results):x["rank"]=i+1
+        return jsonify({
+            "strategy_type":strategy_type,"scanned":len(raw),"count":len(results),
+            "results":results[:limit],"market_status":market_status,
+            "note":"Fast independent Long Vol scan. It does not use the option-selling screener cache. "
+                   "Scan uses bulk NSE/option quotes plus local historical AI data to avoid hundreds of sequential broker calls. "
+                   "Click Build for exact option-chain POP/EV/breakevens. Market-closed results use latest available data."
         })
-
-    results.sort(key=lambda x:(x.get("long_vol_score",0),x.get("movement_score",0)),reverse=True)
-    for i,x in enumerate(results):
-        x["rank"]=i+1
-    return jsonify({
-        "strategy_type":strategy_type,
-        "scanned":len(raw),
-        "count":len(results),
-        "results":results[:limit],
-        "errors":errors[:10],
-        "market_status":market_status,
-        "note":"Independent Long Vol market scan. It does not use the option-selling screener cache. "
-               "The scanner works while the market is closed using the latest available underlying/option data. "
-               "Candidates without an option quote remain visible as build-pending reference candidates. "
-               "Rebuild before live execution. Scores are heuristics, not guarantees."
-    })
+    except Exception as e:
+        logger.exception("Long Vol scan failed")
+        return jsonify({"error":f"Long Vol scan failed: {e}"}),500
 
 
 @app.route("/api/longvol/payoff/<symbol>")
