@@ -2716,29 +2716,134 @@ def longvol_build(symbol):
     return jsonify(result)
 
 
+def _longvol_market_status():
+    """Return a simple NSE cash-session status. Scanner is intentionally usable when closed:
+    it uses the latest available underlying/option quotes and historical candles and labels them
+    as reference/last-close data rather than pretending they are live ticks."""
+    now = now_ist()
+    weekday = now.weekday() < 5
+    market_open = weekday and (now.time() >= datetime.strptime("09:15", "%H:%M").time()
+                               and now.time() <= datetime.strptime("15:30", "%H:%M").time())
+    return {
+        "market_open": market_open,
+        "status": "OPEN" if market_open else "CLOSED",
+        "data_mode": "live_quotes" if market_open else "latest_available_quotes",
+        "as_of": now.isoformat(),
+        "note": ("Live-session quotes used." if market_open else
+                 "Market is closed; scanner uses the latest available quotes/historical candles. "
+                 "Build/execute should be rechecked when live quotes are available."),
+    }
+
+
 @app.route("/api/longvol/scan")
 def longvol_scan():
     if not require_session():
         return jsonify({"error":"not_logged_in"}),401
     strategy_type = request.args.get("strategy_type", LONGVOL_DEFAULT_STRATEGY)
-    limit = max(5,min(30,int(request.args.get("limit",15))))
-    # Use the existing screener cache when available; otherwise the user can run the
-    # existing screener first. This avoids a second expensive universe-wide historical scan.
-    base = [r for r in (SCREENER_CACHE.get("results") or []) if r.get("liquidity_ok") and not r.get("fo_banned_today")]
-    if not base:
-        return jsonify({"error":"Run the existing Stock Screener once first so Long Vol AI can reuse its cached F&O universe and liquidity data."}),400
-    results=[]; errors=[]
-    for r in base[:80]:
+    if strategy_type not in ("long_straddle", "long_strangle"):
+        return jsonify({"error":"strategy_type must be long_straddle or long_strangle"}),400
+    limit = max(5,min(200,int(request.args.get("limit",50))))
+    market_status = _longvol_market_status()
+    try:
+        # Completely independent of the option-selling screener cache.
+        universe = fo_stock_universe(force=False)
+        nfo, nse = get_instruments(force=False)
+        symbol_to_token = {i["tradingsymbol"]: i["instrument_token"] for i in nse
+                           if i.get("exchange") == "NSE"}
+        raw=[]
+        for name in universe:
+            token=symbol_to_token.get(name)
+            if not token:
+                continue
+            try:
+                hv, atr_pct, ltp = historical_vol_and_atr(token)
+            except Exception:
+                continue
+            if hv is None or ltp is None:
+                continue
+            raw.append({"symbol":name,"ltp":round(ltp,2),
+                        "hv_annualized_pct":round(hv,2),
+                        "atr_pct_of_price":round(atr_pct,2)})
+        # Seed the shared quote cache with the latest underlying close so that build/payoff
+        # remains usable after the cash market has closed.
+        seed_spot_cache_from_prices(raw)
+        iv_liq = get_atm_iv_and_liquidity_bulk(
+            [{"symbol":r["symbol"],"last_close":r["ltp"]} for r in raw], nfo)
+        for r in raw:
+            q=iv_liq.get(r["symbol"]) or {}
+            r.update(q)
+            r["option_data_available"] = bool(q)
+            r["liquidity_ok"] = bool(q.get("liquidity_ok", True))
+            r["fo_banned_today"] = False
+    except Exception as e:
+        return jsonify({"error":f"Could not independently scan the F&O universe: {e}"}),500
+
+    results=[]
+    errors=[]
+    # Build actual structures when option quotes are available. If the exchange is closed and
+    # an option quote is temporarily unavailable, DO NOT drop the stock: return a reference
+    # candidate ranked on the movement/volatility data, clearly marked as build_pending.
+    for r in raw:
+        if not r.get("liquidity_ok") or r.get("fo_banned_today"):
+            continue
         try:
             built=_longvol_build_from_chain(r["symbol"],strategy_type,None,1)
-            if "error" in built: continue
-            built["rank_from_base_screener"]=r.get("rank")
-            results.append(built)
         except Exception as e:
-            errors.append({"symbol":r.get("symbol"),"error":str(e)})
-    results.sort(key=lambda x:x.get("long_vol_score",0),reverse=True)
-    for i,x in enumerate(results): x["rank"]=i+1
-    return jsonify({"strategy_type":strategy_type,"count":len(results),"results":results[:limit],"errors":errors[:10],"note":"Long Vol score combines model POP, current movement/trend, realized-vs-implied volatility, touch probability and option liquidity. It is a ranking heuristic, not a guarantee."})
+            built={"error":str(e)}
+
+        if "error" not in built:
+            built["data_status"] = market_status["data_mode"]
+            built["option_data_available"] = True
+            built["build_pending"] = False
+            built["breakout_score"] = built.get("movement_score")
+            results.append(built)
+            continue
+
+        # Fallback ranking so the market scan still lists stocks when the market is closed
+        # or a particular option quote/depth is unavailable.
+        movement_score, trend, movement_reasons = _longvol_movement_score(r["symbol"], r)
+        iv = r.get("atm_iv_pct")
+        hv = r.get("hv_annualized_pct")
+        iv_rv_score = 50.0
+        if hv is not None and iv:
+            ratio = hv / max(iv, 0.01)
+            iv_rv_score = max(0.0, min(100.0, 50 + (ratio - 1.0) * 100))
+        oi = float(r.get("atm_oi_total") or 0)
+        liquidity_score = min(100.0, oi / max(LONGVOL_MIN_LIQUIDITY_OI,1) * 50.0) if oi else 45.0
+        score = round(movement_score*0.55 + iv_rv_score*0.25 + liquidity_score*0.20, 1)
+        results.append({
+            "symbol": r["symbol"], "spot": r["ltp"], "strategy_type": strategy_type,
+            "days_to_expiry": None, "total_premium_per_share": None,
+            "max_loss": None, "breakeven_lower": None, "breakeven_upper": None,
+            "probability_of_profit_pct": None, "probability_of_touch_pct": None,
+            "movement_score": movement_score, "breakout_score": movement_score,
+            "movement_reasons": movement_reasons, "liquidity_score": round(liquidity_score,1),
+            "min_leg_oi": int(oi), "max_leg_spread_pct": r.get("atm_spread_pct"),
+            "iv_hv": classify_iv_hv(iv, hv),
+            "expected_move": expected_move(r["ltp"], iv, 30) if iv else None,
+            "trend": trend, "expected_value_per_share": None,
+            "long_vol_score": score, "option_data_available": False,
+            "build_pending": True, "data_status": market_status["data_mode"],
+            "selection_note": "Reference candidate; exact CE/PE structure will be built when option quotes are available.",
+            "model_note": "Reference scan only. POP, breakevens and EV are unavailable until the option chain is quoted.",
+            "scan_error": built.get("error"),
+        })
+
+    results.sort(key=lambda x:(x.get("long_vol_score",0),x.get("movement_score",0)),reverse=True)
+    for i,x in enumerate(results):
+        x["rank"]=i+1
+    return jsonify({
+        "strategy_type":strategy_type,
+        "scanned":len(raw),
+        "count":len(results),
+        "results":results[:limit],
+        "errors":errors[:10],
+        "market_status":market_status,
+        "note":"Independent Long Vol market scan. It does not use the option-selling screener cache. "
+               "The scanner works while the market is closed using the latest available underlying/option data. "
+               "Candidates without an option quote remain visible as build-pending reference candidates. "
+               "Rebuild before live execution. Scores are heuristics, not guarantees."
+    })
 
 
 @app.route("/api/longvol/payoff/<symbol>")
