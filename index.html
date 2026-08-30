@@ -2439,7 +2439,19 @@ document.getElementById("refreshEventsBtn").onclick = loadEvents;
 let lvState={results:[],selected:null,positionId:null,initialized:false};
 const lvMoney=v=>v==null||!Number.isFinite(Number(v))?'—':'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:2});
 const lvPct=v=>v==null?'—':Number(v).toFixed(1)+'%';
-async function lvJson(url,opts={}){const r=await apiFetch(url,opts);const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||('HTTP '+r.status));return d;}
+async function lvJson(url,opts={}){
+ const r=await apiFetch(url,opts);
+ const ct=(r.headers.get('content-type')||'').toLowerCase();
+ let d=null, body='';
+ if(ct.includes('application/json')){ try{d=await r.json();}catch(e){throw new Error(`Server returned invalid JSON (HTTP ${r.status}). Check backend logs.`);} }
+ else { body=await r.text(); const snippet=body.replace(/\s+/g,' ').slice(0,180);
+   if(r.status===404) throw new Error(`Long Vol API route not found (HTTP 404). Restart/deploy the updated Python backend. Server returned HTML: ${snippet}`);
+   if(r.status>=500) throw new Error(`Long Vol backend error (HTTP ${r.status}). Check Python/Flask logs. Server returned HTML: ${snippet}`);
+   if(r.redirected || r.status===200) throw new Error(`Expected JSON from ${url}, but the server returned HTML. This usually means Nginx is serving the page instead of the updated API backend. ${snippet}`);
+   throw new Error(`Expected JSON but received HTTP ${r.status}. ${snippet}`);
+ }
+ if(!r.ok||d?.error)throw new Error(d?.error||(`HTTP ${r.status}`));return d;
+}
 function lvSet(id,v){const e=document.getElementById(id);if(e)e.textContent=v;}
 function initLongVolAI(){if(lvState.initialized)return;lvState.initialized=true;document.getElementById('lvScanBtn').onclick=lvScan;document.getElementById('lvSimBtn').onclick=lvSimulate;document.getElementById('lvTrackBtn').onclick=lvTrack;document.getElementById('lvBuyBothBtn').onclick=()=>lvExecute('both');document.getElementById('lvBuyCallBtn').onclick=()=>lvExecute('call');document.getElementById('lvBuyPutBtn').onclick=()=>lvExecute('put');document.getElementById('lvRefreshBuildBtn').onclick=()=>lvLoadBuild(lvState.selected?.symbol);document.getElementById('lvMonitorRefresh').onclick=lvMonitor;document.getElementById('lvMonitorSave').onclick=lvSaveMonitor;}
 async function lvScan(){
