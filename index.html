@@ -951,6 +951,12 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
   <div>
     <div style="font-size:10px;font-weight:800;letter-spacing:.08em;color:#cfe7ef">HISTORICAL GRU RETRAINING</div>
     <div id="atRetrainStatus" style="font-size:9px;color:#7894a8;margin-top:4px">Run improved historical training using the available archive.</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:7px;min-width:280px">
+      <div style="height:6px;flex:1;background:#07131d;border:1px solid #163247;border-radius:99px;overflow:hidden">
+        <i id="atRetrainProgress" style="display:block;height:100%;width:0%;border-radius:99px;background:linear-gradient(90deg,#2bc9ef,#55e0ad);transition:width .4s ease"></i>
+      </div>
+      <b id="atRetrainPct" style="font:800 9px ui-monospace,monospace;color:#8feafb">0.0%</b>
+    </div>
   </div>
   <button id="atRetrainBtn" type="button" onclick="atStartHistoricalRetrain()" style="white-space:nowrap;padding:9px 13px;border:1px solid #2a7183;border-radius:9px;background:#0b2935;color:#8feafb;font-weight:800;cursor:pointer">▶ RETRAIN HISTORICAL GRU</button>
 </div>
@@ -2934,8 +2940,16 @@ async function atPollHistoricalRetrain(){
     try{
       const d=await aiGet("/api/ai-evolution/historical"), m=d.model||{}, s=String(m.status||d.status||"").toUpperCase();
       const running=/TRAIN|RUNNING|PREPAR|BUILD|QUEUED/.test(s)&&!/PRETRAINED/.test(s);
-      if(status)status.textContent=running?("TRAINING "+s):String(m.status||d.status||"CHECKING");
-      if(!running||tries>=360){if(btn)btn.disabled=false;if(window.atRefreshAll)window.atRefreshAll();return;}
+      const pct = Number(d.training_progress || 0);
+      const phase = String(d.training_phase || m.status || d.status || "CHECKING");
+      if(status) status.textContent = running
+        ? ("TRAINING · " + phase + " · " + pct.toFixed(1) + "%")
+        : phase;
+      const pb=document.getElementById("atRetrainProgress");
+      if(pb) pb.style.width=Math.max(0,Math.min(100,pct))+"%";
+      const pt=document.getElementById("atRetrainPct");
+      if(pt) pt.textContent=pct.toFixed(1)+"%";
+      if(!running||tries>=360){if(btn)btn.disabled=false;return;}
     }catch(e){}
     setTimeout(poll,5000);
   };
