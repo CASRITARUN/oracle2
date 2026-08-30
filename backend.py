@@ -39,6 +39,7 @@ import threading
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory, redirect
 
@@ -86,6 +87,17 @@ DEFAULT_CALENDAR_TARGET_DELTA = 0.25 # used instead of otm_pct in "delta" strike
 CALENDAR_TARGET_GAP_DAYS = 30        # preferred day-gap between near and far expiry when auto-picking
 CALENDAR_CURVE_POINTS = 41           # number of spot points sampled for the payoff curve
 CALENDAR_CURVE_RANGE_PCT = 0.15      # curve spans spot x (1 +/- this), i.e. +/-15% around current spot
+
+# --- Long Straddle / Strangle AI defaults ---
+LONGVOL_DEFAULT_STRATEGY = "long_straddle"
+LONGVOL_STRANGLE_DELTAS = (0.15, 0.20, 0.25)
+LONGVOL_MIN_POP = 50.0
+LONGVOL_MIN_LIQUIDITY_OI = 100
+LONGVOL_MAX_SPREAD_PCT = 5.0
+LONGVOL_STOP_LOSS_PCT = 50.0          # loss as % of premium paid
+LONGVOL_PROFIT_TARGET_PCT = 50.0      # gain as % of premium paid
+LONGVOL_MONITOR_INTERVAL_SEC = 30
+LONGVOL_STATE_FILE = "longvol_state.json"
 # Exit-suggestion thresholds for tracked calendar positions (informational only, never auto-exits)
 CALENDAR_STOP_LOSS_DEBIT_MULTIPLE = 0.5   # suggest exit if loss reaches this multiple of debit paid
 CALENDAR_NEAR_EXPIRY_DAYS_WARNING = 3     # suggest exit/roll when this close to near-leg expiry (gamma risk)
@@ -2518,6 +2530,353 @@ def build_strategy(symbol, target_delta=DEFAULT_TARGET_DELTA, wing_width_pct=DEF
     return result
 
 
+# ---------------------------------------------------------------------------
+# Long Volatility AI — Long Straddle / Long Strangle
+# ---------------------------------------------------------------------------
+def _longvol_score_range(value, lo, hi):
+    if value is None:
+        return 50.0
+    if hi <= lo:
+        return 50.0
+    return max(0.0, min(100.0, (float(value) - lo) / (hi - lo) * 100.0))
+
+
+def _longvol_touch_probability(spot, lower, upper, iv_pct, days):
+    """Approximate probability of touching either breakeven before expiry.
+    This is deliberately labelled an estimate: a simple doubled-tail approximation is
+    used rather than pretending to be an exact first-passage probability."""
+    expiry_pop = model_expiry_probability_between(spot, lower, upper, iv_pct, days)
+    if expiry_pop is None:
+        return None
+    outside = max(0.0, 100.0 - expiry_pop)
+    return round(min(99.9, outside * 1.65), 1)
+
+
+def _longvol_movement_score(symbol, rank=None):
+    rank = rank or get_stock_rank(symbol) or {}
+    hv = rank.get("hv_annualized_pct")
+    atr = rank.get("atr_pct_of_price")
+    iv = rank.get("atm_iv_pct")
+    trend = get_trend_regime(symbol)
+    score = 50.0
+    reasons = []
+    if hv is not None:
+        score += min(15.0, max(-10.0, (hv - 25.0) * 0.5))
+    if atr is not None:
+        score += min(12.0, max(-8.0, (atr - 2.0) * 4.0))
+    regime = trend.get("regime") if not trend.get("error") else "Unknown"
+    adx = trend.get("adx14") if not trend.get("error") else None
+    rsi = trend.get("rsi14") if not trend.get("error") else None
+    if regime in ("Strong Uptrend", "Strong Downtrend"):
+        score += 16
+        reasons.append(regime)
+    elif regime == "Transitioning":
+        score += 10
+        reasons.append("Trend transition")
+    elif regime == "Volatile / Mixed":
+        score += 8
+        reasons.append("Volatile/mixed regime")
+    if adx is not None and adx >= 25:
+        score += 8
+        reasons.append(f"ADX {adx} shows directional expansion")
+    if rsi is not None and (rsi >= 65 or rsi <= 35):
+        score += 5
+        reasons.append(f"RSI {rsi} shows strong momentum")
+    if hv is not None and iv is not None and iv < hv:
+        score += 12
+        reasons.append("Realized volatility currently exceeds IV")
+    return round(max(0.0, min(100.0, score)), 1), trend, reasons
+
+
+def _longvol_build_from_chain(symbol, strategy_type="long_straddle", expiry_str=None, lots=1):
+    symbol = symbol.upper()
+    data, err = get_chain_for_symbol(symbol, expiry_str)
+    if err:
+        return err
+    spot, expiry, chain, lot_size = data["spot"], data["expiry"], data["chain"], data["lot_size"]
+    qty = lot_size * max(1, int(lots))
+    calls = sorted([o for o in chain if o["instrument_type"] == "CE"], key=lambda x: abs(x["strike"] - spot))
+    puts = sorted([o for o in chain if o["instrument_type"] == "PE"], key=lambda x: abs(x["strike"] - spot))
+    if not calls or not puts:
+        return {"error": "Incomplete option chain: call and put quotes are required."}
+
+    def leg(o, role):
+        return {k: o.get(k) for k in ("strike","ltp","bid","ask","mid","oi","volume","iv","delta","spread_pct","tradingsymbol")} | {"role": role}
+
+    chosen_call, chosen_put = calls[0], puts[0]
+    selection_note = "ATM call + ATM put"
+    if strategy_type == "long_strangle":
+        # Search symmetric delta pairs and choose the structure with the best blend of
+        # POP, movement score, premium efficiency and liquidity.
+        candidates = []
+        all_calls = [o for o in chain if o["instrument_type"] == "CE" and o.get("delta") is not None]
+        all_puts = [o for o in chain if o["instrument_type"] == "PE" and o.get("delta") is not None]
+        for target in LONGVOL_STRANGLE_DELTAS:
+            cands_c = [o for o in all_calls if 0.03 <= o["delta"] <= 0.50]
+            cands_p = [o for o in all_puts if -0.50 <= o["delta"] <= -0.03]
+            if not cands_c or not cands_p:
+                continue
+            c = min(cands_c, key=lambda o: abs(o["delta"] - target))
+            p = min(cands_p, key=lambda o: abs(abs(o["delta"]) - target))
+            premium = float(c["ltp"] or 0) + float(p["ltp"] or 0)
+            if premium <= 0:
+                continue
+            lower = float(p["strike"]) - premium
+            upper = float(c["strike"]) + premium
+            rank = get_stock_rank(symbol) or {}
+            iv = rank.get("atm_iv_pct") or ((float(c.get("iv") or 0) + float(p.get("iv") or 0)) / 2)
+            days = max(1, (expiry - now_ist().date()).days)
+            pop = model_expiry_probability_between(spot, lower, upper, iv, days)
+            touch = _longvol_touch_probability(spot, lower, upper, iv, days)
+            liq = min(float(c.get("oi") or 0), float(p.get("oi") or 0))
+            spread_vals = [x.get("spread_pct") for x in (c,p) if x.get("spread_pct") is not None]
+            spread_penalty = max(spread_vals) if spread_vals else 0
+            score = (pop or 0) * 0.45 + (touch or 0) * 0.25 + min(100, liq / max(LONGVOL_MIN_LIQUIDITY_OI,1) * 50) * 0.15 + max(0, 100-spread_penalty*10) * 0.15
+            candidates.append((score, target, c, p, premium, lower, upper, pop, touch, iv))
+        if candidates:
+            best = max(candidates, key=lambda x: x[0])
+            _, target, chosen_call, chosen_put, premium, lower, upper, pop, touch, iv = best
+            selection_note = f"Auto-selected approx ±{target:.2f} delta strikes"
+        else:
+            chosen_call, chosen_put = calls[0], puts[0]
+            premium = float(chosen_call["ltp"]) + float(chosen_put["ltp"])
+            lower, upper, pop, touch, iv = float(chosen_put["strike"])-premium, float(chosen_call["strike"])+premium, None, None, None
+    else:
+        premium = float(chosen_call["ltp"] or 0) + float(chosen_put["ltp"] or 0)
+        lower, upper = spot - premium, spot + premium
+        rank = get_stock_rank(symbol) or {}
+        iv = rank.get("atm_iv_pct") or ((float(chosen_call.get("iv") or 0)+float(chosen_put.get("iv") or 0))/2)
+        days = max(1, (expiry - now_ist().date()).days)
+        pop = model_expiry_probability_between(spot, lower, upper, iv, days)
+        touch = _longvol_touch_probability(spot, lower, upper, iv, days)
+
+    rank = get_stock_rank(symbol) or {}
+    movement_score, trend, movement_reasons = _longvol_movement_score(symbol, rank)
+    iv_hv = classify_iv_hv(rank.get("atm_iv_pct"), rank.get("hv_annualized_pct"))
+    days = max(1, (expiry - now_ist().date()).days)
+    if strategy_type == "long_strangle" and 'premium' not in locals():
+        premium = float(chosen_call["ltp"]) + float(chosen_put["ltp"])
+        lower, upper = float(chosen_put["strike"]) - premium, float(chosen_call["strike"]) + premium
+        iv = rank.get("atm_iv_pct")
+        pop = model_expiry_probability_between(spot, lower, upper, iv, days) if iv else None
+        touch = _longvol_touch_probability(spot, lower, upper, iv, days) if iv else None
+
+    liquidity_oi = min(float(chosen_call.get("oi") or 0), float(chosen_put.get("oi") or 0))
+    spreads = [x.get("spread_pct") for x in (chosen_call, chosen_put) if x.get("spread_pct") is not None]
+    spread_pct = max(spreads) if spreads else None
+    liquidity_score = min(100.0, liquidity_oi / max(LONGVOL_MIN_LIQUIDITY_OI,1) * 50.0)
+    if spread_pct is not None:
+        liquidity_score = (liquidity_score + max(0.0, 100.0 - spread_pct * 10.0)) / 2
+    iv_rv_score = 50.0
+    if rank.get("hv_annualized_pct") and rank.get("atm_iv_pct"):
+        ratio = rank["hv_annualized_pct"] / max(rank["atm_iv_pct"], 0.01)
+        iv_rv_score = max(0.0, min(100.0, 50 + (ratio - 1.0) * 100))
+    ev = None
+    if pop is not None:
+        # Simple expiry EV approximation: outside the breakevens returns a weighted
+        # intrinsic proxy; inside loses the paid premium. Used for ranking, not a fill/P&L guarantee.
+        sigma = (iv or 0) / 100.0
+        T = days / 365.0
+        if sigma > 0:
+            up_move = max(upper - spot, 0)
+            dn_move = max(spot - lower, 0)
+            outside_prob = max(0.0, 1.0 - pop/100.0)
+            ev = round((outside_prob * ((up_move + dn_move) / 2.0) - (pop/100.0) * premium), 2)
+    final_score = round((pop or 0)*0.25 + movement_score*0.25 + iv_rv_score*0.15 + liquidity_score*0.10 + (touch or 0)*0.15 + (50 if ev is None else max(0,min(100,50+ev/max(premium,0.01)*50)))*0.10,1)
+    return {
+        "symbol": symbol, "spot": spot, "expiry": str(expiry), "days_to_expiry": days,
+        "lot_size": lot_size, "lots": max(1,int(lots)), "quantity": qty,
+        "strategy_type": strategy_type,
+        "legs": {"buy_call": leg(chosen_call,"buy_call"), "buy_put": leg(chosen_put,"buy_put")},
+        "total_premium_per_share": round(premium,2), "total_premium": round(premium*qty,2),
+        "max_loss": round(premium*qty,2), "breakeven_lower": round(lower,2), "breakeven_upper": round(upper,2),
+        "probability_of_profit_pct": pop, "probability_of_touch_pct": touch,
+        "movement_score": movement_score, "movement_reasons": movement_reasons,
+        "liquidity_score": round(liquidity_score,1), "min_leg_oi": int(liquidity_oi), "max_leg_spread_pct": round(spread_pct,2) if spread_pct is not None else None,
+        "iv_hv": iv_hv, "expected_move": expected_move(spot, rank.get("atm_iv_pct"), days),
+        "trend": trend, "selection_note": selection_note, "expected_value_per_share": ev,
+        "long_vol_score": final_score,
+        "event_before_expiry": get_event_before_expiry(str(expiry)),
+        "entry_event_warning": get_entry_warning(),
+        "trade_quality_label": "Excellent" if final_score>=80 else "Good" if final_score>=65 else "Watch" if final_score>=50 else "Avoid",
+        "model_note": "POP/EV/touch probability are model estimates, not guarantees; payoff assumes expiry unless explicitly simulated."
+    }
+
+
+@app.route("/api/longvol/build/<symbol>")
+def longvol_build(symbol):
+    if not require_session():
+        return jsonify({"error":"not_logged_in"}),401
+    strategy_type = request.args.get("strategy_type", LONGVOL_DEFAULT_STRATEGY)
+    if strategy_type not in ("long_straddle","long_strangle"):
+        return jsonify({"error":"strategy_type must be long_straddle or long_strangle"}),400
+    lots = int(request.args.get("lots",1))
+    result = _longvol_build_from_chain(symbol, strategy_type, request.args.get("expiry"), lots)
+    if "error" in result: return jsonify(result),404
+    return jsonify(result)
+
+
+@app.route("/api/longvol/scan")
+def longvol_scan():
+    if not require_session():
+        return jsonify({"error":"not_logged_in"}),401
+    strategy_type = request.args.get("strategy_type", LONGVOL_DEFAULT_STRATEGY)
+    limit = max(5,min(30,int(request.args.get("limit",15))))
+    # Use the existing screener cache when available; otherwise the user can run the
+    # existing screener first. This avoids a second expensive universe-wide historical scan.
+    base = [r for r in (SCREENER_CACHE.get("results") or []) if r.get("liquidity_ok") and not r.get("fo_banned_today")]
+    if not base:
+        return jsonify({"error":"Run the existing Stock Screener once first so Long Vol AI can reuse its cached F&O universe and liquidity data."}),400
+    results=[]; errors=[]
+    for r in base[:80]:
+        try:
+            built=_longvol_build_from_chain(r["symbol"],strategy_type,None,1)
+            if "error" in built: continue
+            built["rank_from_base_screener"]=r.get("rank")
+            results.append(built)
+        except Exception as e:
+            errors.append({"symbol":r.get("symbol"),"error":str(e)})
+    results.sort(key=lambda x:x.get("long_vol_score",0),reverse=True)
+    for i,x in enumerate(results): x["rank"]=i+1
+    return jsonify({"strategy_type":strategy_type,"count":len(results),"results":results[:limit],"errors":errors[:10],"note":"Long Vol score combines model POP, current movement/trend, realized-vs-implied volatility, touch probability and option liquidity. It is a ranking heuristic, not a guarantee."})
+
+
+@app.route("/api/longvol/payoff/<symbol>")
+def longvol_payoff(symbol):
+    if not require_session(): return jsonify({"error":"not_logged_in"}),401
+    strategy_type=request.args.get("strategy_type",LONGVOL_DEFAULT_STRATEGY)
+    lots=int(request.args.get("lots",1))
+    built=_longvol_build_from_chain(symbol,strategy_type,request.args.get("expiry"),lots)
+    if "error" in built: return jsonify(built),404
+    spot=built["spot"]; lo=max(spot*0.80,0.01); hi=spot*1.20
+    points=[]
+    for i in range(61):
+        px=lo+(hi-lo)*i/60
+        intrinsic=max(px-built["legs"]["buy_call"]["strike"],0)+max(built["legs"]["buy_put"]["strike"]-px,0)
+        pnl=(intrinsic-built["total_premium_per_share"])*built["quantity"]
+        points.append({"price":round(px,2),"pnl":round(pnl,2)})
+    return jsonify({"build":built,"points":points})
+
+
+@app.route("/api/longvol/simulate",methods=["POST"])
+def longvol_simulate():
+    if not require_session(): return jsonify({"error":"not_logged_in"}),401
+    body=request.json or {}
+    symbol=str(body.get("symbol","")).upper()
+    if not symbol: return jsonify({"error":"symbol required"}),400
+    strategy_type=body.get("strategy_type",LONGVOL_DEFAULT_STRATEGY)
+    built=_longvol_build_from_chain(symbol,strategy_type,body.get("expiry"),int(body.get("lots",1)))
+    if "error" in built: return jsonify(built),404
+    spot=float(body.get("spot",built["spot"]))
+    iv_change=float(body.get("iv_change_pct",0))/100.0
+    days_elapsed=max(0,int(body.get("days_elapsed",0)))
+    remaining=max(0,built["days_to_expiry"]-days_elapsed)
+    current_iv=max(0.001,(built.get("iv_hv") or {}).get("ratio",1.0)*0.01)
+    base_iv=(get_stock_rank(symbol) or {}).get("atm_iv_pct")
+    if base_iv: current_iv=max(0.001,base_iv/100.0*(1+iv_change))
+    rows=[]
+    for move in body.get("moves_pct",[-5,-3,-2,0,2,3,5]):
+        final_spot=spot*(1+float(move)/100.0)
+        T=max(remaining,0)/365.0
+        call=built["legs"]["buy_call"]; put=built["legs"]["buy_put"]
+        call_v=bs_price(final_spot,call["strike"],T,RISK_FREE_RATE,current_iv,"CE")
+        put_v=bs_price(final_spot,put["strike"],T,RISK_FREE_RATE,current_iv,"PE")
+        pnl=(call_v+put_v-built["total_premium_per_share"])*built["quantity"]
+        rows.append({"move_pct":float(move),"final_spot":round(final_spot,2),"estimated_pnl":round(pnl,2)})
+    return jsonify({"symbol":symbol,"strategy_type":strategy_type,"days_elapsed":days_elapsed,"iv_change_pct":body.get("iv_change_pct",0),"scenarios":rows,"note":"Simulation uses Black-Scholes revaluation with the selected IV shock; actual fills, slippage and volatility-surface changes can differ."})
+
+
+@app.route("/api/longvol/watchlist/add",methods=["POST"])
+def longvol_watchlist_add():
+    if not require_session(): return jsonify({"error":"not_logged_in"}),401
+    body=request.json or {}; symbol=str(body.get("symbol","")).upper()
+    built=_longvol_build_from_chain(symbol,body.get("strategy_type",LONGVOL_DEFAULT_STRATEGY),body.get("expiry"),int(body.get("lots",1)))
+    if "error" in built: return jsonify(built),404
+    today=now_ist().date().isoformat()
+    position={"id":f"LV_{symbol}_{int(time.time())}","symbol":symbol,"added_on":today,"entry_spot":built["spot"],"expiry":built["expiry"],"lot_size":built["lot_size"],"lots":built["lots"],"quantity":built["quantity"],"strategy_type":built["strategy_type"],"legs":built["legs"],"entry_net_debit_per_share":built["total_premium_per_share"],"entry_max_loss":built["max_loss"],"breakeven_lower":built["breakeven_lower"],"breakeven_upper":built["breakeven_upper"],"entry_estimated_charges":0,"broker_orders":[],"longvol":True,"auto_monitor":False,"monitor_mode":"paper","stop_loss_pct":LONGVOL_STOP_LOSS_PCT,"profit_target_pct":LONGVOL_PROFIT_TARGET_PCT,"history":[{"date":today,"spot":built["spot"],"pnl":0.0,"current_debit_per_share":built["total_premium_per_share"]}]}
+    positions=load_positions(); positions.append(position); save_positions(positions)
+    return jsonify({"ok":True,"position":position})
+
+
+def _longvol_mark_to_market(position):
+    keys=["buy_call","buy_put"]; quantity=position.get("quantity",position.get("lot_size",1))
+    quotes=kite_quote_bulk([f"NFO:{position['legs'][k]['tradingsymbol']}" for k in keys],force_refresh=True)
+    prices={}; missing=[]
+    for k in keys:
+        price=extract_price(quotes.get(f"NFO:{position['legs'][k]['tradingsymbol']}")); prices[k]=price
+        if price is None: missing.append(k)
+    if missing: return {"__error__":"No usable live price for: "+", ".join(missing)}
+    current=sum(prices.values()); entry=position["entry_net_debit_per_share"]; pnl=round((current-entry)*quantity,2)
+    spot,err=get_spot_price(position["symbol"])
+    if err:return {"__error__":err["error"]}
+    days=max(0,(datetime.strptime(position["expiry"],"%Y-%m-%d").date()-now_ist().date()).days)
+    rank=get_stock_rank(position["symbol"]) or {}; iv=rank.get("atm_iv_pct")
+    pop=model_expiry_probability_between(spot,position["breakeven_lower"],position["breakeven_upper"],iv,days) if iv and days else None
+    loss_pct=max(0,-pnl/(entry*quantity)*100) if entry*quantity else 0
+    gain_pct=max(0,pnl/(entry*quantity)*100) if entry*quantity else 0
+    action="HOLD"; reasons=[]
+    if gain_pct>=position.get("profit_target_pct",LONGVOL_PROFIT_TARGET_PCT): action="BOOK_PROFIT"; reasons.append(f"Profit target reached ({gain_pct:.1f}% of premium).")
+    elif loss_pct>=position.get("stop_loss_pct",LONGVOL_STOP_LOSS_PCT): action="STOP_LOSS"; reasons.append(f"Loss limit reached ({loss_pct:.1f}% of premium).")
+    elif days<=1: action="EXIT"; reasons.append("Expiry is within 1 day; time decay/expiry risk is high.")
+    elif spot<=position["breakeven_lower"] or spot>=position["breakeven_upper"]: action="HOLD"; reasons.append("Spot is beyond a model breakeven; revaluation remains favourable if movement persists.")
+    else: reasons.append("Movement thesis remains open; no exit threshold reached.")
+    return {"spot":spot,"pnl":pnl,"current_debit_per_share":round(current,2),"days_left":days,"probability_of_profit_pct":pop,"gain_pct_of_premium":round(gain_pct,1),"loss_pct_of_premium":round(loss_pct,1),"action":action,"action_reasons":reasons,"legs_current":{k:{"current_price":round(prices[k],2),"pnl":round((prices[k]-position["legs"][k]["ltp"])*quantity,2)} for k in keys}}
+
+
+@app.route("/api/longvol/monitor")
+def longvol_monitor():
+    if not require_session(): return jsonify({"error":"not_logged_in"}),401
+    positions=load_positions(); out=[]
+    for p in positions:
+        if not p.get("longvol"): continue
+        try: out.append({**p,"current":_longvol_mark_to_market(p)})
+        except Exception as e: out.append({**p,"current":{"__error__":str(e)}})
+    return jsonify({"positions":out,"refreshed_at":now_ist().isoformat(),"note":"Monitor generates a decision; it does not silently place real orders."})
+
+
+@app.route("/api/longvol/config",methods=["POST"])
+def longvol_config():
+    if not require_session(): return jsonify({"error":"not_logged_in"}),401
+    body=request.json or {}
+    state={"enabled":bool(body.get("enabled",False)),"mode":body.get("mode","paper"),
+           "auto_execute":bool(body.get("auto_execute",False)),
+           "profit_target_pct":float(body.get("profit_target_pct",LONGVOL_PROFIT_TARGET_PCT)),
+           "stop_loss_pct":float(body.get("stop_loss_pct",LONGVOL_STOP_LOSS_PCT))}
+    if state["mode"] not in ("paper","live"): return jsonify({"error":"mode must be paper or live"}),400
+    if state["mode"]=="live" and (body.get("ack") is not True or state["auto_execute"] is not True):
+        return jsonify({"error":"Live automatic execution requires explicit acknowledgement and auto_execute:true"}),400
+    Path(LONGVOL_STATE_FILE).write_text(json.dumps(state,indent=2))
+    return jsonify({"ok":True,"state":state})
+
+
+@app.route("/api/longvol/auto-cycle")
+def longvol_auto_cycle():
+    """Evaluate tracked Long Vol positions. In paper mode it only returns decisions.
+    In live+auto_execute mode it may close a tracked position when the decision engine
+    returns BOOK_PROFIT, STOP_LOSS or EXIT. It never opens a new position automatically."""
+    if not require_session(): return jsonify({"error":"not_logged_in"}),401
+    try: state=json.loads(Path(LONGVOL_STATE_FILE).read_text())
+    except Exception: state={"enabled":False,"mode":"paper","auto_execute":False}
+    positions=load_positions(); results=[]
+    for p in positions:
+        if not p.get("longvol"): continue
+        try: current=_longvol_mark_to_market(p)
+        except Exception as e: results.append({"id":p.get("id"),"symbol":p.get("symbol"),"error":str(e)}); continue
+        action=current.get("action","HOLD"); executed=False; exec_results=[]
+        if state.get("enabled") and state.get("mode")=="live" and state.get("auto_execute") and action in ("BOOK_PROFIT","STOP_LOSS","EXIT"):
+            close_legs=[]
+            qty=p.get("quantity",p.get("lot_size",1))
+            for k in ("buy_call","buy_put"):
+                close_legs.append({"leg":k,"tradingsymbol":p["legs"][k]["tradingsymbol"],"transaction_type":"SELL","quantity":qty,"price":p["legs"][k].get("ltp")})
+            exec_results=place_basket_orders(close_legs,"NRML","MARKET",sequence_for_margin=False)
+            executed=any(x.get("status")=="placed" for x in exec_results)
+            p["broker_orders"]=p.get("broker_orders",[])+exec_results
+            if executed: p["auto_last_action"]=action; p["auto_last_action_at"]=now_ist().isoformat()
+        results.append({"id":p.get("id"),"symbol":p.get("symbol"),"action":action,"executed":executed,"current":current,"execution":exec_results})
+    save_positions(positions)
+    return jsonify({"enabled":state.get("enabled",False),"mode":state.get("mode","paper"),"auto_execute":state.get("auto_execute",False),"results":results,"refreshed_at":now_ist().isoformat(),"note":"Live auto mode only closes existing tracked Long Vol positions; it never auto-opens a new trade."})
+
+
 @app.route("/api/strategy/<symbol>")
 def strategy(symbol):
     if not require_session():
@@ -3330,6 +3689,8 @@ def mark_to_market_calendar(position):
 
 
 def mark_to_market(position):
+    if position.get("longvol"):
+        return _longvol_mark_to_market(position)
     if position.get("strategy_type") == "double_calendar":
         return mark_to_market_calendar(position)
 
@@ -3493,6 +3854,8 @@ def leg_keys_for(position):
         return ["sell_call", "buy_call", "sell_put", "buy_put"]
     if st == "double_calendar":
         return ["sell_call_near", "sell_put_near", "buy_call_far", "buy_put_far"]
+    if st in ("long_straddle", "long_strangle"):
+        return ["buy_call", "buy_put"]
     return ["sell_call", "sell_put"]
 
 
