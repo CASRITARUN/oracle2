@@ -7158,8 +7158,6 @@ AI_OPTION_CAPTURE_DAYS = int(os.environ.get("AI_OPTION_CAPTURE_DAYS", "0"))  # 0
 # that direction into a liquid CE/PE purchase.  This is intentionally paper-only.
 AI_DIRECTIONAL_ENABLED = os.environ.get("AI_DIRECTIONAL_ENABLED", "1").lower() not in ("0", "false", "no")
 AI_DIRECTIONAL_PAPER_ONLY = True
-# Legacy AI paper-entry loop is disabled; the dedicated AI Auto BUY/SELL engine below owns entries.
-AI_LEGACY_AUTO_PAPER = os.environ.get("AI_LEGACY_AUTO_PAPER", "0").lower() not in ("0", "false", "no")
 AI_DIRECTIONAL_UP_PROB = float(os.environ.get("AI_DIRECTIONAL_UP_PROB", "0.55"))
 AI_DIRECTIONAL_DOWN_PROB = float(os.environ.get("AI_DIRECTIONAL_DOWN_PROB", "0.45"))
 AI_DIRECTIONAL_MIN_SCORE = float(os.environ.get("AI_DIRECTIONAL_MIN_SCORE", "55.0"))
@@ -7263,7 +7261,6 @@ def ai_init_db():
     CREATE TABLE IF NOT EXISTS ai_hist_candles(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,interval TEXT,open REAL,high REAL,low REAL,close REAL,volume REAL,oi REAL,UNIQUE(symbol,interval,ts));
     CREATE TABLE IF NOT EXISTS ai_hist_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,interval TEXT,rows_added INTEGER,status TEXT,detail TEXT);
     CREATE TABLE IF NOT EXISTS ai_hist_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,symbols TEXT,interval TEXT,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,status TEXT,lookback_days INTEGER);
-    CREATE TABLE IF NOT EXISTS ai_hist_ml_model(id INTEGER PRIMARY KEY CHECK(id=1),updated_at TEXT,weights TEXT,bias REAL,samples INTEGER,train_samples INTEGER,validation_samples INTEGER,accuracy REAL,auc REAL,status TEXT,feature_version TEXT);
     CREATE TABLE IF NOT EXISTS ai_option_snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,symbol TEXT,expiry TEXT,strike REAL,option_type TEXT,tradingsymbol TEXT,token INTEGER,spot REAL,ltp REAL,bid REAL,ask REAL,mid REAL,spread_pct REAL,volume REAL,oi REAL,iv REAL,delta REAL,source TEXT,UNIQUE(ts,symbol,expiry,strike,option_type));
     CREATE INDEX IF NOT EXISTS idx_ai_option_snapshots_symbol_ts ON ai_option_snapshots(symbol,ts);
     CREATE INDEX IF NOT EXISTS idx_ai_option_snapshots_contract_ts ON ai_option_snapshots(tradingsymbol,ts);
@@ -7435,34 +7432,23 @@ def ai_directional_snapshot(symbol, params=None):
         return None, {"error": f"index data not ready: {seq_err}", "decision": "WAIT"}
     seq = live_seq["sequence"]
     dl_prob, dl_model = ai_dl_predict_sequence(seq)
-    hist_ml_prob, hist_ml_model = ai_hist_ml_predict(features)
     ml_prob, ml_model = ai_ml_predict(features)
 
-    # Direction is a historical-index task. GRU and historical ML both predict
-    # the same target (future index close > current close). The paper-outcome ML
-    # remains separate and is used only downstream for option target/stop EV.
-    if int(hist_ml_model.get("samples",0)) > 0:
-        directional_prob = 0.60*float(dl_prob) + 0.40*float(hist_ml_prob)
-    else:
-        directional_prob = float(dl_prob)
-
-    if directional_prob >= AI_DIRECTIONAL_UP_PROB:
+    # Historical GRU target: 1 = future index close above current close.
+    if dl_prob >= AI_DIRECTIONAL_UP_PROB:
         direction = "UP"
         option_type = "CE"
-        confidence = directional_prob
-    elif directional_prob <= AI_DIRECTIONAL_DOWN_PROB:
+        confidence = dl_prob
+    elif dl_prob <= AI_DIRECTIONAL_DOWN_PROB:
         direction = "DOWN"
         option_type = "PE"
-        confidence = 1.0 - directional_prob
+        confidence = 1.0 - dl_prob
     else:
         return None, {
-            "error": f"Directional consensus uncertain: p_up={directional_prob:.3f} GRU={dl_prob:.3f} HIST_ML={hist_ml_prob:.3f}",
+            "error": f"GRU direction uncertain: p_up={dl_prob:.3f}",
             "decision": "WAIT",
-            "p_up": round(directional_prob, 4),
-            "dl_probability": round(float(dl_prob),4),
-            "hist_ml_probability": round(float(hist_ml_prob),4),
+            "p_up": round(dl_prob, 4),
             "dl_samples": int(dl_model.get("samples", 0)),
-            "hist_ml_samples": int(hist_ml_model.get("samples", 0)),
         }
 
     # Confidence is the primary learned signal.  Momentum/trend are supporting
@@ -7592,7 +7578,6 @@ def ai_directional_snapshot(symbol, params=None):
         "option_ltp": ltp,
         "option_bid": bid,
         "option_ask": ask,
-        "option_delta": target.get("delta"),
         "option_volume": volume_opt,
         "option_oi": int(target.get("oi") or 0),
         "spread_pct": spread_pct,
@@ -7682,107 +7667,18 @@ def _norm_feature(name, value):
     return max(-1.0,min(1.0,v))
 
 def ai_ml_features(snapshot):
-    f=snapshot.get("ml_features") or {}
-    # Directional ML is trained on index candles; historical candles have no
-    # option-chain PCR/IV. Keep those two slots neutral here as well. PCR/IV
-    # still participate downstream in option selection and EV/risk scoring.
-    vals=[]
-    for n in ML_FEATURE_NAMES:
-        v=f.get(n,0)
-        if n=="pcr_norm": v=1.0
-        elif n=="iv_norm": v=0.0
-        vals.append(round(_norm_feature(n,v),6))
-    return vals
-
-def ai_hist_ml_model():
-    """Historical directional ML model trained only from the index archive.
-
-    Target: future index close > current close after AI_HIST_HORIZON_BARS.
-    This model is deliberately separate from the paper-outcome ML model so
-    target semantics never get mixed.  It is the historical ML companion to
-    the historical GRU and is used for live directional consensus.
-    """
-    c=ai_db(); r=c.execute("SELECT * FROM ai_hist_ml_model WHERE id=1").fetchone(); c.close()
-    if not r:
-        return {"status":"NOT_TRAINED","samples":0,"train_samples":0,"validation_samples":0,"accuracy":0.0,"auc":0.0,"weights":[0.0]*len(ML_FEATURE_NAMES),"bias":0.0,"updated_at":None,"feature_version":FEATURE_ENGINE_VERSION}
-    try: w=json.loads(r["weights"] or "[]")
-    except Exception: w=[]
-    if len(w)!=len(ML_FEATURE_NAMES):
-        return {"status":"RETRAIN_REQUIRED","samples":int(r["samples"] or 0),"train_samples":int(r["train_samples"] or 0),"validation_samples":int(r["validation_samples"] or 0),"accuracy":float(r["accuracy"] or 0),"auc":float(r["auc"] or 0),"weights":[0.0]*len(ML_FEATURE_NAMES),"bias":0.0,"updated_at":r["updated_at"],"feature_version":r["feature_version"] if "feature_version" in r.keys() else None}
-    return {"status":r["status"] or "READY","samples":int(r["samples"] or 0),"train_samples":int(r["train_samples"] or 0),"validation_samples":int(r["validation_samples"] or 0),"accuracy":float(r["accuracy"] or 0),"auc":float(r["auc"] or 0),"weights":w,"bias":float(r["bias"] or 0),"updated_at":r["updated_at"],"feature_version":r["feature_version"] if "feature_version" in r.keys() else None}
-
-def ai_hist_ml_predict(features):
-    m=ai_hist_ml_model()
-    x=np.asarray(ai_ml_features(features),dtype=float)
-    if m.get("status") in ("NOT_TRAINED","RETRAIN_REQUIRED") or int(m.get("samples",0))<=0:
-        return 0.5,m
-    p=_sigmoid(float(m.get("bias",0))+float(np.dot(np.asarray(m.get("weights",[]),dtype=float),x)))
-    return float(p),m
-
-def _hist_ml_training_matrix(symbol):
-    c=ai_db(); rows=c.execute("SELECT ts,close,high,low,volume FROM ai_hist_candles WHERE symbol=? AND interval=? ORDER BY ts",(symbol,AI_HIST_INTERVAL)).fetchall(); c.close()
-    need=AI_HIST_HORIZON_BARS+25
-    if len(rows)<need:return [],[] ,[]
-    arrays={"close":np.asarray([float(r[1]) for r in rows],dtype=float),"high":np.asarray([float(r[2]) for r in rows],dtype=float),"low":np.asarray([float(r[3]) for r in rows],dtype=float),"volume":np.asarray([float(r[4] or 0) for r in rows],dtype=float)}
-    usable=len(rows)-AI_HIST_HORIZON_BARS
-    max_points=AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL
-    step=max(1,usable//max_points)
-    candidates=list(range(20,usable,step))
-    if candidates and candidates[-1] != usable-1:candidates.append(usable-1)
-    X=[];Y=[];T=[]
-    for i in candidates:
-        f=_hist_feature_row(rows,i,arrays)
-        if not f:continue
-        cur=float(rows[i][1]); fut=float(rows[i+AI_HIST_HORIZON_BARS][1])
-        if cur<=0 or fut<=0 or not np.isfinite(cur) or not np.isfinite(fut):continue
-        # Historical ML has no option-chain information. Keep PCR/IV at the same
-        # neutral values that live ML uses after the distribution-unification fix.
-        x=[_norm_feature(n,f.get(n,0)) for n in ML_FEATURE_NAMES]
-        X.append(x);Y.append(1 if fut>cur else 0);T.append(str(rows[i][0]))
-    return X,Y,T
-
-def _hist_ml_train_arrays(Xtr,Ytr,Xv,Yv,epochs=180,lr=0.05):
-    Xtr=np.asarray(Xtr,dtype=float);Ytr=np.asarray(Ytr,dtype=float);Xv=np.asarray(Xv,dtype=float);Yv=np.asarray(Yv,dtype=float)
-    if len(Xtr)<2 or len(set(Ytr.astype(int).tolist()))<2 or len(Xv)<2 or len(set(Yv.astype(int).tolist()))<2:return None
-    w=np.zeros(Xtr.shape[1],dtype=float);b=0.0
-    for _ in range(max(20,int(epochs))):
-        pr=_dl_sigmoid_vec(Xtr@w+b);err=pr-Ytr
-        w-=lr*(Xtr.T@err)/len(Xtr);b-=lr*float(np.mean(err))
-    pv=_dl_sigmoid_vec(Xv@w+b)
-    acc=float(np.mean((pv>=0.5)==(Yv>=0.5))*100);auc=float(_dl_auc(Yv.astype(int),pv))
-    return w,b,acc,auc
-
-def ai_hist_ml_train(force=False):
-    """Train directional ML from the complete available historical archive.
-    Each symbol contributes a chronological 80/20 split; validation is never
-    used for fitting.  The resulting model is the historical ML brain used by
-    the live directional ensemble."""
-    c=ai_db(); r=c.execute("SELECT value FROM ai_runtime WHERE key='hist_ml_training_started_at'").fetchone(); c.close()
-    try:
-        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_training_started_at',?)",(datetime.now(IST).isoformat(),));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("BUILDING HISTORICAL ML DATASET",));c.commit();c.close()
-        pooled_tr=[];pooled_ty=[];pooled_v=[];pooled_vy=[];per_symbol={};total=0
-        for sym in AI_HIST_SYMBOLS:
-            X,Y,T=_hist_ml_training_matrix(sym); per_symbol[sym]=len(X); total+=len(X)
-            if len(X)<20 or len(set(Y))<2:
-                continue
-            # Per-symbol chronological split prevents a large symbol from making
-            # the validation set effectively a single-symbol afterthought.
-            cut=max(10,int(len(X)*0.8));cut=min(cut,len(X)-1)
-            if len(set(Y[:cut]))<2 or len(set(Y[cut:]))<2: continue
-            pooled_tr.extend(X[:cut]);pooled_ty.extend(Y[:cut]);pooled_v.extend(X[cut:]);pooled_vy.extend(Y[cut:])
-        if len(pooled_tr)<AI_HIST_MIN_TRAIN or len(set(pooled_ty))<2 or len(set(pooled_vy))<2:
-            detail=f"samples={total} train={len(pooled_tr)} validation={len(pooled_v)} need={AI_HIST_MIN_TRAIN} per_symbol={per_symbol}"
-            c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("READY — NEED MORE HISTORICAL DATA",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_detail',?)",(detail,));c.commit();c.close();return ai_hist_ml_model()
-        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("TRAINING HISTORICAL ML",));c.commit();c.close()
-        trained=_hist_ml_train_arrays(pooled_tr,pooled_ty,pooled_v,pooled_vy,epochs=int(ai_params().get("historical_ml_epochs",180)),lr=float(ai_params().get("historical_ml_learning_rate",0.05)))
-        if not trained: raise RuntimeError("historical ML training could not form two-class chronological folds")
-        w,b,acc,auc=trained;updated=datetime.now(IST).isoformat()
-        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_hist_ml_model(id,updated_at,weights,bias,samples,train_samples,validation_samples,accuracy,auc,status,feature_version) VALUES(1,?,?,?,?,?,?,?,?,?,?)",(updated,json.dumps(w.tolist()),float(b),total,len(pooled_tr),len(pooled_v),acc,auc,"HISTORICAL_PRETRAINED",FEATURE_ENGINE_VERSION));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("HISTORICAL ML PRETRAINED — PAPER LEARNING CAN CONTINUE",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_detail',?)",(f"samples={total} train={len(pooled_tr)} validation={len(pooled_v)} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_last_train_at',?)",(updated,));c.commit();c.close()
-        ai_log("LEARNING","HISTORICAL_ML_PRETRAIN",f"samples={total} train={len(pooled_tr)} validation={len(pooled_v)} accuracy={acc:.1f}% auc={auc:.3f}")
-        return ai_hist_ml_model()
-    except Exception as e:
-        ai_log("ERROR","HISTORICAL_ML_TRAIN",f"{type(e).__name__}: {e}")
-        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_status',?)",("TRAINING ERROR — RETRYING",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_ml_detail',?)",(str(e),));c.commit();c.close();return ai_hist_ml_model()
+    # `snapshot` is passed as the FLAT feature dict itself at every call site in
+    # this file (ai_market_pattern_features(...) return value) -- never as a
+    # wrapper containing a nested "ml_features" key. The previous version of
+    # this function assumed the wrapper shape and therefore always fell back to
+    # an all-zero vector, silently neutralising Model A's real market features
+    # for both prediction and training. Handle the actual (flat) shape, while
+    # staying tolerant of a wrapper if one is ever passed.
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("ml_features"), dict):
+        f = snapshot["ml_features"]
+    else:
+        f = snapshot if isinstance(snapshot, dict) else {}
+    return [round(_norm_feature(n,f.get(n,0)),6) for n in ML_FEATURE_NAMES]
 
 def ai_ml_model():
     c=ai_db(); r=c.execute("SELECT * FROM ai_ml_model WHERE id=1").fetchone(); c.close()
@@ -8614,340 +8510,6 @@ def ai_learning_state():
     }
 
 
-
-# ============================================================================
-# AUTONOMOUS BUY / SELL ENGINE — PAPER FIRST, LIVE AFTER OUT-OF-SAMPLE EDGE
-# ============================================================================
-# This is deliberately separate from the legacy AI paper tracker.  It provides
-# one state machine for automatic BUY/HOLD/REDUCE/SELL decisions and can run in
-# PAPER or LIVE mode.  LIVE is always locked until explicit arming AND a
-# demonstrated out-of-sample edge are both present.
-
-AI_AUTO_DB_TABLE = "ai_auto_trades"
-AI_AUTO_DEFAULTS = {
-    "auto_enabled": 1,
-    "execution_mode": "paper",
-    "poll_seconds": 20,
-    "max_positions": 2,
-    "lots_per_trade": 1,
-    "paper_capital": 1000000.0,
-    "risk_per_trade_pct": 0.50,
-    "max_daily_loss_pct": 1.50,
-    "entry_confidence": 0.64,
-    "min_direction_edge": 0.12,
-    "min_expected_value_r": 0.20,
-    "max_spread_pct": 4.0,
-    "min_option_volume": 25,
-    "stop_pct": 20.0,
-    "target_pct": 35.0,
-    "max_hold_minutes": 90,
-    "reduce_at_r": 0.80,
-    "reduce_fraction": 0.50,
-    "live_min_paper_trades": 60,
-    "live_min_validation_samples": 100,
-    "live_min_validation_auc": 0.56,
-    "live_min_profit_factor": 1.15,
-    "live_min_avg_r": 0.05,
-    "live_min_win_rate": 50.0,
-    "live_daily_loss_pct": 0.75,
-    "live_max_lots": 1,
-    "live_order_type": "MARKET",
-    "live_armed": 0,
-    "live_arm_phrase": "ARM-AI-LIVE",
-}
-
-def ai_auto_init_db():
-    c=ai_db()
-    c.execute("""CREATE TABLE IF NOT EXISTS ai_auto_trades(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, option_symbol TEXT,
-        token INTEGER, option_type TEXT, direction TEXT, mode TEXT, status TEXT,
-        entry REAL, exit REAL, qty INTEGER, stop REAL, target REAL, pnl REAL DEFAULT 0,
-        r_multiple REAL DEFAULT 0, entry_spot REAL, exit_spot REAL, confidence REAL,
-        expected_value_r REAL, decision TEXT, reason TEXT, last_action TEXT,
-        reduced_qty INTEGER DEFAULT 0, mfe REAL DEFAULT 0, mae REAL DEFAULT 0,
-        setup_json TEXT, entry_order_id TEXT, exit_order_id TEXT, exit_ts TEXT,
-        exit_reason TEXT
-    )""")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_ai_auto_status ON ai_auto_trades(status)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_ai_auto_symbol_status ON ai_auto_trades(symbol,status)")
-    for k,v in AI_AUTO_DEFAULTS.items():
-        c.execute("INSERT OR IGNORE INTO ai_settings(key,value) VALUES(?,?)",(f"auto_{k}",str(v)))
-    c.commit(); c.close()
-
-def ai_auto_settings():
-    p=dict(AI_AUTO_DEFAULTS); c=ai_db()
-    rows=c.execute("SELECT key,value FROM ai_settings WHERE key LIKE 'auto_%'").fetchall(); c.close()
-    for r in rows:
-        k=r['key'][5:]; val=r['value']
-        if k in ("execution_mode","live_order_type","live_arm_phrase"): p[k]=val
-        elif k in ("auto_enabled","live_armed"): p[k]=int(float(val))
-        else:
-            try: p[k]=float(val)
-            except: pass
-    return p
-
-def ai_auto_set(k,v):
-    c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_settings(key,value) VALUES(?,?)",(f"auto_{k}",str(v))); c.commit(); c.close()
-
-def ai_auto_open_trades():
-    c=ai_db(); rows=c.execute("SELECT * FROM ai_auto_trades WHERE status IN ('OPEN','REDUCED') ORDER BY id").fetchall(); c.close(); return [dict(r) for r in rows]
-
-def ai_auto_metrics():
-    c=ai_db(); rows=c.execute("SELECT * FROM ai_auto_trades WHERE status='CLOSED' ORDER BY id").fetchall(); c.close()
-    rows=[dict(r) for r in rows]; pnl=[float(r.get('pnl') or 0) for r in rows]; rs=[float(r.get('r_multiple') or 0) for r in rows]
-    wins=[x for x in pnl if x>0]; losses=[x for x in pnl if x<0]
-    return {"trades":len(rows),"wins":len(wins),"win_rate":round(len(wins)/len(rows)*100,2) if rows else 0,
-            "avg_r":round(sum(rs)/len(rs),3) if rs else 0,
-            "profit_factor":round(sum(wins)/abs(sum(losses)),2) if losses else (99 if wins else 0),
-            "pnl":round(sum(pnl),2), "gross_profit":round(sum(wins),2), "gross_loss":round(abs(sum(losses)),2)}
-
-def ai_auto_validation_edge():
-    """Strict live gate: paper evidence + chronological holdout + positive economics."""
-    p=ai_auto_settings(); m=ai_auto_metrics(); cmp=ai_model_compare_status() or {}
-    hist=ai_hist_status() or {}; model=hist.get('model') or {}
-    val_samples=int(model.get('validation_samples') or 0)
-    auc=float(model.get('auc') or 0)
-    checks={
-        "paper_trades": m['trades'] >= int(p['live_min_paper_trades']),
-        "validation_samples": val_samples >= int(p['live_min_validation_samples']),
-        "validation_auc": auc >= float(p['live_min_validation_auc']),
-        "profit_factor": m['profit_factor'] >= float(p['live_min_profit_factor']),
-        "avg_r": m['avg_r'] >= float(p['live_min_avg_r']),
-        "win_rate": m['win_rate'] >= float(p['live_min_win_rate']),
-    }
-    return {"qualified":all(checks.values()),"checks":checks,"metrics":m,"validation":{"samples":val_samples,"auc":auc},"champion":cmp.get('champion')}
-
-def ai_auto_live_allowed():
-    p=ai_auto_settings(); e=ai_auto_validation_edge()
-    return bool(int(p.get('live_armed',0))) and e['qualified'] and p.get('execution_mode')=='live'
-
-def ai_auto_today_pnl():
-    today=now_ist().date().isoformat(); c=ai_db(); r=c.execute("SELECT COALESCE(SUM(pnl),0) p FROM ai_auto_trades WHERE status='CLOSED' AND substr(exit_ts,1,10)=?",(today,)).fetchone(); c.close(); return float(r['p'] or 0)
-
-def ai_auto_option_snapshot(symbol):
-    # The autonomous engine is not allowed to start paper entries until both
-    # historical directional brains have been trained from the archive.
-    hs=ai_hist_status(); hm=ai_hist_ml_model(); hgm=hs.get("model") or {}
-    if not int(hgm.get("samples",0) or 0) or not int(hm.get("samples",0) or 0):
-        return None, "WAIT: historical GRU + ML pre-training not complete"
-    x,err=ai_directional_snapshot(symbol, ai_params())
-    if err or not x: return None, (err or "WAIT")
-    conf=float(x.get('direction_confidence') or x.get('dl_probability') or 0.5)
-    p_up=float(x.get('p_up') or x.get('dl_probability') or 0.5)
-    direction=x.get('direction')
-    edge=abs(p_up-0.5)*2
-    entry=float(x.get('entry') or 0); stop=float(x.get('stop') or 0); target=float(x.get('target') or 0)
-    risk=abs(entry-stop); reward=max(0,target-entry)
-    rr=reward/risk if risk else 0
-    ev_r=(conf*rr)-(1-conf) if rr else -1
-    spread=float(x.get('spread_pct') or 999); vol=int(x.get('option_volume') or 0)
-    # Expected move is expressed in index points; option target is checked against it.
-    em=expected_move(float(x.get('spot') or 0),float(x.get('iv') or 0),max(1,1))
-    return {**x,"confidence":conf,"direction_edge":edge,"risk":risk,"reward":reward,"rr":rr,"expected_value_r":ev_r,"expected_move":em,"expected_move_pct":(em/float(x['spot'])*100 if em and x.get('spot') else None)},None
-
-def ai_auto_should_enter(x,p):
-    if not x or x.get('direction') not in ('UP','DOWN'): return False,"WAIT: no directional edge"
-    if float(x.get('confidence') or 0)<float(p['entry_confidence']): return False,"WAIT: confidence below entry threshold"
-    if float(x.get('direction_edge') or 0)<float(p['min_direction_edge']): return False,"WAIT: directional edge too small"
-    if float(x.get('expected_value_r') or -1)<float(p['min_expected_value_r']): return False,"WAIT: expected value too low"
-    if float(x.get('spread_pct') or 999)>float(p['max_spread_pct']): return False,"WAIT: option spread too wide"
-    if int(x.get('option_volume') or 0)<int(p['min_option_volume']): return False,"WAIT: option liquidity too low"
-    if float(x.get('risk') or 0)<=0 or float(x.get('reward') or 0)<=0: return False,"WAIT: invalid risk/reward"
-    return True,"ENTRY QUALIFIED"
-
-def ai_auto_place_live(transaction_type, symbol, qty, price=None):
-    p=ai_auto_settings(); order_type=str(p.get('live_order_type','MARKET')).upper()
-    item={"leg":"AI_AUTO","exchange":"NFO","tradingsymbol":symbol,"transaction_type":transaction_type,"quantity":int(qty),"price":price}
-    results=place_basket_orders([item],"MIS",order_type,sequence_for_margin=False)
-    r=results[0] if results else {"status":"failed","error":"no broker response"}
-    if r.get('status')!='placed': return None,r.get('error','order failed')
-    oid=r.get('order_id'); fill=None
-    if oid:
-        try:
-            for z in kite.order_history(oid) or []:
-                if z.get('status')=='COMPLETE': fill=z.get('average_price') or z.get('price'); break
-        except Exception: pass
-    return float(fill or price or 0),None
-
-def ai_auto_open(x, reason):
-    p=ai_auto_settings(); mode=p.get('execution_mode','paper'); live=(mode=='live')
-    if live and not ai_auto_live_allowed(): return False,"LIVE BLOCKED: paper/out-of-sample edge gate not satisfied"
-    qty=max(1,int(x.get('lot_size') or 1))*max(1,int(p.get('lots_per_trade',1)))
-    if live: qty=max(1,int(x.get('lot_size') or 1))*min(int(p.get('live_max_lots',1)),int(p.get('lots_per_trade',1)))
-    entry=float(x['entry']); order_id=None
-    if live:
-        fill,err=ai_auto_place_live('BUY',x['option_symbol'],qty,entry)
-        if err:return False,err
-        if fill>0: entry=fill
-    stop=entry*(1-float(p['stop_pct'])/100); target=entry*(1+float(p['target_pct'])/100)
-    setup={k:v for k,v in x.items() if k not in ('dl_sequence',)}; setup['engine']='AI_AUTO_BUY_SELL'; setup['mode']=mode; setup['reason']=reason
-    c=ai_db(); cur=c.execute("INSERT INTO ai_auto_trades(ts,symbol,option_symbol,token,option_type,direction,mode,status,entry,qty,stop,target,entry_spot,confidence,expected_value_r,decision,reason,last_action,setup_json,entry_order_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-      (datetime.now(IST).isoformat(),x['symbol'],x['option_symbol'],x.get('token',0),x.get('option_type'),x.get('direction'),mode,'OPEN',entry,qty,stop,target,x.get('spot'),x.get('confidence'),x.get('expected_value_r'),'BUY',reason,'BUY',json.dumps(setup),order_id))
-    c.commit(); c.close(); ai_log('AUTO_BUY_SELL','LIVE_BUY' if live else 'PAPER_BUY',f"{x['symbol']} {x['option_symbol']} qty={qty} entry={entry:.2f} conf={x.get('confidence',0):.3f} EV={x.get('expected_value_r',0):.2f} mode={mode}")
-    return True,"OPENED"
-
-def ai_auto_close(t, price, reason, spot=None, qty=None):
-    p=ai_auto_settings(); qclose=int(qty or t['qty']); mode=t['mode']; live=(mode=='live')
-    if live:
-        fill,err=ai_auto_place_live('SELL',t['option_symbol'],qclose,price)
-        if err:return False,err
-        if fill>0: price=fill
-    entry=float(t['entry']); pnl=(price-entry)*qclose; risk=abs(entry-float(t['stop']))*qclose; rm=pnl/risk if risk else 0
-    c=ai_db(); c.execute("UPDATE ai_auto_trades SET status='CLOSED',exit=?,exit_ts=?,pnl=pnl+?,r_multiple=?,exit_spot=?,last_action='SELL',exit_reason=? WHERE id=?",(price,datetime.now(IST).isoformat(),pnl,rm,spot,reason,t['id'])); c.commit(); c.close()
-    # Every completed paper trade becomes a supervised learning observation.
-    try:
-        setup=json.loads(t.get('setup_json') or '{}'); direction_label=1 if (spot is not None and float(spot)>float(t.get('entry_spot') or spot)) else 0
-        ai_ml_record_sample(t['id'],t.get('version','AUTO'),t['symbol'],setup.get('ml_features') or {},direction_label,rm,0)
-        seq=setup.get('dl_sequence')
-        if seq: ai_dl_record_sample(t['id'],t.get('version','AUTO'),t['symbol'],seq,direction_label,rm,0)
-    except Exception as e: ai_log('ERROR','AUTO_LEARNING_SAMPLE',str(e))
-    ai_log('AUTO_BUY_SELL','LIVE_SELL' if live else 'PAPER_SELL',f"id={t['id']} {reason} pnl={pnl:.2f} R={rm:.2f}")
-    return True,"CLOSED"
-
-def ai_auto_manage():
-    """Reassess every open trade: HOLD, REDUCE, or SELL; never force a trade."""
-    for t in ai_auto_open_trades():
-        try:
-            q=kite_quote_bulk([f"NFO:{t['option_symbol']}"]).get(f"NFO:{t['option_symbol']}"); st=quote_stats(q); bid=st.get('bid')
-            if bid is None or float(bid)<=0: continue
-            price=float(bid); pnl=(price-float(t['entry']))*int(t['qty']); risk=abs(float(t['entry'])-float(t['stop']))*int(t['qty']); r=pnl/risk if risk else 0
-            setup=json.loads(t.get('setup_json') or '{}'); spot_key=INDEX_SYMBOLS.get(t['symbol'],'NSE:'+t['symbol']); sq=kite_quote_bulk([spot_key]).get(spot_key); spot=extract_price(sq) if sq else None
-            age=(now_ist()-datetime.fromisoformat(str(t['ts']).replace('Z','+00:00')).replace(tzinfo=None)).total_seconds()/60
-            if price<=float(t['stop']): ai_auto_close(t,price,'STOP_LOSS',spot); continue
-            if price>=float(t['target']): ai_auto_close(t,price,'TARGET',spot); continue
-            if age>=float(ai_auto_settings()['max_hold_minutes']): ai_auto_close(t,price,'TIME_EXIT',spot); continue
-            # Re-run the model; a reversal is more important than the original signal.
-            x,err=ai_auto_option_snapshot(t['symbol'])
-            if not err and x:
-                reversal=(t['direction']=='UP' and x['direction']=='DOWN') or (t['direction']=='DOWN' and x['direction']=='UP')
-                if reversal and float(x.get('confidence',0))>=float(ai_auto_settings()['entry_confidence']): ai_auto_close(t,price,'MODEL_REVERSAL',spot); continue
-            if r>=float(ai_auto_settings()['reduce_at_r']) and int(t['qty'])>1 and int(t.get('reduced_qty') or 0)==0:
-                reduce_qty=max(1,int(round(int(t['qty'])*float(ai_auto_settings()['reduce_fraction']))));
-                if reduce_qty<int(t['qty']):
-                    if t['mode']=='live':
-                        fill,err=ai_auto_place_live('SELL',t['option_symbol'],reduce_qty,price)
-                        if err: continue
-                        if fill>0: price=fill
-                    rpnl=(price-float(t['entry']))*reduce_qty; rr=rpnl/(risk or 1); c=ai_db();c.execute("UPDATE ai_auto_trades SET qty=qty-?,reduced_qty=?,pnl=pnl+?,last_action='REDUCE' WHERE id=?",(reduce_qty,reduce_qty,rpnl,t['id']));c.commit();c.close();ai_log('AUTO_BUY_SELL','REDUCE',f"id={t['id']} qty={reduce_qty} R={rr:.2f}"); continue
-        except Exception as e: ai_log('ERROR','AUTO_MANAGE',str(e))
-
-def ai_auto_cycle():
-    ai_auto_init_db(); p=ai_auto_settings()
-    if not int(p.get('auto_enabled',1)) or not ai_market_open() or not require_session(): return
-    ai_auto_manage(); open_now=ai_auto_open_trades()
-    if len(open_now)>=int(p['max_positions']): return
-    if ai_auto_today_pnl() <= -abs(float(p['paper_capital'])*float(p['max_daily_loss_pct'])/100):
-        ai_log('RISK','AUTO_DAILY_STOP','Daily loss limit reached; no new AI trades'); return
-    for sym in AI_SYMBOLS:
-        if len(ai_auto_open_trades())>=int(p['max_positions']): break
-        if any(t['symbol']==sym for t in ai_auto_open_trades()): continue
-        try:
-            x,err=ai_auto_option_snapshot(sym)
-            if err:
-                ai_log('AUTO_BUY_SELL','WAIT',f'{sym}: {err}'); continue
-            ok,why=ai_auto_should_enter(x,p)
-            ai_log('AUTO_BUY_SELL','SIGNAL',f"{sym}: {x.get('direction')} conf={x.get('confidence',0):.3f} EV_R={x.get('expected_value_r',0):.2f} -> {why}")
-            if ok: ai_auto_open(x,why)
-        except Exception as e: ai_log('ERROR','AUTO_CYCLE',f'{sym}: {e}')
-
-def ai_auto_loop():
-    ai_auto_init_db(); ai_log('SYSTEM','AUTO_BUY_SELL_START','Autonomous BUY/SELL engine started in PAPER mode by default')
-    while True:
-        try: ai_auto_cycle()
-        except Exception as e: ai_log('ERROR','AUTO_BUY_SELL_LOOP',str(e))
-        time.sleep(max(5,int(ai_auto_settings().get('poll_seconds',20))))
-
-def ai_historical_training_status():
-    hs=ai_hist_status(); hm=ai_hist_ml_model()
-    c=ai_db(); rows=c.execute("SELECT key,value FROM ai_runtime WHERE key IN ('hist_ml_status','hist_ml_detail','hist_ml_last_train_at')").fetchall(); c.close(); rt={r['key']:r['value'] for r in rows}
-    model=hs.get("model") or {}
-    return {
-        "archive": {"candles":int(hs.get("candles",0) or 0),"oldest":hs.get("oldest"),"newest":hs.get("newest"),"status":hs.get("status")},
-        "gru": {"status":hs.get("model_status") or model.get("status") or "NOT_TRAINED","samples":int(model.get("samples",0) or 0),"train_samples":int(model.get("train_samples",0) or 0),"validation_samples":int(model.get("validation_samples",0) or 0),"accuracy":model.get("accuracy"),"auc":model.get("auc"),"last_train_at":hs.get("last_train_at")},
-        "historical_ml": hm,
-        "ml_runtime": rt,
-    }
-
-@app.route('/api/ai-auto/status')
-def ai_auto_status():
-    ai_auto_init_db(); p=ai_auto_settings(); m=ai_auto_metrics(); edge=ai_auto_validation_edge()
-    return jsonify({"settings":p,"execution_mode":p['execution_mode'],"paper":p['execution_mode']=='paper',"live":p['execution_mode']=='live',"live_allowed":ai_auto_live_allowed(),"edge":edge,"open_trades":ai_auto_open_trades(),"metrics":m,"daily_pnl":ai_auto_today_pnl(),"market_open":ai_market_open(),"historical_training":ai_historical_training_status()})
-
-@app.route('/api/ai-evolution/train-historical',methods=['POST'])
-def ai_train_historical_api():
-    """Start full historical GRU + ML directional training in the background."""
-    ai_init_db(); hs=ai_hist_status(); total=int(hs.get("candles",0) or 0)
-    if total<AI_HIST_MIN_TRAIN:
-        return jsonify({"ok":False,"error":f"Historical archive has {total} candles; at least {AI_HIST_MIN_TRAIN} are required before training.","historical_training":ai_historical_training_status()}),400
-    threading.Thread(target=lambda: ai_train_historical_all(force=True),daemon=True,name="hist-model-train").start()
-    return jsonify({"ok":True,"status":"HISTORICAL TRAINING STARTED","historical_training":ai_historical_training_status()})
-
-@app.route('/api/ai-auto/config',methods=['POST'])
-def ai_auto_config():
-    ai_auto_init_db(); body=request.json or {}; p=ai_auto_settings(); mode=str(body.get('execution_mode',p['execution_mode'])).lower()
-    if mode not in ('paper','live'): return jsonify({"error":"execution_mode must be paper or live"}),400
-    if mode=='live' and not ai_auto_live_allowed():
-        edge=ai_auto_validation_edge(); return jsonify({"error":"LIVE mode blocked until the out-of-sample edge gate is passed and LIVE is armed.","edge":edge}),403
-    ai_auto_set('execution_mode',mode)
-    if 'auto_enabled' in body: ai_auto_set('auto_enabled',1 if body['auto_enabled'] else 0)
-    return jsonify({"ok":True,"settings":ai_auto_settings(),"edge":ai_auto_validation_edge()})
-
-@app.route('/api/ai-auto/arm-live',methods=['POST'])
-def ai_auto_arm_live():
-    ai_auto_init_db(); body=request.json or {}; p=ai_auto_settings(); phrase=str(body.get('phrase',''))
-    if phrase!=str(p.get('live_arm_phrase','ARM-AI-LIVE')): return jsonify({"error":"Invalid live-arm phrase."}),400
-    edge=ai_auto_validation_edge()
-    if not edge['qualified']: return jsonify({"error":"LIVE ARM REFUSED: out-of-sample/paper edge is not proven.","edge":edge}),403
-    ai_auto_set('live_armed',1); ai_auto_set('execution_mode','live'); ai_log('RISK','LIVE_ARMED','AI BUY/SELL live execution armed after edge gate')
-    return jsonify({"ok":True,"live_armed":True,"settings":ai_auto_settings(),"edge":edge})
-
-@app.route('/api/ai-auto/disarm-live',methods=['POST'])
-def ai_auto_disarm_live():
-    ai_auto_set('live_armed',0); ai_auto_set('execution_mode','paper'); ai_log('RISK','LIVE_DISARMED','AI BUY/SELL live execution disarmed; returned to paper')
-    return jsonify({"ok":True,"settings":ai_auto_settings()})
-
-@app.route('/api/ai-auto/trades')
-def ai_auto_trades_api():
-    ai_auto_init_db(); c=ai_db(); rows=[dict(r) for r in c.execute('SELECT * FROM ai_auto_trades ORDER BY id DESC LIMIT 200')]; c.close(); return jsonify(rows)
-
-@app.route('/api/ai-auto/decision')
-def ai_auto_decision_api():
-    ai_auto_init_db(); out=[]
-    market_open = ai_market_open()
-    if not market_open:
-        # Never expose stale model/option values as if they were live.
-        for sym in AI_SYMBOLS:
-            out.append({"symbol":sym,"decision":"MARKET_CLOSED","direction":"WAIT","option_symbol":None,
-                        "confidence":None,"expected_value_r":None,"expected_move":None,"reason":"MARKET CLOSED · LIVE KITE DATA NOT AVAILABLE",
-                        "live":False})
-        return jsonify({"market_open":False,"live":False,"timestamp":datetime.now(IST).isoformat(),"decisions":out,"edge":ai_auto_validation_edge()})
-    for sym in AI_SYMBOLS:
-        try:
-            x,err=ai_auto_option_snapshot(sym); p=ai_auto_settings(); ok,why=ai_auto_should_enter(x,p) if x else (False,err)
-            if x:
-                trend=float(x.get('trend') or 12.5); momentum=float(x.get('momentum') or 12.5)
-                if trend >= 15 and momentum >= 15: regime='TRENDING UP'
-                elif trend <= 10 and momentum <= 10: regime='TRENDING DOWN'
-                elif abs(trend-12.5)<2 and abs(momentum-12.5)<2: regime='NEUTRAL / RANGE'
-                else: regime='MIXED'
-                out.append({"symbol":sym,"decision":"BUY" if ok else "WAIT","direction":x.get('direction') or 'WAIT',
-                    "option_symbol":x.get('option_symbol'),"confidence":x.get('confidence'),"expected_value_r":x.get('expected_value_r'),
-                    "expected_move":x.get('expected_move'),"expected_move_pct":x.get('expected_move_pct'),"reason":why,"live":True,
-                    "spot":x.get('spot'),"option_ltp":x.get('option_ltp'),"option_bid":x.get('option_bid'),"option_ask":x.get('option_ask'),
-                    "option_delta":x.get('option_delta'),"option_volume":x.get('option_volume'),"option_oi":x.get('option_oi'),
-                    "spread_pct":x.get('spread_pct'),"stop":x.get('stop'),"target":x.get('target'),"rr":x.get('rr'),
-                    "p_up":x.get('p_up'),"ml_probability":x.get('ml_probability'),"dl_probability":x.get('dl_probability'),
-                    "ensemble_confidence":x.get('ensemble_confidence'),"market_regime":regime,"trend":trend,"momentum":momentum,
-                    "volatility":x.get('volatility'),"iv":x.get('iv'),"pcr":x.get('pcr')})
-            else:
-                detail = err if isinstance(err,dict) else {}
-                out.append({"symbol":sym,"decision":"WAIT","direction":"WAIT","option_symbol":None,"confidence":None,
-                    "expected_value_r":None,"expected_move":None,"reason":detail.get('error') if detail else str(err or 'NO LIVE SIGNAL'),
-                    "live":True,"p_up":detail.get('p_up'),"dl_probability":detail.get('dl_probability'),"dl_samples":detail.get('dl_samples',0)})
-        except Exception as e:
-            out.append({"symbol":sym,"decision":"WAIT","direction":"WAIT","reason":str(e),"live":True})
-    return jsonify({"market_open":True,"live":True,"timestamp":datetime.now(IST).isoformat(),"decisions":out,"edge":ai_auto_validation_edge()})
-
 def ai_cycle():
     """Run the intended index-direction -> CE/PE paper-learning cycle."""
     c = ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('last_cycle_at',?)", (datetime.now(IST).isoformat(),)); c.commit(); c.close()
@@ -8983,13 +8545,11 @@ def ai_cycle():
             ai_record_decision(champion_ver, x, "APPROVE" if not already else "REJECT", reason if not already else reason + " duplicate open position")
             if already or len(open_now) >= int(params.get("max_positions", 6)):
                 continue
-            # Dedicated AI Auto BUY/SELL engine owns automatic entries. Keep this legacy
-            # tracker available for compatibility, but do not duplicate positions by default.
-            if AI_LEGACY_AUTO_PAPER:
-                x["side"] = "LONG"
-                x["setup_json_extra"]["execution_mode"] = "track"
-                if ai_open_trade(x, champion_ver):
-                    open_now = ai_open_trades()
+            # Hard safety: directional engine can only create a LONG option paper trade.
+            x["side"] = "LONG"
+            x["setup_json_extra"]["execution_mode"] = "track"
+            if ai_open_trade(x, champion_ver):
+                open_now = ai_open_trades()
         except Exception as e:
             ai_log("ERROR", "DIRECTIONAL_SCAN", f"{sym}: {type(e).__name__}: {e}")
 
@@ -9300,10 +8860,7 @@ def ai_hist_train_deep(force=False):
         now=datetime.now(IST).isoformat();c=ai_db();hist_status="PRETRAINED" if val_samples and len(set(Y[-val_samples:].astype(int).tolist()))>=2 else "PRETRAINED — AUC UNAVAILABLE"
         c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days,feature_version) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS,FEATURE_ENGINE_VERSION))
         c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_train_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("PRETRAINED — LIVE GRU LEARNING CONTINUES",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_collector_status',?)",("HISTORY COLLECTION COMPLETE",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_train_detail',?)",(f"architecture=GRU-{DL_GRU_HIDDEN} sequence={DL_SEQUENCE_LEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",));c.commit();c.close()
-        ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}")
-        # Train the companion directional ML model from the same historical archive.
-        ai_hist_ml_train(force=force)
-        return ai_hist_status()
+        ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}");return ai_hist_status()
     except Exception as e:
         logger.exception("historical GRU pre-training failed");detail=f"{type(e).__name__}: {e}";_hist_set_model_status("TRAINING ERROR — RETRYING",detail);ai_log("ERROR","HISTORICAL_GRU_TRAIN",detail);c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",(detail,));c.commit();c.close();return ai_hist_status()
     finally:
@@ -9419,20 +8976,6 @@ def ai_hist_sync():
     c.commit();c.close();_hist_invalidate_status_cache();ai_log("DATA","HISTORICAL_SYNC_COMPLETE",f"status={overall}; results={results}")
     return {"results":results,"training":{"status":"QUEUED" if all_ok else "WAITING FOR COMPLETE HISTORY"},**ai_hist_status()}
 
-def ai_train_historical_all(force=True):
-    """Run the complete historical directional training stack.
-
-    The archive is the source for BOTH brains: chronological GRU + chronological
-    logistic ML. This is intentionally separate from paper-outcome learning.
-    """
-    hs=ai_hist_status(); total=int(hs.get("candles",0) or 0)
-    if total<AI_HIST_MIN_TRAIN:
-        return {"status":"WAITING FOR HISTORICAL ARCHIVE","candles":total,"need":AI_HIST_MIN_TRAIN}
-    model=hs.get("model") or {}
-    if not int(model.get("samples",0) or 0):
-        return ai_hist_train_deep(force=force)
-    return ai_hist_ml_train(force=force)
-
 def ai_hist_loop():
     ai_init_db()
     while True:
@@ -9447,12 +8990,10 @@ def ai_hist_loop():
                 if opt_last:
                     dt=_ai_ts_naive(opt_last);opt_due=not dt or (now_ist()-dt).total_seconds()>=AI_OPTION_CAPTURE_MINUTES*60
                 if opt_due and ai_market_open():ai_capture_option_chains()
-                hs=ai_hist_status();model=hs.get("model") or {};total=int(hs.get("candles") or 0);requested=str(hs.get("training_requested") or "0")=="1";model_missing=not int(model.get("samples") or 0);hist_ml_missing=not int(ai_hist_ml_model().get("samples") or 0);retry_due=True
+                hs=ai_hist_status();model=hs.get("model") or {};total=int(hs.get("candles") or 0);requested=str(hs.get("training_requested") or "0")=="1";model_missing=not int(model.get("samples") or 0);retry_due=True
                 if hs.get("last_train_at"):
                     dt=_ai_ts_naive(hs.get("last_train_at"));retry_due=not dt or (now_ist()-dt).total_seconds()>=AI_HIST_TRAIN_RETRY_MINUTES*60
-                if total>=AI_HIST_MIN_TRAIN and (requested or ((model_missing or hist_ml_missing) and retry_due)):
-                    if model_missing or requested: ai_hist_train_deep()
-                    elif hist_ml_missing: ai_hist_ml_train(force=False)
+                if total>=AI_HIST_MIN_TRAIN and (requested or (model_missing and retry_due)):ai_hist_train_deep()
         except Exception as e:
             ai_log("ERROR","HISTORICAL_ENGINE",f"{type(e).__name__}: {e}")
             try:
@@ -9570,7 +9111,7 @@ def ai_directional_status():
         "historical_ml": {
             "samples": 0, "accuracy": None, "auc": None,
             "status": "NOT SEPARATELY PRETRAINED",
-            "note": "Historical archive pre-trains the directional GRU and historical ML; paper outcomes are a separate downstream learning layer."
+            "note": "Historical archive is used by the GRU pre-training layer; live ML learns from completed paper outcomes."
         },
         "historical": hs,
         "open_directional_trades": [t for t in ai_open_trades() if (json.loads(t.get('setup_json') or '{}').get('strategy_type') == 'INDEX_DIRECTIONAL_LONG_OPTION')],
@@ -9584,7 +9125,7 @@ def ai_learning_progress_api():
     ai_init_db(); hs=ai_hist_status(); ml=ai_ml_model(); dl=ai_dl_model()
     total=int(hs.get('candles',0) or 0); model=hs.get('model') or {}
     hist_samples=int(model.get('samples',0) or 0); train_samples=int(model.get('train_samples',0) or 0); val_samples=int(model.get('validation_samples',0) or 0)
-    ml_samples=int(ml.get('samples',0) or 0); dl_samples=int(dl.get('samples',0) or 0); hist_ml=ai_hist_ml_model()
+    ml_samples=int(ml.get('samples',0) or 0); dl_samples=int(dl.get('samples',0) or 0)
     hist_ready=total>0 and (bool(model) or str(hs.get('status','')).upper().startswith('HISTORY COLLECTION COMPLETE'))
     ml_need=max(1,int(ai_params().get('ml_min_samples',40))); dl_need=max(1,int(ai_params().get('dl_min_samples',80)))
     live_progress=min(100.0,max(ml_samples/ml_need*100.0,dl_samples/dl_need*100.0))
@@ -9592,7 +9133,6 @@ def ai_learning_progress_api():
         'historical': {'progress':100 if hist_ready else (100 if total else 0),'status':hs.get('status','WAITING FOR KITE'),'candles':total,'oldest':hs.get('oldest'),'newest':hs.get('newest')},
         'ml': {'progress':min(100.0,ml_samples/ml_need*100.0),'status':ml.get('status','WAITING FOR PAPER OUTCOMES') if ml_samples else 'WAITING FOR PAPER OUTCOMES','samples':ml_samples,'accuracy':ml.get('accuracy'),'auc':ml.get('auc')},
         'dl': {'progress':100 if hist_samples else min(100.0,dl_samples/dl_need*100.0),'status':model.get('status') or dl.get('status') or 'NOT TRAINED','samples':hist_samples or dl_samples,'train_samples':train_samples,'validation_samples':val_samples,'accuracy':model.get('accuracy',dl.get('accuracy')),'auc':model.get('auc',dl.get('auc'))},
-        'historical_ml': {'progress':100 if int(hist_ml.get('samples',0) or 0)>0 else 0,'status':hist_ml.get('status','NOT_TRAINED'),'samples':int(hist_ml.get('samples',0) or 0),'train_samples':int(hist_ml.get('train_samples',0) or 0),'validation_samples':int(hist_ml.get('validation_samples',0) or 0),'accuracy':hist_ml.get('accuracy'),'auc':hist_ml.get('auc')},
         'validation': {'progress':100 if val_samples else 0,'status':f'{val_samples:,} chronological validation samples' if val_samples else 'WAITING'},
         'live': {'ml_samples':ml_samples,'dl_samples':dl_samples,'progress':live_progress}
     })
@@ -9658,14 +9198,636 @@ def ai_option_history_api():
 def ai_option_capture_api():
     return jsonify(ai_capture_option_chains(force=True))
 
+# =============================================================================
+# AUTOMATIC AI TRADING ENGINE -- Paper + Live (BUY CE/PE, then HOLD/REDUCE/SELL)
+# =============================================================================
+# This sits on top of the directional GRU+ML+ensemble engine above
+# (ai_directional_snapshot): same prediction, same option-selection logic, same
+# stop/target derivation. What this section adds is:
+#
+#   1. Its OWN trade ledger (ai_autotrade_trades / ai_autotrade_actions) so the
+#      always-paper "AI Evolution" research engine above is never touched and
+#      never put at risk of a regression by this addition.
+#   2. Continuous post-entry reassessment. Every poll, each open position is
+#      re-priced AND re-predicted (a fresh ai_directional_snapshot call), and
+#      the engine decides HOLD / REDUCE / SELL from stop, target, square-off
+#      time, max hold time, signal reversal, or a confidence-decay check --
+#      not just a static stop/target hit.
+#   3. An explicit PAPER (default, always on) vs LIVE execution mode. LIVE can
+#      only be selected once THIS engine's own paper track record clears a
+#      configurable out-of-sample edge bar (min trades, min span of days, min
+#      win rate, min average R, min profit factor) -- see
+#      autotrade_ai_edge_status(). Even after that, LIVE only ever places a
+#      real order after an explicit arm + acknowledgement, exactly like the
+#      /api/autotrade and /api/breakout-monitor engines elsewhere in this file.
+#   4. Every completed trade (paper AND live) is fed back into the SAME
+#      ai_ml_record_sample()/ai_dl_record_sample() learning pipeline used
+#      above, so the shared GRU/ML/ensemble models keep improving from this
+#      engine's real outcomes too.
+#
+# This engine never forces a trade: ai_directional_snapshot() itself returns
+# WAIT whenever the ensemble is not confident enough to name a direction, and
+# no position is opened on a WAIT.
+# =============================================================================
+
+AUTOTRADE_AI_POLL_SECONDS = int(os.environ.get("AUTOTRADE_AI_POLL_SECONDS", "20"))
+AUTOTRADE_AI_SYMBOLS = list(AI_HIST_SYMBOLS)  # NIFTY, BANKNIFTY, FINNIFTY
+
+AUTOTRADE_AI_DEFAULTS = {
+    "execution_mode": "paper",           # "paper" (default, always available) | "live"
+    "armed": False,                      # master on/off switch for NEW automatic entries
+    "capital_per_trade_live": 25000.0,   # rupees earmarked per LIVE entry
+    "capital_per_trade_paper": 25000.0,  # rupees used to size PAPER quantity (for realistic P&L)
+    "max_concurrent_positions": 3,       # across NIFTY/BANKNIFTY/FINNIFTY combined
+    "max_daily_loss_paper": 15000.0,     # paper circuit breaker (rupees)
+    "max_daily_loss_live": 7500.0,       # live circuit breaker (rupees) -- deliberately tighter
+    "max_hold_minutes": 180,             # force flatten a stale position even if flat
+    "square_off_time": "15:15",          # never carries an intraday long option overnight
+    "confidence_drop_reduce": 0.12,      # ensemble confidence drop vs entry that triggers a REDUCE
+    "confidence_drop_exit": 0.22,        # ensemble confidence drop vs entry that triggers a full SELL
+    "edge_min_trades": 60,               # minimum CLOSED paper trades required before LIVE unlocks
+    "edge_min_days": 10,                 # those trades must span at least this many calendar days
+    "edge_min_win_rate": 42.0,           # percent
+    "edge_min_avg_r": 0.05,              # average R-multiple must be net positive after costs
+    "edge_min_profit_factor": 1.10,
+    "reduce_fraction": 0.5,              # fraction of quantity closed on a REDUCE action
+}
+
+AUTOTRADE_AI_CONFIGURABLE_KEYS = (
+    "capital_per_trade_live", "capital_per_trade_paper", "max_concurrent_positions",
+    "max_daily_loss_paper", "max_daily_loss_live", "max_hold_minutes", "square_off_time",
+    "confidence_drop_reduce", "confidence_drop_exit", "edge_min_trades", "edge_min_days",
+    "edge_min_win_rate", "edge_min_avg_r", "edge_min_profit_factor", "reduce_fraction",
+)
+
+
+def autotrade_ai_init_db():
+    c = ai_db()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS ai_autotrade_trades(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, symbol TEXT, option_symbol TEXT, token INTEGER,
+        exchange TEXT, side TEXT, execution_mode TEXT, entry REAL, qty INTEGER, original_qty INTEGER,
+        lot_size INTEGER, stop REAL, target REAL, entry_ensemble_conf REAL, entry_p_up REAL,
+        setup_json TEXT, status TEXT, exit REAL, exit_ts TEXT, pnl REAL DEFAULT 0, r_multiple REAL DEFAULT 0,
+        exit_reason TEXT, entry_order_id TEXT, exit_order_ids TEXT
+    );
+    CREATE TABLE IF NOT EXISTS ai_autotrade_actions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, trade_id INTEGER, symbol TEXT, action TEXT,
+        reason TEXT, ltp REAL, unrealized_pnl REAL, unrealized_r REAL, p_up REAL, ensemble_conf REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_autotrade_trades_status ON ai_autotrade_trades(status);
+    CREATE INDEX IF NOT EXISTS idx_autotrade_actions_trade ON ai_autotrade_actions(trade_id);
+    """)
+    row = c.execute("SELECT value FROM ai_runtime WHERE key='autotrade_ai_config'").fetchone()
+    if not row:
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('autotrade_ai_config',?)",
+                  (json.dumps(AUTOTRADE_AI_DEFAULTS),))
+    c.commit(); c.close()
+
+
+def autotrade_ai_config():
+    c = ai_db()
+    row = c.execute("SELECT value FROM ai_runtime WHERE key='autotrade_ai_config'").fetchone()
+    c.close()
+    cfg = dict(AUTOTRADE_AI_DEFAULTS)
+    if row:
+        try:
+            cfg.update(json.loads(row["value"]))
+        except Exception:
+            pass
+    return cfg
+
+
+def autotrade_ai_save_config(cfg):
+    c = ai_db()
+    c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('autotrade_ai_config',?)", (json.dumps(cfg),))
+    c.commit(); c.close()
+
+
+def autotrade_ai_last_cycle_at():
+    c = ai_db()
+    r = c.execute("SELECT value FROM ai_runtime WHERE key='autotrade_ai_last_cycle_at'").fetchone()
+    c.close()
+    return r["value"] if r else None
+
+
+def autotrade_ai_log_action(trade_id, symbol, action, reason, ltp=None, unrealized_pnl=None,
+                             unrealized_r=None, p_up=None, ensemble_conf=None):
+    c = ai_db()
+    c.execute("""INSERT INTO ai_autotrade_actions
+        (ts,trade_id,symbol,action,reason,ltp,unrealized_pnl,unrealized_r,p_up,ensemble_conf)
+        VALUES(?,?,?,?,?,?,?,?,?,?)""",
+              (datetime.now(IST).isoformat(), trade_id, symbol, action, reason, ltp,
+               unrealized_pnl, unrealized_r, p_up, ensemble_conf))
+    c.commit(); c.close()
+
+
+def autotrade_ai_open_positions():
+    c = ai_db()
+    rows = c.execute("SELECT * FROM ai_autotrade_trades WHERE status='OPEN'").fetchall()
+    c.close()
+    return [dict(r) for r in rows]
+
+
+def autotrade_ai_today_realized_pnl(execution_mode):
+    today = now_ist().strftime("%Y-%m-%d")
+    c = ai_db()
+    rows = c.execute("SELECT pnl, exit_ts FROM ai_autotrade_trades WHERE status='CLOSED' AND execution_mode=?",
+                      (execution_mode,)).fetchall()
+    c.close()
+    total = 0.0
+    for r in rows:
+        if r["exit_ts"] and str(r["exit_ts"]).startswith(today):
+            total += float(r["pnl"] or 0.0)
+    return round(total, 2)
+
+
+def autotrade_ai_edge_status():
+    """Out-of-sample edge check on THIS engine's own PAPER trade history -- the
+    gate that must clear before LIVE mode can even be selected. Deliberately
+    reads only CLOSED paper trades: the strategy has to prove itself on paper,
+    on its own real (if simulated) fills, before it is ever allowed to risk
+    real money."""
+    cfg = autotrade_ai_config()
+    required = {k: cfg[k] for k in ("edge_min_trades", "edge_min_days", "edge_min_win_rate",
+                                     "edge_min_avg_r", "edge_min_profit_factor")}
+    c = ai_db()
+    rows = c.execute("SELECT * FROM ai_autotrade_trades WHERE status='CLOSED' AND execution_mode='paper' ORDER BY id").fetchall()
+    c.close()
+    rows = [dict(r) for r in rows]
+    n = len(rows)
+    if n == 0:
+        return {"edge_confirmed": False, "trades": 0, "span_days": 0, "win_rate": 0, "avg_r": 0,
+                "profit_factor": 0, "checks": {}, "required": required,
+                "reason": "No completed paper trades yet -- the engine has to run in Paper mode first."}
+    first_ts = _ai_ts_naive(rows[0]["ts"])
+    last_ts = _ai_ts_naive(rows[-1]["exit_ts"] or rows[-1]["ts"])
+    span_days = max(0.0, (last_ts - first_ts).total_seconds() / 86400.0) if (first_ts and last_ts) else 0.0
+    pnl = [float(r["pnl"] or 0) for r in rows]
+    rmul = [float(r["r_multiple"] or 0) for r in rows]
+    wins = [x for x in pnl if x > 0]
+    losses = [x for x in pnl if x < 0]
+    win_rate = round(len(wins) / n * 100.0, 2)
+    avg_r = round(sum(rmul) / n, 4)
+    profit_factor = round(sum(wins) / abs(sum(losses)), 2) if losses else (99.0 if wins else 0.0)
+    checks = {
+        "trades_ok": n >= int(required["edge_min_trades"]),
+        "span_ok": span_days >= float(required["edge_min_days"]),
+        "win_rate_ok": win_rate >= float(required["edge_min_win_rate"]),
+        "avg_r_ok": avg_r >= float(required["edge_min_avg_r"]),
+        "profit_factor_ok": profit_factor >= float(required["edge_min_profit_factor"]),
+    }
+    edge_confirmed = all(checks.values())
+    return {
+        "edge_confirmed": edge_confirmed, "trades": n, "span_days": round(span_days, 1),
+        "win_rate": win_rate, "avg_r": avg_r, "profit_factor": profit_factor,
+        "checks": checks, "required": required,
+        "reason": "Meets all out-of-sample thresholds." if edge_confirmed else
+                  "Does not yet meet one or more out-of-sample thresholds -- keep paper trading.",
+    }
+
+
+def autotrade_ai_live_allowed():
+    edge = autotrade_ai_edge_status()
+    if not edge["edge_confirmed"]:
+        return False, "Live trading is locked until this engine's paper track record clears the configured edge thresholds.", edge
+    if not require_session():
+        return False, "Not logged in to Kite.", edge
+    return True, "OK", edge
+
+
+def _autotrade_ai_size(setup, capital_per_trade):
+    entry = float(setup["entry"]); lot = int(setup["lot_size"])
+    if entry <= 0 or lot <= 0:
+        return 0
+    lots = max(1, int(capital_per_trade // (entry * lot)))
+    return lots * lot
+
+
+def autotrade_ai_try_enter(symbol, cfg):
+    """WAIT is the default outcome: this only opens a position when
+    ai_directional_snapshot() itself names a strong, executable UP or DOWN
+    setup. It never manufactures a trade to keep the engine 'busy'."""
+    open_positions = autotrade_ai_open_positions()
+    if any(p["symbol"] == symbol for p in open_positions):
+        return None
+    if len(open_positions) >= int(cfg["max_concurrent_positions"]):
+        return None
+
+    execution_mode = cfg.get("execution_mode", "paper")
+    if execution_mode == "live":
+        live_allowed, why, _edge = autotrade_ai_live_allowed()
+        if not live_allowed:
+            ai_log("AUTOTRADE_AI", "LIVE_BLOCKED", f"{symbol}: {why}")
+            return None
+        if autotrade_ai_today_realized_pnl("live") <= -abs(float(cfg["max_daily_loss_live"])):
+            ai_log("AUTOTRADE_AI", "LIVE_DAILY_LOSS_LIMIT", f"{symbol}: live daily loss limit reached; no further live entries today")
+            return None
+    else:
+        if autotrade_ai_today_realized_pnl("paper") <= -abs(float(cfg["max_daily_loss_paper"])):
+            return None
+
+    params = ai_params()
+    setup, err = ai_directional_snapshot(symbol, params)
+    if err or not setup:
+        detail = err if isinstance(err, str) else (err or {}).get("error", "WAIT")
+        ai_log("AUTOTRADE_AI", "WAIT", f"{symbol}: {detail}")
+        return None
+
+    capital = float(cfg["capital_per_trade_live"] if execution_mode == "live" else cfg["capital_per_trade_paper"])
+    qty = _autotrade_ai_size(setup, capital)
+    if qty <= 0:
+        ai_log("AUTOTRADE_AI", "SIZE_REJECTED", f"{symbol}: capital too small for even 1 lot of {setup['option_symbol']}")
+        return None
+
+    if execution_mode == "live":
+        exch = INDEX_OPTION_EXCHANGE.get(symbol, "NFO")
+        leg = {"leg": "ai_auto_entry", "tradingsymbol": setup["option_symbol"], "exchange": exch,
+               "transaction_type": "BUY", "quantity": qty}
+        results = place_basket_orders([leg], product="MIS", order_type="MARKET", sequence_for_margin=False)
+        result = results[0] if results else {"status": "failed", "error": "No result returned"}
+        if result["status"] != "placed":
+            ai_log("ERROR", "AUTOTRADE_AI_LIVE_ENTRY_FAILED", f"{symbol}: {result.get('error')}")
+            return None
+        order_id = result.get("order_id")
+    else:
+        order_id = f"PAPER-{int(time.time() * 1000)}"
+
+    exchange = INDEX_OPTION_EXCHANGE.get(symbol, "NFO")
+    now_iso = datetime.now(IST).isoformat()
+    c = ai_db()
+    cur = c.execute("""INSERT INTO ai_autotrade_trades
+        (ts,symbol,option_symbol,token,exchange,side,execution_mode,entry,qty,original_qty,lot_size,stop,target,
+         entry_ensemble_conf,entry_p_up,setup_json,status,entry_order_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (now_iso, symbol, setup["option_symbol"], setup["token"], exchange, "LONG", execution_mode,
+         setup["entry"], qty, qty, setup["lot_size"], setup["stop"], setup["target"],
+         float(setup.get("ensemble_confidence") or 0), float(setup.get("dl_probability") or 0),
+         json.dumps(setup), "OPEN", order_id))
+    trade_id = cur.lastrowid
+    c.commit(); c.close()
+    ai_log("TRADE", "AUTOTRADE_AI_OPEN",
+           f"{symbol} [{execution_mode.upper()}] BUY {setup['option_type']} {setup['option_symbol']} qty={qty} "
+           f"entry={setup['entry']:.2f} p_up={setup.get('dl_probability', 0):.3f} conf={setup.get('ensemble_confidence', 0):.3f}")
+    autotrade_ai_log_action(trade_id, symbol, "BUY", f"Strong {setup['direction']} signal -> BUY {setup['option_type']}",
+                             ltp=setup["entry"], p_up=setup.get("dl_probability"), ensemble_conf=setup.get("ensemble_confidence"))
+    return trade_id
+
+
+def _autotrade_ai_exit(trade, qty_to_close, reason, execution_mode):
+    """Places (LIVE) or simulates (PAPER) the closing order for qty_to_close
+    units of an open autotrade position. Always exits at the executable BID
+    (this is a long option), never a stale LTP/midpoint. Returns
+    (exit_price, order_id) or (None, None) if there's nothing executable to
+    trade against this cycle -- in which case the position is simply
+    re-evaluated on the next poll rather than force-closed on bad data."""
+    try:
+        key = f'{trade["exchange"]}:{trade["option_symbol"]}'
+        q = kite_quote_bulk([key]).get(key)
+        st = quote_stats(q)
+    except Exception as e:
+        ai_log("ERROR", "AUTOTRADE_AI_EXIT_QUOTE", f'{trade["option_symbol"]}: {e}')
+        return None, None
+    bid = st.get("bid")
+    if bid is None or float(bid) <= 0:
+        ai_log("TRADE", "AUTOTRADE_AI_EXIT_WAIT_LIQUIDITY", f'id={trade["id"]} {trade["option_symbol"]} no executable bid yet')
+        return None, None
+    price = float(bid)
+    if execution_mode == "live":
+        leg = {"leg": "ai_auto_exit", "tradingsymbol": trade["option_symbol"], "exchange": trade["exchange"],
+               "transaction_type": "SELL", "quantity": int(qty_to_close)}
+        results = place_basket_orders([leg], product="MIS", order_type="MARKET", sequence_for_margin=False)
+        result = results[0] if results else {"status": "failed", "error": "No result returned"}
+        if result["status"] != "placed":
+            ai_log("ERROR", "AUTOTRADE_AI_LIVE_EXIT_FAILED", f'id={trade["id"]}: {result.get("error")}')
+            return None, None
+        return price, result.get("order_id")
+    return price, f"PAPER-EXIT-{int(time.time() * 1000)}"
+
+
+def autotrade_ai_manage_positions(cfg):
+    """The continuous reassessment loop: re-prices AND re-predicts every open
+    position, then decides HOLD / REDUCE / SELL. This is what lets the engine
+    react to the edge weakening or reversing mid-trade, not just to a static
+    stop/target level set at entry."""
+    for trade in autotrade_ai_open_positions():
+        try:
+            symbol = trade["symbol"]
+            key = f'{trade["exchange"]}:{trade["option_symbol"]}'
+            q = kite_quote_bulk([key]).get(key)
+            st = quote_stats(q)
+            bid = st.get("bid")
+            if bid is None or float(bid) <= 0:
+                continue
+            ltp = float(bid)
+            entry = float(trade["entry"]); qty = int(trade["qty"])
+            unrealized_pnl = (ltp - entry) * qty
+            risk_per_unit = max(entry - float(trade["stop"]), 0.01)
+            unrealized_r = (ltp - entry) / risk_per_unit
+
+            # Re-run the SAME prediction pipeline used at entry -- this is the
+            # "continuously reassesses the prediction, option behaviour, profit
+            # potential and risk" step the engine is required to do.
+            params = ai_params()
+            fresh, _ferr = ai_directional_snapshot(symbol, params)
+            fresh_conf = fresh.get("ensemble_confidence") if fresh else None
+            fresh_p_up = fresh.get("dl_probability") if fresh else None
+            fresh_dir = fresh.get("direction") if fresh else None
+            entry_setup = json.loads(trade["setup_json"] or "{}")
+            entry_dir = entry_setup.get("direction")
+
+            action, reason, close_fraction = "HOLD", "Within plan; no exit condition met.", 0.0
+            opened_at = _ai_ts_naive(trade["ts"])
+            age_min = (now_ist().replace(tzinfo=None) - opened_at).total_seconds() / 60.0 if opened_at else 0.0
+
+            if ltp <= float(trade["stop"]):
+                action, reason, close_fraction = "SELL", "Stop-loss hit.", 1.0
+            elif ltp >= float(trade["target"]):
+                action, reason, close_fraction = "SELL", "Target reached.", 1.0
+            elif now_ist().strftime("%H:%M") >= cfg.get("square_off_time", "15:15"):
+                action, reason, close_fraction = "SELL", "Intraday square-off time reached.", 1.0
+            elif age_min >= float(cfg.get("max_hold_minutes", 180)):
+                action, reason, close_fraction = "SELL", f"Max hold time ({cfg.get('max_hold_minutes')} min) exceeded without reaching target/stop.", 1.0
+            elif fresh_dir and entry_dir and fresh_dir != entry_dir:
+                action, reason, close_fraction = "SELL", f"Signal reversed: entry read was {entry_dir}, live read is now {fresh_dir}.", 1.0
+            elif fresh_conf is not None and trade["entry_ensemble_conf"]:
+                drop = float(trade["entry_ensemble_conf"]) - float(fresh_conf)
+                if drop >= float(cfg.get("confidence_drop_exit", 0.22)):
+                    action, reason, close_fraction = "SELL", f"Model confidence fell {drop:.2f} since entry -- edge no longer there.", 1.0
+                elif drop >= float(cfg.get("confidence_drop_reduce", 0.12)) and qty > int(trade["lot_size"]):
+                    action, reason, close_fraction = "REDUCE", f"Model confidence fell {drop:.2f} since entry -- trimming exposure.", float(cfg.get("reduce_fraction", 0.5))
+
+            if action == "HOLD":
+                autotrade_ai_log_action(trade["id"], symbol, "HOLD", reason, ltp=ltp, unrealized_pnl=round(unrealized_pnl, 2),
+                                         unrealized_r=round(unrealized_r, 3), p_up=fresh_p_up, ensemble_conf=fresh_conf)
+                continue
+
+            lot_size = int(trade["lot_size"])
+            if action == "SELL":
+                qty_to_close = qty
+            else:
+                lots_to_close = max(1, int(round((qty / lot_size) * close_fraction)))
+                qty_to_close = min(qty, lots_to_close * lot_size)
+
+            exit_price, exit_order_id = _autotrade_ai_exit(trade, qty_to_close, reason, trade["execution_mode"])
+            if exit_price is None:
+                continue  # re-evaluated next poll rather than force-closed on a bad quote
+
+            realized = (exit_price - entry) * qty_to_close
+            remaining_qty = qty - qty_to_close
+            exit_ids = json.loads(trade.get("exit_order_ids") or "[]")
+            exit_ids.append(exit_order_id)
+            c = ai_db()
+            if remaining_qty > 0:
+                new_pnl = float(trade.get("pnl") or 0) + realized
+                c.execute("UPDATE ai_autotrade_trades SET qty=?, pnl=?, exit_order_ids=? WHERE id=?",
+                          (remaining_qty, new_pnl, json.dumps(exit_ids), trade["id"]))
+                c.commit(); c.close()
+                autotrade_ai_log_action(trade["id"], symbol, "REDUCE", reason, ltp=exit_price, unrealized_pnl=round(realized, 2),
+                                         unrealized_r=round(unrealized_r, 3), p_up=fresh_p_up, ensemble_conf=fresh_conf)
+                ai_log("TRADE", "AUTOTRADE_AI_REDUCE", f'id={trade["id"]} {symbol} [{trade["execution_mode"].upper()}] {reason} closed_qty={qty_to_close} realized={realized:.2f}')
+            else:
+                total_pnl = float(trade.get("pnl") or 0) + realized
+                risk_total = abs(entry - float(trade["stop"])) * int(trade["original_qty"])
+                rmul = total_pnl / risk_total if risk_total else 0.0
+                c.execute("""UPDATE ai_autotrade_trades SET status='CLOSED', exit=?, exit_ts=?, pnl=?, r_multiple=?,
+                             exit_reason=?, exit_order_ids=? WHERE id=?""",
+                          (exit_price, datetime.now(IST).isoformat(), total_pnl, rmul, reason, json.dumps(exit_ids), trade["id"]))
+                c.commit(); c.close()
+                autotrade_ai_log_action(trade["id"], symbol, "SELL", reason, ltp=exit_price, unrealized_pnl=round(total_pnl, 2),
+                                         unrealized_r=round(rmul, 3), p_up=fresh_p_up, ensemble_conf=fresh_conf)
+                ai_log("TRADE", "AUTOTRADE_AI_CLOSE",
+                       f'id={trade["id"]} {symbol} [{trade["execution_mode"].upper()}] {reason} pnl={total_pnl:.2f} R={rmul:.2f}')
+
+                # Every completed trade -- paper or live -- becomes new learning
+                # data for the SAME shared GRU/ML ensemble used by the paper-only
+                # research engine above, so the models keep validating/improving.
+                try:
+                    spot_key = INDEX_SYMBOLS.get(symbol, "NSE:" + symbol)
+                    spot_q = kite_quote_bulk([spot_key]).get(spot_key)
+                    spot_now = extract_price(spot_q) if spot_q else None
+                    entry_spot = float(entry_setup.get("spot") or 0)
+                    direction_label = 1 if (spot_now is not None and entry_spot > 0 and float(spot_now) > entry_spot) else 0
+                    horizon = max(0.0, (datetime.now(IST) - datetime.fromisoformat(str(trade["ts"]))).total_seconds())
+                    if entry_setup.get("ml_features"):
+                        ai_ml_record_sample(trade["id"], "AUTOTRADE_AI", symbol, entry_setup["ml_features"], direction_label, rmul, horizon)
+                    if entry_setup.get("dl_sequence"):
+                        ai_dl_record_sample(trade["id"], "AUTOTRADE_AI", symbol, entry_setup["dl_sequence"], direction_label, rmul, horizon)
+                except Exception as e:
+                    ai_log("ERROR", "AUTOTRADE_AI_LEARNING_SAMPLE", f'id={trade["id"]}: {e}')
+        except Exception as e:
+            ai_log("ERROR", "AUTOTRADE_AI_MANAGE", f'id={trade.get("id")}: {type(e).__name__}: {e}')
+
+
+def autotrade_ai_close_all(reason="Manual kill-switch"):
+    """Kill switch: force-flattens every open automatic position (paper AND
+    live) right now, independent of the armed/disarmed state."""
+    closed = []
+    for trade in autotrade_ai_open_positions():
+        exit_price, exit_order_id = _autotrade_ai_exit(trade, trade["qty"], reason, trade["execution_mode"])
+        if exit_price is None:
+            continue
+        realized = (exit_price - float(trade["entry"])) * int(trade["qty"])
+        total_pnl = float(trade.get("pnl") or 0) + realized
+        risk_total = abs(float(trade["entry"]) - float(trade["stop"])) * int(trade["original_qty"])
+        rmul = total_pnl / risk_total if risk_total else 0.0
+        exit_ids = json.loads(trade.get("exit_order_ids") or "[]")
+        exit_ids.append(exit_order_id)
+        c = ai_db()
+        c.execute("""UPDATE ai_autotrade_trades SET status='CLOSED', exit=?, exit_ts=?, pnl=?, r_multiple=?,
+                     exit_reason=?, exit_order_ids=? WHERE id=?""",
+                  (exit_price, datetime.now(IST).isoformat(), total_pnl, rmul, reason, json.dumps(exit_ids), trade["id"]))
+        c.commit(); c.close()
+        autotrade_ai_log_action(trade["id"], trade["symbol"], "SELL", reason, ltp=exit_price,
+                                 unrealized_pnl=round(total_pnl, 2), unrealized_r=round(rmul, 3))
+        closed.append(trade["id"])
+    return closed
+
+
+def autotrade_ai_cycle():
+    cfg = autotrade_ai_config()
+    c = ai_db()
+    c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('autotrade_ai_last_cycle_at',?)",
+              (datetime.now(IST).isoformat(),))
+    c.commit(); c.close()
+    if not require_session():
+        return
+    # Open risk is always looked after, regardless of the armed switch -- armed
+    # only gates NEW entries.
+    autotrade_ai_manage_positions(cfg)
+    if not ai_market_open() or not cfg.get("armed"):
+        return
+    # Mid-session live safety net: if the live daily loss limit is breached,
+    # auto-disarm new live entries immediately (already-open positions are
+    # still managed/exited by autotrade_ai_manage_positions above).
+    if cfg.get("execution_mode") == "live" and autotrade_ai_today_realized_pnl("live") <= -abs(float(cfg["max_daily_loss_live"])):
+        cfg["armed"] = False
+        autotrade_ai_save_config(cfg)
+        ai_log("RISK", "AUTOTRADE_AI_LIVE_DAILY_LOSS_DISARM", "Live daily loss limit reached -- engine auto-disarmed.")
+        return
+    for symbol in AUTOTRADE_AI_SYMBOLS:
+        try:
+            autotrade_ai_try_enter(symbol, cfg)
+        except Exception as e:
+            ai_log("ERROR", "AUTOTRADE_AI_ENTRY", f"{symbol}: {type(e).__name__}: {e}")
+
+
+def autotrade_ai_loop():
+    autotrade_ai_init_db()
+    ai_log("SYSTEM", "AUTOTRADE_AI_START", "Automatic AI buy/sell engine started (Paper mode by default).")
+    while True:
+        try:
+            autotrade_ai_cycle()
+        except Exception as e:
+            ai_log("ERROR", "AUTOTRADE_AI_LOOP", str(e))
+        time.sleep(AUTOTRADE_AI_POLL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+@app.route("/api/ai-autotrade/state")
+def ai_autotrade_state_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    cfg = autotrade_ai_config()
+    open_positions = autotrade_ai_open_positions()
+    enriched = []
+    for t in open_positions:
+        ltp = None
+        try:
+            key = f'{t["exchange"]}:{t["option_symbol"]}'
+            q = kite_quote_bulk([key]).get(key)
+            st = quote_stats(q)
+            ltp = st.get("bid") or extract_price(q)
+        except Exception:
+            pass
+        t2 = dict(t)
+        t2["last_ltp"] = ltp
+        t2["unrealized_pnl"] = round((float(ltp) - float(t["entry"])) * int(t["qty"]), 2) if ltp else None
+        enriched.append(t2)
+    return jsonify({
+        "config": cfg,
+        "edge_status": autotrade_ai_edge_status(),
+        "open_positions": enriched,
+        "today_pnl": {"paper": autotrade_ai_today_realized_pnl("paper"), "live": autotrade_ai_today_realized_pnl("live")},
+        "market_open": ai_market_open(),
+        "last_cycle_at": autotrade_ai_last_cycle_at(),
+        "symbols": AUTOTRADE_AI_SYMBOLS,
+    })
+
+
+@app.route("/api/ai-autotrade/config", methods=["POST"])
+def ai_autotrade_config_route():
+    """Bulk settings only -- execution_mode and armed are deliberately kept OUT
+    of this route (same pattern as /api/autotrade/config) so a routine 'Save
+    settings' click can never silently switch the engine into Live or arm it."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    cfg = autotrade_ai_config()
+    for k in AUTOTRADE_AI_CONFIGURABLE_KEYS:
+        if k in body:
+            cfg[k] = body[k]
+    autotrade_ai_save_config(cfg)
+    return jsonify({"ok": True, "config": cfg})
+
+
+@app.route("/api/ai-autotrade/set-execution-mode", methods=["POST"])
+def ai_autotrade_set_mode_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    mode = body.get("mode")
+    if mode not in ("paper", "live"):
+        return jsonify({"error": "mode must be 'paper' or 'live'"}), 400
+    cfg = autotrade_ai_config()
+    if mode == "live":
+        if body.get("ack") is not True:
+            return jsonify({"error": "Switching to LIVE requires explicit confirmation (ack: true) that future "
+                                      "automatic entries/exits will place REAL orders on your Zerodha account "
+                                      "with real money."}), 400
+        allowed, why, edge = autotrade_ai_live_allowed()
+        if not allowed:
+            return jsonify({"error": why, "edge_status": edge}), 400
+    cfg["execution_mode"] = mode
+    autotrade_ai_save_config(cfg)
+    return jsonify({"ok": True, "config": cfg})
+
+
+@app.route("/api/ai-autotrade/arm", methods=["POST"])
+def ai_autotrade_arm_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    cfg = autotrade_ai_config()
+    if cfg.get("execution_mode") == "live":
+        allowed, why, edge = autotrade_ai_live_allowed()
+        if not allowed:
+            return jsonify({"error": why, "edge_status": edge}), 400
+        if body.get("ack") is not True:
+            return jsonify({"error": "Arming the engine in LIVE mode requires explicit confirmation (ack: true) -- "
+                                      "it will automatically place real BUY/SELL orders from this point on."}), 400
+    cfg["armed"] = True
+    autotrade_ai_save_config(cfg)
+    return jsonify({"ok": True, "config": cfg})
+
+
+@app.route("/api/ai-autotrade/disarm", methods=["POST"])
+def ai_autotrade_disarm_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    cfg = autotrade_ai_config()
+    cfg["armed"] = False
+    autotrade_ai_save_config(cfg)
+    return jsonify({"ok": True, "config": cfg})
+
+
+@app.route("/api/ai-autotrade/close-all", methods=["POST"])
+def ai_autotrade_close_all_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    closed = autotrade_ai_close_all("Manual kill-switch close-all")
+    return jsonify({"ok": True, "closed_trade_ids": closed})
+
+
+@app.route("/api/ai-autotrade/trades")
+def ai_autotrade_trades_route():
+    c = ai_db()
+    limit = min(int(request.args.get("limit", 100)), 500)
+    rows = [dict(x) for x in c.execute("SELECT * FROM ai_autotrade_trades ORDER BY id DESC LIMIT ?", (limit,))]
+    c.close()
+    return jsonify(rows)
+
+
+@app.route("/api/ai-autotrade/actions")
+def ai_autotrade_actions_route():
+    c = ai_db()
+    limit = min(int(request.args.get("limit", 200)), 1000)
+    trade_id = request.args.get("trade_id")
+    if trade_id:
+        rows = [dict(x) for x in c.execute(
+            "SELECT * FROM ai_autotrade_actions WHERE trade_id=? ORDER BY id DESC LIMIT ?", (trade_id, limit))]
+    else:
+        rows = [dict(x) for x in c.execute(
+            "SELECT * FROM ai_autotrade_actions ORDER BY id DESC LIMIT ?", (limit,))]
+    c.close()
+    return jsonify(rows)
+
+
+@app.route("/api/ai-autotrade/edge-status")
+def ai_autotrade_edge_status_route():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    return jsonify(autotrade_ai_edge_status())
+
 ai_init_db()
-ai_auto_init_db()
 threading.Thread(target=ai_loop,daemon=True).start()
-threading.Thread(target=ai_auto_loop,daemon=True).start()
 threading.Thread(target=ai_hist_loop,daemon=True).start()
 
 threading.Thread(target=_autotrade_loop, daemon=True).start()
 threading.Thread(target=_breakout_monitor_loop, daemon=True).start()
+threading.Thread(target=autotrade_ai_loop, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
