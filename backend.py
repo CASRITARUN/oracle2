@@ -8634,7 +8634,7 @@ def ai_hist_status():
     oldest=c.execute("SELECT MIN(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     newest=c.execute("SELECT MAX(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     c.close()
-    value={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,"max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,"horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),"oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],"runs":[dict(r) for r in runs],"model":dict(model) if model else None,"last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),"train_detail":rt.get("hist_train_detail"),"status":rt.get("hist_status","WAITING FOR KITE"),"collector_status":rt.get("hist_collector_status",rt.get("hist_status","WAITING FOR KITE")),"model_status":rt.get("hist_model_status",(dict(model).get("status") if model else "NOT TRAINED")),"detail":rt.get("hist_detail",""),"archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),"training_requested":rt.get("hist_training_requested","0"),"training_started_at":rt.get("hist_training_started_at"),"training_error":rt.get("hist_training_error",""),"training_active":rt.get("hist_training_active","0"),"training_progress":float(rt.get("hist_training_progress","0") or 0),"training_phase":rt.get("hist_training_phase","IDLE"),"training_epoch":int(float(rt.get("hist_training_epoch","0") or 0)),"training_epochs":int(float(rt.get("hist_training_epochs","0") or 0)),"training_elapsed_sec":float(rt.get("hist_training_elapsed_sec","0") or 0),"option_capture":ai_option_capture_status()}
+    value={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,"max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,"horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),"oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],"runs":[dict(r) for r in runs],"model":dict(model) if model else None,"last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),"train_detail":rt.get("hist_train_detail"),"status":rt.get("hist_status","WAITING FOR KITE"),"collector_status":rt.get("hist_collector_status",rt.get("hist_status","WAITING FOR KITE")),"model_status":rt.get("hist_model_status",(dict(model).get("status") if model else "NOT TRAINED")),"detail":rt.get("hist_detail",""),"archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),"training_requested":rt.get("hist_training_requested","0"),"training_started_at":rt.get("hist_training_started_at"),"training_error":rt.get("hist_training_error",""),"training_active":rt.get("hist_training_active","0"),"training_progress":float(rt.get("hist_training_progress","0") or 0),"training_phase":rt.get("hist_training_phase","IDLE"),"training_epoch":int(float(rt.get("hist_training_epoch","0") or 0)),"training_epochs":int(float(rt.get("hist_training_epochs","0") or 0)),"training_elapsed_sec":float(rt.get("hist_training_elapsed_sec","0") or 0),"training_samples":int(float(rt.get("hist_training_samples","0") or 0)),"option_capture":ai_option_capture_status()}
     with _AI_HIST_STATUS_CACHE_LOCK:
         _AI_HIST_STATUS_CACHE["at"]=now_m
         _AI_HIST_STATUS_CACHE["value"]=value
@@ -8800,7 +8800,9 @@ def _hist_training_sequences(symbol):
 
     feature_rows={i:_hist_feature_row(rows,i,arrays) for i in candidate}
     seqs=[]; labels=[]; times=[]
-    for i in candidate:
+    total_candidates=max(1,len(candidate))
+    last_telemetry=time.monotonic()
+    for cand_i,i in enumerate(candidate):
         if i-DL_SEQUENCE_LEN+1<0 or i+AI_HIST_HORIZON_BARS>=len(rows):continue
         fseq=[]; ok=True
         for j in range(i-DL_SEQUENCE_LEN+1,i+1):
@@ -8810,6 +8812,20 @@ def _hist_training_sequences(symbol):
             if not f:ok=False;break
             fseq.append([_norm_feature(n,f.get(n,0)) for n in SEQUENCE_FEATURE_NAMES])
         if not ok:continue
+        now_mono=time.monotonic()
+        if now_mono-last_telemetry>=0.5 or cand_i==total_candidates-1:
+            try:
+                c=ai_db()
+                sym_i=int(globals().get('_HIST_BUILD_SYMBOL_INDEX',0) or 0)
+                sym_n=max(1,int(globals().get('_HIST_BUILD_SYMBOL_COUNT',len(AI_HIST_SYMBOLS)) or 1))
+                p=5.0+25.0*((sym_i+(cand_i+1)/total_candidates)/sym_n)
+                elapsed=(datetime.now(IST)-datetime.fromisoformat(str(globals().get('_HIST_BUILD_STARTED_AT',datetime.now(IST).isoformat())))).total_seconds()
+                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",(str(round(p,1)),))
+                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",(f"BUILDING SEQUENCES · {AI_HIST_SYMBOLS[sym_i] if sym_i < len(AI_HIST_SYMBOLS) else symbol} · {cand_i+1:,}/{total_candidates:,}",))
+                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_elapsed_sec',?)",(str(round(elapsed,1)),))
+                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_samples',?)",(str(len(seqs)),))
+                c.commit(); c.close(); last_telemetry=now_mono
+            except Exception: pass
         cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
         if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):continue
         seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if future>cur else 0); times.append(str(rows[i][0]))
@@ -8841,13 +8857,16 @@ def ai_hist_train_deep(force=False):
     try:
         started=datetime.now(IST).isoformat()
         c=ai_db()
-        for k,v in (("hist_training_started_at",started),("hist_training_requested","0"),("hist_training_error",""),("hist_training_active","1"),("hist_training_progress","1"),("hist_training_phase","INITIALIZING"),("hist_training_epoch","0"),("hist_training_epochs",str(AI_HIST_TRAIN_EPOCHS)),("hist_training_elapsed_sec","0")):
+        for k,v in (("hist_training_started_at",started),("hist_training_requested","0"),("hist_training_error",""),("hist_training_active","1"),("hist_training_progress","1"),("hist_training_phase","INITIALIZING"),("hist_training_epoch","0"),("hist_training_epochs",str(AI_HIST_TRAIN_EPOCHS)),("hist_training_elapsed_sec","0"),("hist_training_samples","0")):
             c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES(?,?)",(k,v))
         c.commit();c.close()
         _hist_set_model_status("BUILDING SEQUENCES","Preparing chronological GRU sequences from historical archive")
         allx=[];ally=[];all_times=[];per_symbol={}
         total_symbols=max(1,len(AI_HIST_SYMBOLS))
         for sym_i,sym in enumerate(AI_HIST_SYMBOLS):
+            globals()['_HIST_BUILD_SYMBOL_INDEX']=sym_i
+            globals()['_HIST_BUILD_SYMBOL_COUNT']=total_symbols
+            globals()['_HIST_BUILD_STARTED_AT']=started
             try:
                 x,y,t=_hist_training_sequences(sym);per_symbol[sym]=len(x);allx.extend(x);ally.extend(y);all_times.extend(t);ai_log("LEARNING","HIST_SEQUENCE_BUILD",f"{sym}: GRU sequences={len(x)}")
             except Exception as e:
