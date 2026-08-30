@@ -947,6 +947,14 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
       <div class="ai-metric"><small>LAST HIST. TRAINING</small><b id="atHistLastTrain">—</b></div>
     </div>
     <div id="atLearningStages" style="margin-top:12px"></div>
+<div id="atRetrainPanel" style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding:13px;border:1px solid #24465a;border-radius:12px;background:linear-gradient(145deg,#0a1b28,#07131d)">
+  <div>
+    <div style="font-size:10px;font-weight:800;letter-spacing:.08em;color:#cfe7ef">HISTORICAL GRU RETRAINING</div>
+    <div id="atRetrainStatus" style="font-size:9px;color:#7894a8;margin-top:4px">Run improved historical training using the available archive.</div>
+  </div>
+  <button id="atRetrainBtn" type="button" onclick="atStartHistoricalRetrain()" style="white-space:nowrap;padding:9px 13px;border:1px solid #2a7183;border-radius:9px;background:#0b2935;color:#8feafb;font-weight:800;cursor:pointer">▶ RETRAIN HISTORICAL GRU</button>
+</div>
+
     <div class="ai-note" id="atLearningDetail" style="margin-top:10px">Checking historical training and live learning status…</div>
   </section>
 
