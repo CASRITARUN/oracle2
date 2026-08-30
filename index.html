@@ -2901,5 +2901,39 @@ async function refreshAutoTradeAI() {
   }
 }
 </script>
+
+<script>
+async function atStartHistoricalRetrain(){
+  const btn=document.getElementById("atRetrainBtn"), status=document.getElementById("atRetrainStatus");
+  if(btn)btn.disabled=true;
+  if(status)status.textContent="Starting historical GRU retraining…";
+  try{
+    const r=await fetch("/api/ai-evolution/historical/retrain",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    const raw=await r.text(); let d; try{d=JSON.parse(raw)}catch(e){throw Error("Backend returned non-JSON ("+r.status+")")}
+    if(!r.ok||d.ok===false)throw Error(d.message||d.error||"Retraining could not be started");
+    if(status)status.textContent="TRAINING STARTED · running in background";
+    atPollHistoricalRetrain();
+  }catch(e){
+    if(status)status.textContent="ERROR · "+e.message;
+    if(btn)btn.disabled=false;
+  }
+}
+async function atPollHistoricalRetrain(){
+  const btn=document.getElementById("atRetrainBtn"), status=document.getElementById("atRetrainStatus");
+  let tries=0;
+  const poll=async()=>{
+    tries++;
+    try{
+      const d=await aiGet("/api/ai-evolution/historical"), m=d.model||{}, s=String(m.status||d.status||"").toUpperCase();
+      const running=/TRAIN|RUNNING|PREPAR|BUILD|QUEUED/.test(s)&&!/PRETRAINED/.test(s);
+      if(status)status.textContent=running?("TRAINING "+s):String(m.status||d.status||"CHECKING");
+      if(!running||tries>=360){if(btn)btn.disabled=false;if(window.atRefreshAll)window.atRefreshAll();return;}
+    }catch(e){}
+    setTimeout(poll,5000);
+  };
+  poll();
+}
+</script>
+
 </body>
 </html>
