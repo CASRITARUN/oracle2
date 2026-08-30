@@ -7148,12 +7148,6 @@ AI_HIST_REQUEST_STAGGER_SECONDS = float(os.environ.get("AI_HIST_REQUEST_STAGGER_
 AI_HIST_BACKFILL_ENABLED = os.environ.get("AI_HIST_BACKFILL_ENABLED", "1").lower() not in ("0", "false", "no")
 AI_HIST_SYNC_HOURS = float(os.environ.get("AI_HIST_SYNC_HOURS", "6"))
 AI_HIST_HORIZON_BARS = int(os.environ.get("AI_HIST_HORIZON_BARS", "6"))
-# Signal-quality target: ignore tiny forward moves that are mostly market noise.
-# The threshold adapts to recent realised volatility, so the model learns meaningful
-# directional moves rather than treating every microscopic uptick/downtick as a label.
-AI_HIST_NOISE_FLOOR_PCT = float(os.environ.get("AI_HIST_NOISE_FLOOR_PCT", "0.08"))
-AI_HIST_NOISE_CEILING_PCT = float(os.environ.get("AI_HIST_NOISE_CEILING_PCT", "0.60"))
-AI_HIST_NOISE_VOL_MULT = float(os.environ.get("AI_HIST_NOISE_VOL_MULT", "0.45"))
 AI_HIST_MIN_TRAIN = int(os.environ.get("AI_HIST_MIN_TRAIN", "300"))
 AI_OPTION_CAPTURE_MINUTES = int(os.environ.get("AI_OPTION_CAPTURE_MINUTES", "5"))
 AI_OPTION_CAPTURE_DAYS = int(os.environ.get("AI_OPTION_CAPTURE_DAYS", "0"))  # 0 = retain indefinitely
@@ -7818,17 +7812,12 @@ def _gru_forward(params,X,cache=False):
     return (prob,states) if cache else prob
 
 
-def _gru_backward(params,X,Y,states,prob,sample_weight=None):
+def _gru_backward(params,X,Y,states,prob):
     X=np.asarray(X,dtype=float); Y=np.asarray(Y,dtype=float).reshape(-1)
     B,T,D=X.shape; H=params["Wo"].shape[0]
     g={k:np.zeros_like(v) for k,v in params.items()}
-    # BCE derivative wrt final logits, optionally class-weighted.
-    if sample_weight is None:
-        sw=np.ones(B,dtype=float)
-    else:
-        sw=np.asarray(sample_weight,dtype=float).reshape(-1)
-        if len(sw)!=B: sw=np.ones(B,dtype=float)
-    dlog=((prob-Y)*sw).reshape(-1,1)/max(B,1)
+    # BCE derivative wrt final logits.
+    dlog=(prob-Y).reshape(-1,1)/max(B,1)
     g["Wo"]+=states[-1][5].T@dlog; g["bo"]+=np.sum(dlog,axis=0)
     dh=dlog@params["Wo"].T
     for t in range(T-1,-1,-1):
@@ -7878,8 +7867,8 @@ def ai_dl_model():
         stored_fv=r["feature_version"] if "feature_version" in r.keys() else None
         version_ok = (stored_fv == FEATURE_ENGINE_VERSION)
         status=r["status"] if (is_gru and version_ok) else ("RETRAIN REQUIRED — feature engine upgraded" if is_gru else "LEGACY MODEL — REBUILD REQUIRED")
-        return {"status":status,"samples":int(r["samples"] or 0) if is_gru else 0,"accuracy":float(r["accuracy"] or 0) if is_gru else 0.0,"auc":float(r["auc"] or 0) if is_gru else 0.0,"updated_at":r["updated_at"] if is_gru else None,"architecture":f"GRU-{DL_GRU_HIDDEN} recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"feature_version":stored_fv,"current_feature_version":FEATURE_ENGINE_VERSION}
-    except Exception:return {"status":"NOT_TRAINED","samples":0,"accuracy":0.0,"auc":0.0,"architecture":f"GRU-{DL_GRU_HIDDEN} recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"updated_at":None}
+        return {"status":status,"samples":int(r["samples"] or 0) if is_gru else 0,"accuracy":float(r["accuracy"] or 0) if is_gru else 0.0,"auc":float(r["auc"] or 0) if is_gru else 0.0,"updated_at":r["updated_at"] if is_gru else None,"architecture":"GRU-32 recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"feature_version":stored_fv,"current_feature_version":FEATURE_ENGINE_VERSION}
+    except Exception:return {"status":"NOT_TRAINED","samples":0,"accuracy":0.0,"auc":0.0,"architecture":"GRU-32 recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"updated_at":None}
 
 
 def _dl_load_weights():
@@ -7914,31 +7903,22 @@ def _ai_dl_train_arrays(X,Y,status_name="TRAINED",seed=42,epochs_override=None):
     cut=max(1,int(len(X)*0.8));cut=min(cut,len(X)-1)
     Xtr,Ytr=X[:cut],Y[:cut];Xv,Yv=X[cut:],Y[cut:]
     params=_gru_init(X.shape[2],DL_GRU_HIDDEN,seed)
-    p=ai_settings();lr=float(p.get("dl_learning_rate",0.01));epochs=min(80,max(12,int(epochs_override if epochs_override is not None else p.get("dl_epochs",30))))
+    p=ai_settings();lr=float(p.get("dl_learning_rate",0.01));epochs=min(60,max(8,int(epochs_override if epochs_override is not None else p.get("dl_epochs",30))))
     bs=max(8,min(DL_BATCH_SIZE,len(Xtr)))
-    # Balance the loss when the signal-aware target produces a mild class skew.
-    n1=max(1,int(np.sum(Ytr>=0.5))); n0=max(1,len(Ytr)-n1)
-    w0=len(Ytr)/(2.0*n0); w1=len(Ytr)/(2.0*n1)
-    best_params=None; best_key=(-1.0,-1.0); patience=0
-    # Deterministic chronological mini-batches; validation remains untouched.
+    rng=np.random.default_rng(seed)
+    # Training batches remain chronological inside each batch; batch order may change, but
+    # validation remains untouched and chronological.
     for ep in range(epochs):
+        # deterministic contiguous mini-batches; no leakage from validation
         for lo in range(0,len(Xtr),bs):
             xb=Xtr[lo:lo+bs];yb=Ytr[lo:lo+bs]
             pred,cache=_gru_forward(params,xb,cache=True)
-            # Apply class weights directly to the BCE gradient.
-            sample_w=np.where(yb>=0.5,w1,w0)
-            grads=_gru_backward(params,xb,yb,cache,pred,sample_weight=sample_w)
+            grads=_gru_backward(params,xb,yb,cache,pred)
             _gru_apply(params,grads,lr,clip=1.0)
-        pv_now=_gru_forward(params,Xv)
-        a_now=float(np.mean((pv_now>=0.5)==(Yv>=0.5))*100) if len(Yv) else 0.0
-        u_now=float(_dl_auc(Yv.astype(int),pv_now)) if len(set(Yv.astype(int).tolist()))>=2 else 0.0
-        key=(u_now,a_now)
-        if key>best_key:
-            best_key=key; best_params={k:v.copy() for k,v in params.items()}; patience=0
-        else:
-            patience+=1
-            if patience>=8 and ep>=12: break
-    if best_params is not None: params=best_params
+        if status_name == "HISTORICAL_PRETRAINED":
+            try:
+                c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_epoch',?)",(str(ep+1),)); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_epochs',?)",(str(epochs),)); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",(str(round(35.0+60.0*(ep+1)/epochs,1)),)); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",(f"TRAINING GRU · epoch {ep+1}/{epochs}",)); c.commit(); c.close()
+            except Exception: pass
     pv=_gru_forward(params,Xv)
     acc=float(np.mean((pv>=0.5)==(Yv>=0.5))*100) if len(Yv) else 0.0
     auc=float(_dl_auc(Yv.astype(int),pv)) if len(set(Yv.astype(int).tolist()))>=2 else 0.0
@@ -8629,6 +8609,15 @@ def ai_capture_option_chains(force=False):
 # ---------------------------------------------------------------------------
 # Historical index data collector + pre-training layer
 # ---------------------------------------------------------------------------
+def ai_hist_training_active():
+    """Return whether historical GRU retraining is currently running.
+    Persisted in ai_runtime so a browser refresh cannot lose the state."""
+    try:
+        c=ai_db(); r=c.execute("SELECT value FROM ai_runtime WHERE key='hist_training_active'").fetchone(); c.close()
+        return str(r[0] if r else "0") == "1"
+    except Exception:
+        return False
+
 def ai_hist_status():
     """Cached history status; safe for a frequent browser heartbeat."""
     now_m=time.monotonic()
@@ -8645,7 +8634,7 @@ def ai_hist_status():
     oldest=c.execute("SELECT MIN(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     newest=c.execute("SELECT MAX(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     c.close()
-    value={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,"max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,"horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),"oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],"runs":[dict(r) for r in runs],"model":dict(model) if model else None,"last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),"train_detail":rt.get("hist_train_detail"),"status":rt.get("hist_status","WAITING FOR KITE"),"collector_status":rt.get("hist_collector_status",rt.get("hist_status","WAITING FOR KITE")),"model_status":rt.get("hist_model_status",(dict(model).get("status") if model else "NOT TRAINED")),"detail":rt.get("hist_detail",""),"archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),"training_requested":rt.get("hist_training_requested","0"),"training_started_at":rt.get("hist_training_started_at"),"training_error":rt.get("hist_training_error",""),"training_progress":float(rt.get("hist_training_progress","0") or 0),"training_phase":rt.get("hist_training_phase","IDLE"),"option_capture":ai_option_capture_status()}
+    value={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,"max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,"horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),"oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],"runs":[dict(r) for r in runs],"model":dict(model) if model else None,"last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),"train_detail":rt.get("hist_train_detail"),"status":rt.get("hist_status","WAITING FOR KITE"),"collector_status":rt.get("hist_collector_status",rt.get("hist_status","WAITING FOR KITE")),"model_status":rt.get("hist_model_status",(dict(model).get("status") if model else "NOT TRAINED")),"detail":rt.get("hist_detail",""),"archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),"training_requested":rt.get("hist_training_requested","0"),"training_started_at":rt.get("hist_training_started_at"),"training_error":rt.get("hist_training_error",""),"training_active":rt.get("hist_training_active","0"),"training_progress":float(rt.get("hist_training_progress","0") or 0),"training_phase":rt.get("hist_training_phase","IDLE"),"training_epoch":int(float(rt.get("hist_training_epoch","0") or 0)),"training_epochs":int(float(rt.get("hist_training_epochs","0") or 0)),"training_elapsed_sec":float(rt.get("hist_training_elapsed_sec","0") or 0),"option_capture":ai_option_capture_status()}
     with _AI_HIST_STATUS_CACHE_LOCK:
         _AI_HIST_STATUS_CACHE["at"]=now_m
         _AI_HIST_STATUS_CACHE["value"]=value
@@ -8823,18 +8812,7 @@ def _hist_training_sequences(symbol):
         if not ok:continue
         cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
         if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):continue
-        # Signal-aware binary target.  Tiny moves are excluded rather than forced
-        # into UP/DOWN, because those observations are dominated by micro-noise and
-        # are especially harmful for an options-buying classifier.  The threshold is
-        # adaptive to the same realised-volatility feature used by the GRU.
-        f0=feature_rows.get(i) or {}
-        vol10=float(f0.get("volatility_10",0.0) or 0.0)
-        scale=math.sqrt(max(AI_HIST_HORIZON_BARS,1)/10.0)
-        noise_threshold=max(AI_HIST_NOISE_FLOOR_PCT, min(AI_HIST_NOISE_CEILING_PCT, AI_HIST_NOISE_VOL_MULT*vol10*scale))
-        fwd_ret=(future/cur-1.0)*100.0
-        if abs(fwd_ret) < noise_threshold:
-            continue
-        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if fwd_ret>0 else 0); times.append(str(rows[i][0]))
+        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if future>cur else 0); times.append(str(rows[i][0]))
     return seqs,labels,times
 
 def _hist_set_status(status, detail=""):
@@ -8862,24 +8840,23 @@ def ai_hist_train_deep(force=False):
         return ai_hist_status()
     try:
         started=datetime.now(IST).isoformat()
-        c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_started_at',?)",(started,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_requested',?)",("0",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.commit();c.close()
         c=ai_db()
-        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",("1",))
-        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",("INITIALIZING",))
-        c.commit(); c.close()
+        for k,v in (("hist_training_started_at",started),("hist_training_requested","0"),("hist_training_error",""),("hist_training_active","1"),("hist_training_progress","1"),("hist_training_phase","INITIALIZING"),("hist_training_epoch","0"),("hist_training_epochs",str(AI_HIST_TRAIN_EPOCHS)),("hist_training_elapsed_sec","0")):
+            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES(?,?)",(k,v))
+        c.commit();c.close()
         _hist_set_model_status("BUILDING SEQUENCES","Preparing chronological GRU sequences from historical archive")
         allx=[];ally=[];all_times=[];per_symbol={}
         total_symbols=max(1,len(AI_HIST_SYMBOLS))
-        for sym_i, sym in enumerate(AI_HIST_SYMBOLS):
+        for sym_i,sym in enumerate(AI_HIST_SYMBOLS):
             try:
                 x,y,t=_hist_training_sequences(sym);per_symbol[sym]=len(x);allx.extend(x);ally.extend(y);all_times.extend(t);ai_log("LEARNING","HIST_SEQUENCE_BUILD",f"{sym}: GRU sequences={len(x)}")
             except Exception as e:
                 per_symbol[sym]=0;ai_log("ERROR","HIST_SEQUENCE_BUILD",f"{sym}: {e}")
-            progress=5.0 + (sym_i+1)/total_symbols*25.0
-            c=ai_db()
-            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",(str(round(progress,1)),))
+            c=ai_db(); p=5.0+25.0*(sym_i+1)/total_symbols
+            elapsed=(datetime.now(IST)-datetime.fromisoformat(started)).total_seconds()
+            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",(str(round(p,1)),))
             c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",(f"BUILDING SEQUENCES · {sym_i+1}/{total_symbols}",))
-            c.commit(); c.close()
+            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_elapsed_sec',?)",(str(round(elapsed,1)),)); c.commit(); c.close()
         if allx and len(allx)==len(ally)==len(all_times):
             order=sorted(range(len(allx)),key=lambda i:all_times[i]);allx=[allx[i] for i in order];ally=[ally[i] for i in order]
         if len(allx)<AI_HIST_MIN_TRAIN:
@@ -8896,10 +8873,6 @@ def ai_hist_train_deep(force=False):
             keep_idx=np.linspace(0,len(X)-1,AI_HIST_TRAIN_MAX_SAMPLES).round().astype(int)
             keep_idx=np.unique(keep_idx)
             X=X[keep_idx];Y=Y[keep_idx]
-        c=ai_db()
-        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",("35",))
-        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",(f"TRAINING GRU · {len(X):,} sequences · {AI_HIST_TRAIN_EPOCHS} epochs",))
-        c.commit(); c.close()
         _hist_set_model_status("TRAINING GRU SEQUENCE MODEL",f"GRU hidden={DL_GRU_HIDDEN} sequence_len={DL_SEQUENCE_LEN} samples={len(X)} epochs={AI_HIST_TRAIN_EPOCHS}")
         trained=_ai_dl_train_arrays(X,Y,"HISTORICAL_PRETRAINED",seed=20260825,epochs_override=AI_HIST_TRAIN_EPOCHS)
         if not trained:
@@ -8909,14 +8882,19 @@ def ai_hist_train_deep(force=False):
         now=datetime.now(IST).isoformat();c=ai_db();hist_status="PRETRAINED" if val_samples and len(set(Y[-val_samples:].astype(int).tolist()))>=2 else "PRETRAINED — AUC UNAVAILABLE"
         c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days,feature_version) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS,FEATURE_ENGINE_VERSION))
         c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_train_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("PRETRAINED — LIVE GRU LEARNING CONTINUES",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_collector_status',?)",("HISTORY COLLECTION COMPLETE",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_train_detail',?)",(f"architecture=GRU-{DL_GRU_HIDDEN} sequence={DL_SEQUENCE_LEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",));c.commit();c.close()
-        c=ai_db()
-        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",("100",))
-        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",("COMPLETE",))
-        c.commit(); c.close()
         ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}");return ai_hist_status()
     except Exception as e:
         logger.exception("historical GRU pre-training failed");detail=f"{type(e).__name__}: {e}";_hist_set_model_status("TRAINING ERROR — RETRYING",detail);ai_log("ERROR","HISTORICAL_GRU_TRAIN",detail);c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",(detail,));c.commit();c.close();return ai_hist_status()
     finally:
+        try:
+            c=ai_db(); r=c.execute("SELECT value FROM ai_runtime WHERE key='hist_model_status'").fetchone(); status=str(r[0] if r else "")
+            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_active',?)",("0",))
+            if "TRAINING ERROR" in status:
+                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",("ERROR",))
+            else:
+                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",("100",)); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",("COMPLETE",))
+            c.commit(); c.close()
+        except Exception: pass
         try:AI_HIST_TRAIN_LOCK.release()
         except Exception:pass
         _hist_invalidate_status_cache()
@@ -9231,58 +9209,20 @@ def ai_versions_api():
 @app.route('/api/ai-evolution/events')
 def ai_events_api():
     c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_events ORDER BY id DESC LIMIT 150')];c.close();return jsonify(r)
-
 @app.route('/api/ai-evolution/historical/retrain', methods=['POST'])
 def ai_historical_retrain_api():
-    """Manually start bounded historical GRU retraining in the background."""
-    try:
-        hs = ai_hist_status()
-        total = int(hs.get("candles") or 0)
-        if total < AI_HIST_MIN_TRAIN:
-            return jsonify({
-                "ok": False,
-                "status": "NOT_ENOUGH_HISTORY",
-                "candles": total,
-                "required": int(AI_HIST_MIN_TRAIN),
-                "message": f"Need at least {int(AI_HIST_MIN_TRAIN):,} historical candles before retraining."
-            }), 400
-        # IMPORTANT: training is CPU/RAM intensive. Never run it inside the
-        # HTTP request; a reverse proxy can otherwise time out with a 504.
-        def _run_manual_hist_retrain():
-            try:
-                ai_hist_train_deep(force=True)
-            except Exception as e:
-                logger.exception("manual historical GRU retrain failed")
-                try:
-                    ai_log("ERROR", "HISTORICAL_RETRAIN_BACKGROUND", f"{type(e).__name__}: {e}")
-                except Exception:
-                    pass
-
-        # If another training job owns the lock, report that rather than
-        # launching another copy. The real trainer still owns the lock.
-        if not AI_HIST_TRAIN_LOCK.acquire(blocking=False):
-            return jsonify({
-                "ok": True,
-                "started": False,
-                "status": "ALREADY_RUNNING",
-                "historical": ai_hist_status(),
-                "message": "Historical GRU training is already running."
-            }), 200
-        AI_HIST_TRAIN_LOCK.release()
-
-        threading.Thread(target=_run_manual_hist_retrain, daemon=True,
-                         name="manual-historical-gru-retrain").start()
-
-        return jsonify({
-            "ok": True,
-            "started": True,
-            "status": "TRAINING_STARTED",
-            "historical": ai_hist_status(),
-            "message": "Historical GRU retraining started in the background."
-        }), 202
-    except Exception as e:
-        ai_log("ERROR", "HISTORICAL_RETRAIN_API", f"{type(e).__name__}: {e}")
-        return jsonify({"ok": False, "status": "ERROR", "message": str(e)}), 500
+    if ai_hist_training_active() or not AI_HIST_TRAIN_LOCK.acquire(blocking=False):
+        try: AI_HIST_TRAIN_LOCK.release()
+        except Exception: pass
+        return jsonify({"ok":True,"started":False,"status":"ALREADY_RUNNING","historical":ai_hist_status()}),200
+    AI_HIST_TRAIN_LOCK.release()
+    hs=ai_hist_status(); total=int(hs.get("candles") or 0)
+    if total < AI_HIST_MIN_TRAIN:
+        return jsonify({"ok":False,"status":"NOT_ENOUGH_HISTORY","candles":total,"required":int(AI_HIST_MIN_TRAIN),"message":f"Need at least {int(AI_HIST_MIN_TRAIN):,} historical candles."}),400
+    def _job():
+        ai_hist_train_deep(force=True)
+    threading.Thread(target=_job,daemon=True,name="manual-historical-gru-retrain").start()
+    return jsonify({"ok":True,"started":True,"status":"TRAINING_STARTED","historical":ai_hist_status()}),202
 
 @app.route('/api/ai-evolution/historical')
 def ai_historical_api():
@@ -9761,6 +9701,12 @@ def autotrade_ai_cycle():
     # Open risk is always looked after, regardless of the armed switch -- armed
     # only gates NEW entries.
     autotrade_ai_manage_positions(cfg)
+    # Historical GRU retraining pauses NEW automatic entries so the engine never
+    # opens a fresh position while the model is being replaced. Existing positions
+    # continue to be managed for HOLD/REDUCE/SELL safety.
+    if ai_hist_training_active():
+        ai_log("LEARNING", "AUTOTRADE_AI_ENTRY_PAUSED", "Historical GRU retraining in progress -- new entries paused; existing positions remain managed.")
+        return
     if not ai_market_open() or not cfg.get("armed"):
         return
     # Mid-session live safety net: if the live daily loss limit is breached,
