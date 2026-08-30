@@ -141,6 +141,9 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 .ai-hist-table{width:100%;border-collapse:collapse;font-size:10px;background:#fff}.ai-hist-table th,.ai-hist-table td{padding:8px;border-bottom:1px solid #e6e9ed;text-align:left}.ai-hist-table th{font-size:8px;color:#667085;background:#f3f5f7;text-transform:uppercase;letter-spacing:.06em}.ai-hist-ready{color:#218653;font-weight:800}.ai-hist-wait{color:#b84a2f;font-weight:800}
 @media(max-width:900px){.ai-data-observatory{grid-template-columns:1fr}.ai-data-status{grid-template-columns:1fr 1fr}}
 
+
+/* Long Volatility AI */
+.lv-wrap{padding:22px;max-width:1500px;margin:auto}.lv-grid{display:grid;grid-template-columns:1.25fr .75fr;gap:14px}.lv-card{background:#081722;border:1px solid #17384b;border-radius:14px;padding:15px}.lv-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.lv-kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin:12px 0}.lv-kpi{background:#07131d;border:1px solid #17384b;border-radius:10px;padding:10px}.lv-kpi small{display:block;color:#638196;font-size:8px}.lv-kpi b{display:block;color:#e9f7fb;font:800 16px 'JetBrains Mono',monospace;margin-top:4px}.lv-table{width:100%;border-collapse:collapse;font-size:9px}.lv-table th,.lv-table td{padding:8px;border-bottom:1px solid #153244;text-align:left}.lv-table th{color:#7291a3}.lv-score{font-weight:900;color:#4fe0ad}.lv-buy{color:#4fe0ad}.lv-breakeven{color:#ffc857}.lv-chart{width:100%;height:300px;background:#06111a;border:1px solid #17384b;border-radius:12px}.lv-leg-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.lv-leg{border:1px solid #17384b;border-radius:10px;padding:10px;background:#07131d}.lv-leg b{font-size:12px}.lv-reasons{line-height:1.55;color:#9db4c2;font-size:9px}.lv-actions{display:flex;gap:8px;flex-wrap:wrap}.lv-danger{border-color:#71343c!important;color:#ff8f98!important}.lv-success{border-color:#245f4a!important;color:#55e0ad!important}.lv-monitor{border:1px solid #245f4a;background:#071c16;border-radius:12px;padding:12px}.lv-monitor b{color:#55e0ad}.lv-sim-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.lv-muted{color:#638196;font-size:8px;line-height:1.5}.lv-status{min-height:18px;color:#7ea1b3;font-size:9px}@media(max-width:1050px){.lv-grid{grid-template-columns:1fr}.lv-kpis{grid-template-columns:repeat(3,1fr)}}@media(max-width:650px){.lv-kpis{grid-template-columns:repeat(2,1fr)}.lv-leg-grid,.lv-sim-grid{grid-template-columns:1fr}.lv-wrap{padding:12px}}
 </style>
 <style id="ai-premium-theme">
 </style>
@@ -385,11 +388,69 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 <div class="top-tabs">
   <button class="top-tab-btn active" id="tabBtnCondor" onclick="switchTopTab('condor')">Option Selling — Condor / Strangle</button>
 <button class="top-tab-btn" id="tabBtnAutoTradeAI" onclick="switchTopTab('autoTradeAI')">🤖 Auto Buy/Sell AI</button>
+  <button class="top-tab-btn" id="tabBtnLongVol" onclick="switchTopTab('longVol')">⚡ Long Straddle / Strangle AI</button>
   
 </div>
 
 
 
+
+
+<div class="tab-page" id="tabPageLongVol">
+<div class="lv-wrap">
+  <div class="lv-card">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+      <div><h2 style="margin:0">⚡ Long Volatility AI</h2><div class="lv-muted">Find F&amp;O stocks where movement is likely to be large enough to overcome the option premium.</div></div>
+      <div class="lv-controls">
+        <label>Strategy<br><select id="lvStrategy"><option value="long_straddle" selected>Long Straddle</option><option value="long_strangle">Long Strangle</option></select></label>
+        <label>Expiry<br><select id="lvExpiry"><option value="">Auto</option></select></label>
+        <label>Lots<br><input id="lvLots" type="number" value="1" min="1" style="width:70px"></label>
+        <label>Show<br><select id="lvLimit"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select></label>
+        <button id="lvScanBtn">🔍 Scan Market</button>
+      </div>
+    </div>
+    <div id="lvScanStatus" class="lv-status"></div>
+  </div>
+
+  <div class="lv-kpis">
+    <div class="lv-kpi"><small>Best stock</small><b id="lvBestStock">—</b></div>
+    <div class="lv-kpi"><small>POP</small><b id="lvBestPop">—</b></div>
+    <div class="lv-kpi"><small>Touch probability</small><b id="lvBestTouch">—</b></div>
+    <div class="lv-kpi"><small>Movement score</small><b id="lvBestMove">—</b></div>
+    <div class="lv-kpi"><small>Expected value</small><b id="lvBestEV">—</b></div>
+    <div class="lv-kpi"><small>Long-vol score</small><b id="lvBestScore">—</b></div>
+  </div>
+
+  <div class="lv-card">
+    <h3>🏆 Ranked market scan</h3>
+    <div class="lv-muted" style="margin-bottom:8px">Scan first. Nothing is selected automatically. Choose any ranked stock below to build, simulate or trade it.</div>
+    <table class="lv-table" id="lvResultsTable"><thead><tr><th>#</th><th>Stock</th><th>LTP</th><th>Strategy</th><th>POP</th><th>Touch</th><th>Move</th><th>Breakout</th><th>IV/RV</th><th>EV/share</th><th>Score</th><th>Action</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="lv-grid">
+    <div class="lv-card">
+      <h3>📐 Selected trade</h3>
+      <div id="lvBuildStatus" class="lv-status">Run the scanner and select a stock.</div>
+      <div id="lvBuildPanel" style="display:none">
+        <div class="lv-kpis" style="grid-template-columns:repeat(4,1fr)">
+          <div class="lv-kpi"><small>Spot</small><b id="lvSpot">—</b></div><div class="lv-kpi"><small>Total premium</small><b id="lvPremium">—</b></div><div class="lv-kpi"><small>Lower BE</small><b id="lvLowerBE">—</b></div><div class="lv-kpi"><small>Upper BE</small><b id="lvUpperBE">—</b></div>
+        </div>
+        <div class="lv-leg-grid"><div class="lv-leg"><b>BUY CALL</b><div id="lvCallInfo"></div><button class="lv-success" id="lvBuyCallBtn">BUY CE</button></div><div class="lv-leg"><b>BUY PUT</b><div id="lvPutInfo"></div><button class="lv-success" id="lvBuyPutBtn">BUY PE</button></div></div>
+        <div style="margin-top:10px" class="lv-actions"><button id="lvBuyBothBtn">🚀 BUY BOTH</button><button id="lvTrackBtn">＋ Add to Monitor</button><button class="secondary" id="lvRefreshBuildBtn">↻ Refresh</button></div>
+        <div class="lv-reasons" id="lvReasons" style="margin-top:10px"></div>
+      </div>
+    </div>
+    <div class="lv-card"><h3>📈 Expiry payoff</h3><canvas id="lvPayoffCanvas" class="lv-chart"></canvas><div class="lv-muted">Expiry payoff shown before charges/slippage. The live trade can differ.</div></div>
+  </div>
+
+  <div class="lv-grid">
+    <div class="lv-card"><h3>🎮 Simulation</h3><div class="lv-sim-grid"><label>Move %<input id="lvSimMove" value="0" type="number" step="0.5"></label><label>IV change %<input id="lvSimIV" value="0" type="number" step="1"></label><label>Days elapsed<input id="lvSimDays" value="0" type="number" min="0"></label></div><button id="lvSimBtn" style="margin-top:10px">Simulate P&amp;L</button><div id="lvSimResult" class="lv-status"></div></div>
+    <div class="lv-card"><h3>🤖 Automatic monitor</h3><div class="lv-monitor"><div><b>Decision engine</b></div><div class="lv-muted">Monitors open Long Straddle/Strangle positions and suggests HOLD, BOOK PROFIT, STOP LOSS or EXIT. Paper mode is the default.</div><div class="lv-actions" style="margin-top:9px"><label>Mode<br><select id="lvMonitorMode"><option value="paper">Paper / decision only</option><option value="live">Live execution</option></select></label><label>Profit target %<br><input id="lvProfitTarget" value="50" type="number" style="width:75px"></label><label>Stop loss %<br><input id="lvStopLoss" value="50" type="number" style="width:75px"></label><label><input id="lvAutoExecute" type="checkbox"> Auto execute exits</label><button id="lvMonitorSave">Save monitor</button><button id="lvMonitorRefresh">Monitor now</button></div><div id="lvMonitorStatus" class="lv-status"></div></div></div>
+  </div>
+
+  <div class="lv-card"><h3>📋 Open Long Volatility positions</h3><div id="lvOpenPositions" class="lv-status">No positions loaded.</div></div>
+</div>
+</div>
 
 <div class="tab-page active" id="tabPageCondor">
 <div class="wrap">
@@ -2370,6 +2431,35 @@ async function deleteEvent(index) {
 document.getElementById("refreshEventsBtn").onclick = loadEvents;
 </script>
 
+
+<script>
+// ============================================================================
+// Long Volatility AI — scan, build, payoff, simulation and monitoring
+// ============================================================================
+let lvState={results:[],selected:null,positionId:null,initialized:false};
+const lvMoney=v=>v==null||!Number.isFinite(Number(v))?'—':'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:2});
+const lvPct=v=>v==null?'—':Number(v).toFixed(1)+'%';
+async function lvJson(url,opts={}){const r=await apiFetch(url,opts);const d=await r.json();if(!r.ok||d.error)throw new Error(d.error||('HTTP '+r.status));return d;}
+function lvSet(id,v){const e=document.getElementById(id);if(e)e.textContent=v;}
+function initLongVolAI(){if(lvState.initialized)return;lvState.initialized=true;document.getElementById('lvScanBtn').onclick=lvScan;document.getElementById('lvSimBtn').onclick=lvSimulate;document.getElementById('lvTrackBtn').onclick=lvTrack;document.getElementById('lvBuyBothBtn').onclick=()=>lvExecute('both');document.getElementById('lvBuyCallBtn').onclick=()=>lvExecute('call');document.getElementById('lvBuyPutBtn').onclick=()=>lvExecute('put');document.getElementById('lvRefreshBuildBtn').onclick=()=>lvLoadBuild(lvState.selected?.symbol);document.getElementById('lvMonitorRefresh').onclick=lvMonitor;document.getElementById('lvMonitorSave').onclick=lvSaveMonitor;}
+async function lvScan(){
+ const st=document.getElementById('lvScanStatus');st.textContent='Scanning F&O universe…';
+ try{const strategy=document.getElementById('lvStrategy').value;const limit=document.getElementById('lvLimit').value;const d=await lvJson(`/api/longvol/scan?strategy_type=${encodeURIComponent(strategy)}&limit=${limit}`);lvState.results=d.results||[];lvState.selected=null;renderLvResults();document.getElementById('lvBuildPanel').style.display='none';st.textContent=`Scanned ${d.scanned||d.count||0} stocks; ${d.count||0} eligible candidates ranked. Select any row to continue.`;}catch(e){st.textContent='Error: '+e.message;}}
+function renderLvResults(){const tb=document.querySelector('#lvResultsTable tbody');tb.innerHTML='';lvState.results.forEach((r,i)=>{const tr=document.createElement('tr');const breakout=r.breakout_score??r.movement_score??'—';tr.innerHTML=`<td>${r.rank||i+1}</td><td><b>${r.symbol}</b></td><td>${lvMoney(r.spot)}</td><td>${r.strategy_type==='long_strangle'?'Strangle':'Straddle'}</td><td>${lvPct(r.probability_of_profit_pct)}</td><td>${lvPct(r.probability_of_touch_pct)}</td><td>${r.movement_score??'—'}</td><td>${breakout}</td><td>${r.iv_hv?.ratio??'—'}</td><td>${lvMoney(r.expected_value_per_share)}</td><td class="lv-score">${r.long_vol_score??'—'}</td><td><button class="small-btn" onclick="lvSelect(lvState.results[${i}])">Build</button></td>`;tb.appendChild(tr)});}
+async function lvSelect(r){lvState.selected=r;lvSet('lvBestStock',r.symbol);lvSet('lvBestPop',lvPct(r.probability_of_profit_pct));lvSet('lvBestTouch',lvPct(r.probability_of_touch_pct));lvSet('lvBestMove',r.movement_score??'—');lvSet('lvBestEV',lvMoney(r.expected_value_per_share));lvSet('lvBestScore',r.long_vol_score??'—');await lvLoadBuild(r.symbol);}
+async function lvLoadBuild(symbol){if(!symbol)return;document.getElementById('lvBuildStatus').textContent='Building live option structure…';try{const strategy=document.getElementById('lvStrategy').value;const expiry=document.getElementById('lvExpiry').value;const lots=document.getElementById('lvLots').value;const d=await lvJson(`/api/longvol/build/${encodeURIComponent(symbol)}?strategy_type=${strategy}&lots=${lots}${expiry?'&expiry='+expiry:''}`);lvState.selected={...lvState.selected,...d};lvSet('lvBuildStatus',`${d.symbol} · ${d.strategy_type==='long_strangle'?'Long Strangle':'Long Straddle'} · ${d.expiry} · ${d.days_to_expiry} DTE`);document.getElementById('lvBuildPanel').style.display='block';lvSet('lvSpot',lvMoney(d.spot));lvSet('lvPremium',lvMoney(d.total_premium));lvSet('lvLowerBE',lvMoney(d.breakeven_lower));lvSet('lvUpperBE',lvMoney(d.breakeven_upper));const c=d.legs.buy_call,p=d.legs.buy_put;document.getElementById('lvCallInfo').innerHTML=`Strike <b>${c.strike}</b> · LTP ${lvMoney(c.ltp)} · Δ ${c.delta??'—'} · OI ${c.oi??'—'}`;document.getElementById('lvPutInfo').innerHTML=`Strike <b>${p.strike}</b> · LTP ${lvMoney(p.ltp)} · Δ ${p.delta??'—'} · OI ${p.oi??'—'}`;document.getElementById('lvReasons').innerHTML=`<b>Why selected:</b> ${[...(d.movement_reasons||[]),d.selection_note,d.event_before_expiry?.label].filter(Boolean).map(x=>'• '+x).join('<br>')||'• No additional flags'}<br><span class="lv-muted">POP ${lvPct(d.probability_of_profit_pct)} · Touch ${lvPct(d.probability_of_touch_pct)} · Score ${d.long_vol_score}/100</span>`;await lvPayoff(symbol);loadLvExpiryOptions(symbol);}catch(e){document.getElementById('lvBuildStatus').textContent='Error: '+e.message;}}
+async function loadLvExpiryOptions(symbol){try{const d=await lvJson(`/api/expiries/${encodeURIComponent(symbol)}`);const sel=document.getElementById('lvExpiry');const old=sel.value;sel.innerHTML='<option value="">Auto</option>'+(d.expiries||[]).map(x=>`<option value="${x}">${x}</option>`).join('');if((d.expiries||[]).includes(old))sel.value=old;}catch(e){}}
+async function lvPayoff(symbol){try{const strategy=document.getElementById('lvStrategy').value;const expiry=document.getElementById('lvExpiry').value;const d=await lvJson(`/api/longvol/payoff/${encodeURIComponent(symbol)}?strategy_type=${strategy}${expiry?'&expiry='+expiry:''}`);drawLvPayoff(d.points,d.build.spot,d.build.breakeven_lower,d.build.breakeven_upper);}catch(e){}}
+function drawLvPayoff(points,spot,lo,hi){const c=document.getElementById('lvPayoffCanvas'),ctx=c.getContext('2d'),w=c.clientWidth||700,h=c.clientHeight||300,dpr=window.devicePixelRatio||1;c.width=w*dpr;c.height=h*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);if(!points?.length)return;const minX=points[0].price,maxX=points.at(-1).price,minY=Math.min(...points.map(p=>p.pnl),0),maxY=Math.max(...points.map(p=>p.pnl),0),pad=35;const X=x=>pad+(x-minX)/(maxX-minX)*(w-pad*1.2),Y=y=>h-pad-(y-minY)/(maxY-minY||1)*(h-pad*1.5);ctx.strokeStyle='#24465a';ctx.beginPath();ctx.moveTo(pad,Y(0));ctx.lineTo(w-pad/2,Y(0));ctx.stroke();ctx.beginPath();points.forEach((p,i)=>i?ctx.lineTo(X(p.price),Y(p.pnl)):ctx.moveTo(X(p.price),Y(p.pnl)));ctx.strokeStyle='#43d9b1';ctx.lineWidth=2.5;ctx.stroke();[[lo,'Lower BE'],[spot,'Spot'],[hi,'Upper BE']].forEach(([x,l])=>{ctx.strokeStyle='#637f91';ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(X(x),20);ctx.lineTo(X(x),h-pad);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#9db4c2';ctx.font='10px sans-serif';ctx.fillText(l,X(x)+3,18);});ctx.fillStyle='#9db4c2';ctx.font='10px sans-serif';ctx.fillText('Price',w-60,h-8);ctx.fillText('P&L',5,15);}
+async function lvSimulate(){if(!lvState.selected?.symbol){alert('Select a stock first.');return;}try{const d=await lvJson('/api/longvol/simulate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:lvState.selected.symbol,strategy_type:document.getElementById('lvStrategy').value,expiry:document.getElementById('lvExpiry').value||undefined,lots:document.getElementById('lvLots').value,moves_pct:[Number(document.getElementById('lvSimMove').value)],iv_change_pct:Number(document.getElementById('lvSimIV').value),days_elapsed:Number(document.getElementById('lvSimDays').value)})});const x=d.scenarios?.[0];document.getElementById('lvSimResult').textContent=x?`Final spot ₹${x.final_spot.toFixed(2)} → estimated P&L ${lvMoney(x.estimated_pnl)}. Model estimate only.`:'No scenario returned.';}catch(e){document.getElementById('lvSimResult').textContent='Error: '+e.message;}}
+async function lvTrack(){if(!lvState.selected?.symbol){alert('Build a trade first.');return;}try{const d=await lvJson('/api/longvol/watchlist/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:lvState.selected.symbol,strategy_type:document.getElementById('lvStrategy').value,expiry:document.getElementById('lvExpiry').value||undefined,lots:document.getElementById('lvLots').value})});lvState.positionId=d.position.id;document.getElementById('lvMonitorStatus').textContent=`Tracking ${d.position.symbol} (${d.position.id}) in paper/decision mode.`;await lvMonitor();}catch(e){alert('Error: '+e.message);}}
+async function lvExecute(which){if(!lvState.positionId){await lvTrack();}if(!lvState.positionId)return;try{const d=await lvJson(`/api/execute/${lvState.positionId}/preview`);let orders=d.orders||[];if(which!=='both')orders=orders.filter(o=>which==='call'?o.leg==='buy_call':o.leg==='buy_put');if(!orders.length)return;const text=orders.map(o=>`${o.leg}: ${o.tradingsymbol} BUY ${o.quantity} @ ${o.recommended_limit_price}`).join('\n');if(!confirm(`Review live Zerodha order(s):\n\n${text}\n\nProceed?`))return;const r=await lvJson(`/api/execute/${lvState.positionId}/confirm`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmed:true,orders,product:'NRML',order_type:'LIMIT'})});alert((r.results||[]).map(x=>`${x.tradingsymbol}: ${x.status}${x.error?' — '+x.error:''}`).join('\n'));await lvMonitor();}catch(e){alert('Execution error: '+e.message);}}
+async function lvSaveMonitor(){try{const mode=document.getElementById('lvMonitorMode').value;const autoExecute=document.getElementById('lvAutoExecute').checked; const d=await lvJson('/api/longvol/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:true,mode,auto_execute:autoExecute,profit_target_pct:Number(document.getElementById('lvProfitTarget').value),stop_loss_pct:Number(document.getElementById('lvStopLoss').value),ack:mode==='live'?confirm('LIVE automatic execution can place REAL exit orders for tracked Long Vol positions. Continue?'):false})});document.getElementById('lvMonitorStatus').textContent=`Monitor saved: ${d.state.mode}. The engine generates decisions; live mode requires explicit acknowledgement.`;}catch(e){document.getElementById('lvMonitorStatus').textContent='Error: '+e.message;}}
+let lvMonitorTimer=null;
+async function lvMonitor(){try{const d=await lvJson('/api/longvol/monitor');const arr=d.positions||[];document.getElementById('lvOpenPositions').innerHTML=arr.length?arr.map(p=>{const c=p.current||{};return `<div class="lv-monitor" style="margin:6px 0"><b>${p.symbol}</b> · ${p.strategy_type} · Spot ${lvMoney(c.spot)} · P&L ${lvMoney(c.pnl)} · <b>${c.action||'—'}</b><br><span class="lv-muted">${(c.action_reasons||[]).join(' | ')}</span></div>`}).join(''):'No Long Vol positions tracked.';document.getElementById('lvMonitorStatus').textContent=`Updated ${new Date(d.refreshed_at).toLocaleTimeString()}.`; if(d.results?.some(x=>x.executed)) loadOrders();}catch(e){document.getElementById('lvMonitorStatus').textContent='Error: '+e.message;}}
+setInterval(()=>{ if(document.getElementById('tabPageLongVol')?.classList.contains('active')) lvMonitor(); }, 30000);
+</script>
+
 <script>
 // ============================================================================
 // ============================================================================
@@ -2378,18 +2468,19 @@ document.getElementById("refreshEventsBtn").onclick = loadEvents;
 function switchTopTab(which) {
   const isCondor = which === "condor";
   const isAutoTradeAI = which === "autoTradeAI";
+  const isLongVol = which === "longVol";
 
-  // Switch the page content.
   document.getElementById("tabPageCondor").classList.toggle("active", isCondor);
   document.getElementById("tabPageAutoTradeAI").classList.toggle("active", isAutoTradeAI);
+  document.getElementById("tabPageLongVol").classList.toggle("active", isLongVol);
 
-  // Switch the top navigation state.
   document.getElementById("tabBtnCondor").classList.toggle("active", isCondor);
   document.getElementById("tabBtnAutoTradeAI").classList.toggle("active", isAutoTradeAI);
+  document.getElementById("tabBtnLongVol").classList.toggle("active", isLongVol);
 
-  // AI-styled tab gets its own light-on-dark workspace. Condor keeps the original dark theme.
   document.body.classList.toggle("ai-evolution-mode", isAutoTradeAI);
 
+  if (isLongVol && typeof initLongVolAI === "function") initLongVolAI();
   if (isAutoTradeAI) {
     if (typeof initAutoTradeAIUI === "function") {
       initAutoTradeAIUI();
