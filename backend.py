@@ -59,8 +59,8 @@ from typing import List, Optional, Callable, Dict, Any, Tuple
 # this process starts) — do NOT hardcode real keys/secrets directly in this file,
 # especially if this file is ever shared, committed to git, or pasted anywhere.
 # ---------------------------------------------------------------------------
-API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
-API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
+API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4").strip()
+API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue").strip()
 REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
 
 # If your network does TLS interception (common on office/government networks — you'll see
@@ -8798,20 +8798,35 @@ def _hist_training_sequences(symbol):
     candidate=list(range(DL_SEQUENCE_LEN-1,usable,step))
     if candidate and candidate[-1] != usable-1:candidate.append(usable-1)
 
-    feature_rows={i:_hist_feature_row(rows,i,arrays) for i in candidate}
+    # IMPORTANT: build features lazily.  The previous eager comprehension
+    # materialised every candidate feature row before the progress loop began,
+    # which made the dashboard appear frozen at 13.3% for many minutes.
+    feature_rows={}
     seqs=[]; labels=[]; times=[]
     total_candidates=max(1,len(candidate))
     last_telemetry=time.monotonic()
     for cand_i,i in enumerate(candidate):
-        if i-DL_SEQUENCE_LEN+1<0 or i+AI_HIST_HORIZON_BARS>=len(rows):continue
+        if i-DL_SEQUENCE_LEN+1<0 or i+AI_HIST_HORIZON_BARS>=len(rows):
+            continue
         fseq=[]; ok=True
         for j in range(i-DL_SEQUENCE_LEN+1,i+1):
-            # j is usually not in candidate; build it only once and cache it.
-            if j not in feature_rows:feature_rows[j]=_hist_feature_row(rows,j,arrays)
+            if j not in feature_rows:
+                feature_rows[j]=_hist_feature_row(rows,j,arrays)
             f=feature_rows[j]
-            if not f:ok=False;break
+            if not f:
+                ok=False
+                break
             fseq.append([_norm_feature(n,f.get(n,0)) for n in SEQUENCE_FEATURE_NAMES])
-        if not ok:continue
+        if not ok:
+            continue
+        cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
+        if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):
+            continue
+        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if future>cur else 0); times.append(str(rows[i][0]))
+
+        # Emit progress from inside the actual expensive sequence-building loop.
+        # This means the displayed percentage reflects work really completed,
+        # not a CSS animation or a delayed phase boundary.
         now_mono=time.monotonic()
         if now_mono-last_telemetry>=0.5 or cand_i==total_candidates-1:
             try:
@@ -8825,10 +8840,8 @@ def _hist_training_sequences(symbol):
                 c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_elapsed_sec',?)",(str(round(elapsed,1)),))
                 c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_samples',?)",(str(len(seqs)),))
                 c.commit(); c.close(); last_telemetry=now_mono
-            except Exception: pass
-        cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
-        if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):continue
-        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if future>cur else 0); times.append(str(rows[i][0]))
+            except Exception:
+                pass
     return seqs,labels,times
 
 def _hist_set_status(status, detail=""):
