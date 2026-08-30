@@ -7148,6 +7148,12 @@ AI_HIST_REQUEST_STAGGER_SECONDS = float(os.environ.get("AI_HIST_REQUEST_STAGGER_
 AI_HIST_BACKFILL_ENABLED = os.environ.get("AI_HIST_BACKFILL_ENABLED", "1").lower() not in ("0", "false", "no")
 AI_HIST_SYNC_HOURS = float(os.environ.get("AI_HIST_SYNC_HOURS", "6"))
 AI_HIST_HORIZON_BARS = int(os.environ.get("AI_HIST_HORIZON_BARS", "6"))
+# Signal-quality target: ignore tiny forward moves that are mostly market noise.
+# The threshold adapts to recent realised volatility, so the model learns meaningful
+# directional moves rather than treating every microscopic uptick/downtick as a label.
+AI_HIST_NOISE_FLOOR_PCT = float(os.environ.get("AI_HIST_NOISE_FLOOR_PCT", "0.08"))
+AI_HIST_NOISE_CEILING_PCT = float(os.environ.get("AI_HIST_NOISE_CEILING_PCT", "0.60"))
+AI_HIST_NOISE_VOL_MULT = float(os.environ.get("AI_HIST_NOISE_VOL_MULT", "0.45"))
 AI_HIST_MIN_TRAIN = int(os.environ.get("AI_HIST_MIN_TRAIN", "300"))
 AI_OPTION_CAPTURE_MINUTES = int(os.environ.get("AI_OPTION_CAPTURE_MINUTES", "5"))
 AI_OPTION_CAPTURE_DAYS = int(os.environ.get("AI_OPTION_CAPTURE_DAYS", "0"))  # 0 = retain indefinitely
@@ -7812,12 +7818,17 @@ def _gru_forward(params,X,cache=False):
     return (prob,states) if cache else prob
 
 
-def _gru_backward(params,X,Y,states,prob):
+def _gru_backward(params,X,Y,states,prob,sample_weight=None):
     X=np.asarray(X,dtype=float); Y=np.asarray(Y,dtype=float).reshape(-1)
     B,T,D=X.shape; H=params["Wo"].shape[0]
     g={k:np.zeros_like(v) for k,v in params.items()}
-    # BCE derivative wrt final logits.
-    dlog=(prob-Y).reshape(-1,1)/max(B,1)
+    # BCE derivative wrt final logits, optionally class-weighted.
+    if sample_weight is None:
+        sw=np.ones(B,dtype=float)
+    else:
+        sw=np.asarray(sample_weight,dtype=float).reshape(-1)
+        if len(sw)!=B: sw=np.ones(B,dtype=float)
+    dlog=((prob-Y)*sw).reshape(-1,1)/max(B,1)
     g["Wo"]+=states[-1][5].T@dlog; g["bo"]+=np.sum(dlog,axis=0)
     dh=dlog@params["Wo"].T
     for t in range(T-1,-1,-1):
@@ -7867,8 +7878,8 @@ def ai_dl_model():
         stored_fv=r["feature_version"] if "feature_version" in r.keys() else None
         version_ok = (stored_fv == FEATURE_ENGINE_VERSION)
         status=r["status"] if (is_gru and version_ok) else ("RETRAIN REQUIRED — feature engine upgraded" if is_gru else "LEGACY MODEL — REBUILD REQUIRED")
-        return {"status":status,"samples":int(r["samples"] or 0) if is_gru else 0,"accuracy":float(r["accuracy"] or 0) if is_gru else 0.0,"auc":float(r["auc"] or 0) if is_gru else 0.0,"updated_at":r["updated_at"] if is_gru else None,"architecture":"GRU-32 recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"feature_version":stored_fv,"current_feature_version":FEATURE_ENGINE_VERSION}
-    except Exception:return {"status":"NOT_TRAINED","samples":0,"accuracy":0.0,"auc":0.0,"architecture":"GRU-32 recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"updated_at":None}
+        return {"status":status,"samples":int(r["samples"] or 0) if is_gru else 0,"accuracy":float(r["accuracy"] or 0) if is_gru else 0.0,"auc":float(r["auc"] or 0) if is_gru else 0.0,"updated_at":r["updated_at"] if is_gru else None,"architecture":f"GRU-{DL_GRU_HIDDEN} recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"feature_version":stored_fv,"current_feature_version":FEATURE_ENGINE_VERSION}
+    except Exception:return {"status":"NOT_TRAINED","samples":0,"accuracy":0.0,"auc":0.0,"architecture":f"GRU-{DL_GRU_HIDDEN} recurrent sequence model","sequence_length":DL_SEQUENCE_LEN,"hidden_units":DL_GRU_HIDDEN,"updated_at":None}
 
 
 def _dl_load_weights():
@@ -7903,18 +7914,31 @@ def _ai_dl_train_arrays(X,Y,status_name="TRAINED",seed=42,epochs_override=None):
     cut=max(1,int(len(X)*0.8));cut=min(cut,len(X)-1)
     Xtr,Ytr=X[:cut],Y[:cut];Xv,Yv=X[cut:],Y[cut:]
     params=_gru_init(X.shape[2],DL_GRU_HIDDEN,seed)
-    p=ai_settings();lr=float(p.get("dl_learning_rate",0.01));epochs=min(60,max(8,int(epochs_override if epochs_override is not None else p.get("dl_epochs",30))))
+    p=ai_settings();lr=float(p.get("dl_learning_rate",0.01));epochs=min(80,max(12,int(epochs_override if epochs_override is not None else p.get("dl_epochs",30))))
     bs=max(8,min(DL_BATCH_SIZE,len(Xtr)))
-    rng=np.random.default_rng(seed)
-    # Training batches remain chronological inside each batch; batch order may change, but
-    # validation remains untouched and chronological.
+    # Balance the loss when the signal-aware target produces a mild class skew.
+    n1=max(1,int(np.sum(Ytr>=0.5))); n0=max(1,len(Ytr)-n1)
+    w0=len(Ytr)/(2.0*n0); w1=len(Ytr)/(2.0*n1)
+    best_params=None; best_key=(-1.0,-1.0); patience=0
+    # Deterministic chronological mini-batches; validation remains untouched.
     for ep in range(epochs):
-        # deterministic contiguous mini-batches; no leakage from validation
         for lo in range(0,len(Xtr),bs):
             xb=Xtr[lo:lo+bs];yb=Ytr[lo:lo+bs]
             pred,cache=_gru_forward(params,xb,cache=True)
-            grads=_gru_backward(params,xb,yb,cache,pred)
+            # Apply class weights directly to the BCE gradient.
+            sample_w=np.where(yb>=0.5,w1,w0)
+            grads=_gru_backward(params,xb,yb,cache,pred,sample_weight=sample_w)
             _gru_apply(params,grads,lr,clip=1.0)
+        pv_now=_gru_forward(params,Xv)
+        a_now=float(np.mean((pv_now>=0.5)==(Yv>=0.5))*100) if len(Yv) else 0.0
+        u_now=float(_dl_auc(Yv.astype(int),pv_now)) if len(set(Yv.astype(int).tolist()))>=2 else 0.0
+        key=(u_now,a_now)
+        if key>best_key:
+            best_key=key; best_params={k:v.copy() for k,v in params.items()}; patience=0
+        else:
+            patience+=1
+            if patience>=8 and ep>=12: break
+    if best_params is not None: params=best_params
     pv=_gru_forward(params,Xv)
     acc=float(np.mean((pv>=0.5)==(Yv>=0.5))*100) if len(Yv) else 0.0
     auc=float(_dl_auc(Yv.astype(int),pv)) if len(set(Yv.astype(int).tolist()))>=2 else 0.0
@@ -8799,7 +8823,18 @@ def _hist_training_sequences(symbol):
         if not ok:continue
         cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
         if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):continue
-        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if future>cur else 0); times.append(str(rows[i][0]))
+        # Signal-aware binary target.  Tiny moves are excluded rather than forced
+        # into UP/DOWN, because those observations are dominated by micro-noise and
+        # are especially harmful for an options-buying classifier.  The threshold is
+        # adaptive to the same realised-volatility feature used by the GRU.
+        f0=feature_rows.get(i) or {}
+        vol10=float(f0.get("volatility_10",0.0) or 0.0)
+        scale=math.sqrt(max(AI_HIST_HORIZON_BARS,1)/10.0)
+        noise_threshold=max(AI_HIST_NOISE_FLOOR_PCT, min(AI_HIST_NOISE_CEILING_PCT, AI_HIST_NOISE_VOL_MULT*vol10*scale))
+        fwd_ret=(future/cur-1.0)*100.0
+        if abs(fwd_ret) < noise_threshold:
+            continue
+        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if fwd_ret>0 else 0); times.append(str(rows[i][0]))
     return seqs,labels,times
 
 def _hist_set_status(status, detail=""):
@@ -9178,6 +9213,33 @@ def ai_versions_api():
 @app.route('/api/ai-evolution/events')
 def ai_events_api():
     c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_events ORDER BY id DESC LIMIT 150')];c.close();return jsonify(r)
+
+@app.route('/api/ai-evolution/historical/retrain', methods=['POST'])
+def ai_historical_retrain_api():
+    """Manually start bounded historical GRU retraining in the background."""
+    try:
+        hs = ai_hist_status()
+        total = int(hs.get("candles") or 0)
+        if total < AI_HIST_MIN_TRAIN:
+            return jsonify({
+                "ok": False,
+                "status": "NOT_ENOUGH_HISTORY",
+                "candles": total,
+                "required": int(AI_HIST_MIN_TRAIN),
+                "message": f"Need at least {int(AI_HIST_MIN_TRAIN):,} historical candles before retraining."
+            }), 400
+        ai_hist_train_deep(force=True)
+        return jsonify({
+            "ok": True,
+            "started": True,
+            "status": "TRAINING_STARTED",
+            "historical": ai_hist_status(),
+            "message": "Historical GRU retraining started in the background."
+        })
+    except Exception as e:
+        ai_log("ERROR", "HISTORICAL_RETRAIN_API", f"{type(e).__name__}: {e}")
+        return jsonify({"ok": False, "status": "ERROR", "message": str(e)}), 500
+
 @app.route('/api/ai-evolution/historical')
 def ai_historical_api():
     return jsonify(ai_hist_status())
