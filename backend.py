@@ -8645,7 +8645,7 @@ def ai_hist_status():
     oldest=c.execute("SELECT MIN(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     newest=c.execute("SELECT MAX(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     c.close()
-    value={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,"max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,"horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),"oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],"runs":[dict(r) for r in runs],"model":dict(model) if model else None,"last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),"train_detail":rt.get("hist_train_detail"),"status":rt.get("hist_status","WAITING FOR KITE"),"collector_status":rt.get("hist_collector_status",rt.get("hist_status","WAITING FOR KITE")),"model_status":rt.get("hist_model_status",(dict(model).get("status") if model else "NOT TRAINED")),"detail":rt.get("hist_detail",""),"archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),"training_requested":rt.get("hist_training_requested","0"),"training_started_at":rt.get("hist_training_started_at"),"training_error":rt.get("hist_training_error",""),"option_capture":ai_option_capture_status()}
+    value={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,"max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,"horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),"oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],"runs":[dict(r) for r in runs],"model":dict(model) if model else None,"last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),"train_detail":rt.get("hist_train_detail"),"status":rt.get("hist_status","WAITING FOR KITE"),"collector_status":rt.get("hist_collector_status",rt.get("hist_status","WAITING FOR KITE")),"model_status":rt.get("hist_model_status",(dict(model).get("status") if model else "NOT TRAINED")),"detail":rt.get("hist_detail",""),"archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),"training_requested":rt.get("hist_training_requested","0"),"training_started_at":rt.get("hist_training_started_at"),"training_error":rt.get("hist_training_error",""),"training_progress":float(rt.get("hist_training_progress","0") or 0),"training_phase":rt.get("hist_training_phase","IDLE"),"option_capture":ai_option_capture_status()}
     with _AI_HIST_STATUS_CACHE_LOCK:
         _AI_HIST_STATUS_CACHE["at"]=now_m
         _AI_HIST_STATUS_CACHE["value"]=value
@@ -8863,13 +8863,23 @@ def ai_hist_train_deep(force=False):
     try:
         started=datetime.now(IST).isoformat()
         c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_started_at',?)",(started,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_requested',?)",("0",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.commit();c.close()
+        c=ai_db()
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",("1",))
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",("INITIALIZING",))
+        c.commit(); c.close()
         _hist_set_model_status("BUILDING SEQUENCES","Preparing chronological GRU sequences from historical archive")
         allx=[];ally=[];all_times=[];per_symbol={}
-        for sym in AI_HIST_SYMBOLS:
+        total_symbols=max(1,len(AI_HIST_SYMBOLS))
+        for sym_i, sym in enumerate(AI_HIST_SYMBOLS):
             try:
                 x,y,t=_hist_training_sequences(sym);per_symbol[sym]=len(x);allx.extend(x);ally.extend(y);all_times.extend(t);ai_log("LEARNING","HIST_SEQUENCE_BUILD",f"{sym}: GRU sequences={len(x)}")
             except Exception as e:
                 per_symbol[sym]=0;ai_log("ERROR","HIST_SEQUENCE_BUILD",f"{sym}: {e}")
+            progress=5.0 + (sym_i+1)/total_symbols*25.0
+            c=ai_db()
+            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",(str(round(progress,1)),))
+            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",(f"BUILDING SEQUENCES · {sym_i+1}/{total_symbols}",))
+            c.commit(); c.close()
         if allx and len(allx)==len(ally)==len(all_times):
             order=sorted(range(len(allx)),key=lambda i:all_times[i]);allx=[allx[i] for i in order];ally=[ally[i] for i in order]
         if len(allx)<AI_HIST_MIN_TRAIN:
@@ -8886,6 +8896,10 @@ def ai_hist_train_deep(force=False):
             keep_idx=np.linspace(0,len(X)-1,AI_HIST_TRAIN_MAX_SAMPLES).round().astype(int)
             keep_idx=np.unique(keep_idx)
             X=X[keep_idx];Y=Y[keep_idx]
+        c=ai_db()
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",("35",))
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",(f"TRAINING GRU · {len(X):,} sequences · {AI_HIST_TRAIN_EPOCHS} epochs",))
+        c.commit(); c.close()
         _hist_set_model_status("TRAINING GRU SEQUENCE MODEL",f"GRU hidden={DL_GRU_HIDDEN} sequence_len={DL_SEQUENCE_LEN} samples={len(X)} epochs={AI_HIST_TRAIN_EPOCHS}")
         trained=_ai_dl_train_arrays(X,Y,"HISTORICAL_PRETRAINED",seed=20260825,epochs_override=AI_HIST_TRAIN_EPOCHS)
         if not trained:
@@ -8895,6 +8909,10 @@ def ai_hist_train_deep(force=False):
         now=datetime.now(IST).isoformat();c=ai_db();hist_status="PRETRAINED" if val_samples and len(set(Y[-val_samples:].astype(int).tolist()))>=2 else "PRETRAINED — AUC UNAVAILABLE"
         c.execute("INSERT OR REPLACE INTO ai_hist_model(id,updated_at,symbols,interval,samples,train_samples,validation_samples,accuracy,auc,status,lookback_days,feature_version) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)",(now,",".join(AI_HIST_SYMBOLS),AI_HIST_INTERVAL,samples,train_samples,val_samples,acc,auc,hist_status,AI_HIST_LOOKBACK_DAYS,FEATURE_ENGINE_VERSION))
         c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_last_train_at',?)",(now,));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_status',?)",("PRETRAINED — LIVE GRU LEARNING CONTINUES",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_collector_status',?)",("HISTORY COLLECTION COMPLETE",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",("",));c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_train_detail',?)",(f"architecture=GRU-{DL_GRU_HIDDEN} sequence={DL_SEQUENCE_LEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f} per_symbol={per_symbol}",));c.commit();c.close()
+        c=ai_db()
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",("100",))
+        c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",("COMPLETE",))
+        c.commit(); c.close()
         ai_log("LEARNING","HISTORICAL_GRU_PRETRAIN",f"GRU-{DL_GRU_HIDDEN} samples={samples} train={train_samples} validation={val_samples} accuracy={acc:.1f}% auc={auc:.3f}");return ai_hist_status()
     except Exception as e:
         logger.exception("historical GRU pre-training failed");detail=f"{type(e).__name__}: {e}";_hist_set_model_status("TRAINING ERROR — RETRYING",detail);ai_log("ERROR","HISTORICAL_GRU_TRAIN",detail);c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",(detail,));c.commit();c.close();return ai_hist_status()
@@ -9228,14 +9246,40 @@ def ai_historical_retrain_api():
                 "required": int(AI_HIST_MIN_TRAIN),
                 "message": f"Need at least {int(AI_HIST_MIN_TRAIN):,} historical candles before retraining."
             }), 400
-        ai_hist_train_deep(force=True)
+        # IMPORTANT: training is CPU/RAM intensive. Never run it inside the
+        # HTTP request; a reverse proxy can otherwise time out with a 504.
+        def _run_manual_hist_retrain():
+            try:
+                ai_hist_train_deep(force=True)
+            except Exception as e:
+                logger.exception("manual historical GRU retrain failed")
+                try:
+                    ai_log("ERROR", "HISTORICAL_RETRAIN_BACKGROUND", f"{type(e).__name__}: {e}")
+                except Exception:
+                    pass
+
+        # If another training job owns the lock, report that rather than
+        # launching another copy. The real trainer still owns the lock.
+        if not AI_HIST_TRAIN_LOCK.acquire(blocking=False):
+            return jsonify({
+                "ok": True,
+                "started": False,
+                "status": "ALREADY_RUNNING",
+                "historical": ai_hist_status(),
+                "message": "Historical GRU training is already running."
+            }), 200
+        AI_HIST_TRAIN_LOCK.release()
+
+        threading.Thread(target=_run_manual_hist_retrain, daemon=True,
+                         name="manual-historical-gru-retrain").start()
+
         return jsonify({
             "ok": True,
             "started": True,
             "status": "TRAINING_STARTED",
             "historical": ai_hist_status(),
             "message": "Historical GRU retraining started in the background."
-        })
+        }), 202
     except Exception as e:
         ai_log("ERROR", "HISTORICAL_RETRAIN_API", f"{type(e).__name__}: {e}")
         return jsonify({"ok": False, "status": "ERROR", "message": str(e)}), 500
