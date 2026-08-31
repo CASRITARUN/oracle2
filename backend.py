@@ -39,7 +39,6 @@ import threading
 import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory, redirect
 
@@ -60,8 +59,8 @@ from typing import List, Optional, Callable, Dict, Any, Tuple
 # this process starts) — do NOT hardcode real keys/secrets directly in this file,
 # especially if this file is ever shared, committed to git, or pasted anywhere.
 # ---------------------------------------------------------------------------
-API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4").strip()
-API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue").strip()
+API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
+API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
 REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
 
 # If your network does TLS interception (common on office/government networks — you'll see
@@ -87,17 +86,6 @@ DEFAULT_CALENDAR_TARGET_DELTA = 0.25 # used instead of otm_pct in "delta" strike
 CALENDAR_TARGET_GAP_DAYS = 30        # preferred day-gap between near and far expiry when auto-picking
 CALENDAR_CURVE_POINTS = 41           # number of spot points sampled for the payoff curve
 CALENDAR_CURVE_RANGE_PCT = 0.15      # curve spans spot x (1 +/- this), i.e. +/-15% around current spot
-
-# --- Long Straddle / Strangle AI defaults ---
-LONGVOL_DEFAULT_STRATEGY = "long_straddle"
-LONGVOL_STRANGLE_DELTAS = (0.15, 0.20, 0.25)
-LONGVOL_MIN_POP = 50.0
-LONGVOL_MIN_LIQUIDITY_OI = 100
-LONGVOL_MAX_SPREAD_PCT = 5.0
-LONGVOL_STOP_LOSS_PCT = 50.0          # loss as % of premium paid
-LONGVOL_PROFIT_TARGET_PCT = 50.0      # gain as % of premium paid
-LONGVOL_MONITOR_INTERVAL_SEC = 30
-LONGVOL_STATE_FILE = "longvol_state.json"
 # Exit-suggestion thresholds for tracked calendar positions (informational only, never auto-exits)
 CALENDAR_STOP_LOSS_DEBIT_MULTIPLE = 0.5   # suggest exit if loss reaches this multiple of debit paid
 CALENDAR_NEAR_EXPIRY_DAYS_WARNING = 3     # suggest exit/roll when this close to near-leg expiry (gamma risk)
@@ -180,6 +168,56 @@ SCORE_WEIGHTS = {"iv_richness": 0.40, "calmness": 0.35, "liquidity": 0.25}  # le
 
 NEWS_FOR_TOP_N = 10
 FO_BAN_LIST_URL = "https://nsearchives.nseindia.com/content/fo/fo_secban.csv"
+
+# ---------------------------------------------------------------------------
+# Long Straddle / Strangle — "Volatility Breakout" module
+# ---------------------------------------------------------------------------
+# Opposite thesis to everything above: instead of SELLING premium expecting the underlying to stay
+# calm and range-bound, this BUYS an ATM straddle (or a wider, cheaper OTM strangle) expecting a
+# LARGE move in EITHER direction before expiry — a breakout, a results/event day, or a volatility
+# expansion. It is a net-DEBIT, defined-risk trade (max loss = debit paid, capped and known up
+# front) that is net LONG gamma/vega and net SHORT theta: it makes money from a big move or a rise
+# in IV, and bleeds a little value every single day the underlying just sits still. This whole
+# module (screener, builder, tracked positions, execution) is deliberately kept INDEPENDENT of the
+# Option-Selling Condor/Strangle module above — it does not require that screener to have been run
+# first, and it stores its own tracked positions in a separate file so the two can never collide.
+DEFAULT_MOVE_OTM_PCT = 0.03            # each strangle leg this far OTM from spot, by default
+MOVE_MIN_DTE = 7
+MOVE_MAX_DTE = 45
+MOVE_PREFERRED_DTE_LOW = 14
+MOVE_PREFERRED_DTE_HIGH = 30
+MOVE_CURVE_POINTS = 41
+MOVE_CURVE_RANGE_PCT = 0.20             # payoff chart spans spot x (1 +/- this)
+MOVE_MIN_ATM_TOTAL_OI = 300
+MOVE_MAX_ATM_SPREAD_PCT = 6.0
+# Exit-suggestion thresholds for tracked positions (informational only — this tool never auto-exits)
+MOVE_PROFIT_TARGET_MULTIPLE = 1.0       # suggest booking profit once gain reaches 100% of debit paid
+MOVE_STOP_LOSS_DEBIT_PCT = 0.45         # suggest cutting loss once value has decayed by this fraction of debit
+MOVE_EXPIRY_WARNING_DAYS = 5            # theta/gamma warning window as expiry nears
+# --- "Digest" thresholds — the multi-factor hold/exit read (see classify_move_digest) that replaces
+# a single fixed 50%-profit / 50%-loss trigger with a read of where the trade ACTUALLY stands: how
+# much of the expected move has shown up, how much time has elapsed, whether IV is still expanding or
+# already crushing, and whether daily value is building or decaying. Informational only.
+MOVE_MOMENTUM_LOOKBACK_DAYS = 3         # how many recent daily marks define "building" vs "decaying"
+MOVE_MOMENTUM_FLAT_BAND_PCT = 0.02      # day-to-day value change smaller than this fraction is "flat", not a trend
+MOVE_LOW_MOVE_PROGRESS_PCT = 35         # below this % of entry's expected move realized = "hasn't happened yet"
+MOVE_HIGH_MOVE_PROGRESS_PCT = 90        # above this % of entry's expected move realized = "largely played out"
+# Squeeze/breakout-setup diagnostics (daily candles)
+MOVE_SQUEEZE_LOOKBACK_DAYS = 150
+MOVE_BB_PERIOD = 20
+MOVE_NR_WINDOW = 7                      # "NR7" — narrowest daily range in the last 7 sessions
+# Composite "move score" weights — how good the SETUP is for a long-vol trade, not a probability.
+MOVE_SCORE_WEIGHTS = {
+    "squeeze": 0.25,             # Bollinger-band-width percentile is currently tight (compressed range)
+    "iv_cheapness": 0.25,        # options are cheap relative to the underlying's own historical volatility
+    "momentum_building": 0.20,   # ADX low-and-turning-up — a move may be starting, not already spent
+    "volume_setup": 0.15,        # a dry-up before, or a pickup right now, consistent with a breakout starting
+    "proximity": 0.10,           # spot sitting close to a well-defined range edge (a trigger level)
+    "event": 0.05,               # a scheduled macro/event-calendar catalyst falls before expiry
+}
+MOVE_POSITIONS_FILE = os.path.join(os.path.dirname(__file__), "move_positions.json")
+_move_positions_lock = threading.Lock()
+MOVE_SCREENER_CACHE = {"results": None, "fetched_at": None}
 
 
 def load_iv_history():
@@ -480,6 +518,30 @@ def save_positions(positions):
 
 def find_position(pos_id):
     for p in load_positions():
+        if p["id"] == pos_id:
+            return p
+    return None
+
+
+# --- Independent storage for the Long Straddle/Strangle module (see config block above) ---
+def load_move_positions():
+    if not os.path.exists(MOVE_POSITIONS_FILE):
+        return []
+    try:
+        with open(MOVE_POSITIONS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_move_positions(positions):
+    with _move_positions_lock:
+        with open(MOVE_POSITIONS_FILE, "w") as f:
+            json.dump(positions, f, indent=2, default=str)
+
+
+def find_move_position(pos_id):
+    for p in load_move_positions():
         if p["id"] == pos_id:
             return p
     return None
@@ -2530,546 +2592,6 @@ def build_strategy(symbol, target_delta=DEFAULT_TARGET_DELTA, wing_width_pct=DEF
     return result
 
 
-# ---------------------------------------------------------------------------
-# Long Volatility AI — Long Straddle / Long Strangle
-# ---------------------------------------------------------------------------
-def _longvol_score_range(value, lo, hi):
-    if value is None:
-        return 50.0
-    if hi <= lo:
-        return 50.0
-    return max(0.0, min(100.0, (float(value) - lo) / (hi - lo) * 100.0))
-
-
-def _longvol_touch_probability(spot, lower, upper, iv_pct, days):
-    """Approximate probability of touching either breakeven before expiry.
-    This is deliberately labelled an estimate: a simple doubled-tail approximation is
-    used rather than pretending to be an exact first-passage probability."""
-    expiry_pop = model_expiry_probability_between(spot, lower, upper, iv_pct, days)
-    if expiry_pop is None:
-        return None
-    outside = max(0.0, 100.0 - expiry_pop)
-    return round(min(99.9, outside * 1.65), 1)
-
-
-def _longvol_movement_score(symbol, rank=None):
-    rank = rank or get_stock_rank(symbol) or {}
-    hv = rank.get("hv_annualized_pct")
-    atr = rank.get("atr_pct_of_price")
-    iv = rank.get("atm_iv_pct")
-    trend = get_trend_regime(symbol)
-    score = 50.0
-    reasons = []
-    if hv is not None:
-        score += min(15.0, max(-10.0, (hv - 25.0) * 0.5))
-    if atr is not None:
-        score += min(12.0, max(-8.0, (atr - 2.0) * 4.0))
-    regime = trend.get("regime") if not trend.get("error") else "Unknown"
-    adx = trend.get("adx14") if not trend.get("error") else None
-    rsi = trend.get("rsi14") if not trend.get("error") else None
-    if regime in ("Strong Uptrend", "Strong Downtrend"):
-        score += 16
-        reasons.append(regime)
-    elif regime == "Transitioning":
-        score += 10
-        reasons.append("Trend transition")
-    elif regime == "Volatile / Mixed":
-        score += 8
-        reasons.append("Volatile/mixed regime")
-    if adx is not None and adx >= 25:
-        score += 8
-        reasons.append(f"ADX {adx} shows directional expansion")
-    if rsi is not None and (rsi >= 65 or rsi <= 35):
-        score += 5
-        reasons.append(f"RSI {rsi} shows strong momentum")
-    if hv is not None and iv is not None and iv < hv:
-        score += 12
-        reasons.append("Realized volatility currently exceeds IV")
-    return round(max(0.0, min(100.0, score)), 1), trend, reasons
-
-
-def _longvol_build_from_chain(symbol, strategy_type="long_straddle", expiry_str=None, lots=1):
-    symbol = symbol.upper()
-    data, err = get_chain_for_symbol(symbol, expiry_str)
-    if err:
-        return err
-    spot, expiry, chain, lot_size = data["spot"], data["expiry"], data["chain"], data["lot_size"]
-    qty = lot_size * max(1, int(lots))
-    calls = sorted([o for o in chain if o["instrument_type"] == "CE"], key=lambda x: abs(x["strike"] - spot))
-    puts = sorted([o for o in chain if o["instrument_type"] == "PE"], key=lambda x: abs(x["strike"] - spot))
-    if not calls or not puts:
-        return {"error": "Incomplete option chain: call and put quotes are required."}
-
-    def leg(o, role):
-        return {k: o.get(k) for k in ("strike","ltp","bid","ask","mid","oi","volume","iv","delta","spread_pct","tradingsymbol")} | {"role": role}
-
-    chosen_call, chosen_put = calls[0], puts[0]
-    selection_note = "ATM call + ATM put"
-    if strategy_type == "long_strangle":
-        # Search symmetric delta pairs and choose the structure with the best blend of
-        # POP, movement score, premium efficiency and liquidity.
-        candidates = []
-        all_calls = [o for o in chain if o["instrument_type"] == "CE" and o.get("delta") is not None]
-        all_puts = [o for o in chain if o["instrument_type"] == "PE" and o.get("delta") is not None]
-        for target in LONGVOL_STRANGLE_DELTAS:
-            cands_c = [o for o in all_calls if 0.03 <= o["delta"] <= 0.50]
-            cands_p = [o for o in all_puts if -0.50 <= o["delta"] <= -0.03]
-            if not cands_c or not cands_p:
-                continue
-            c = min(cands_c, key=lambda o: abs(o["delta"] - target))
-            p = min(cands_p, key=lambda o: abs(abs(o["delta"]) - target))
-            premium = float(c["ltp"] or 0) + float(p["ltp"] or 0)
-            if premium <= 0:
-                continue
-            lower = float(p["strike"]) - premium
-            upper = float(c["strike"]) + premium
-            rank = get_stock_rank(symbol) or {}
-            iv = rank.get("atm_iv_pct") or ((float(c.get("iv") or 0) + float(p.get("iv") or 0)) / 2)
-            days = max(1, (expiry - now_ist().date()).days)
-            pop = model_expiry_probability_between(spot, lower, upper, iv, days)
-            touch = _longvol_touch_probability(spot, lower, upper, iv, days)
-            liq = min(float(c.get("oi") or 0), float(p.get("oi") or 0))
-            spread_vals = [x.get("spread_pct") for x in (c,p) if x.get("spread_pct") is not None]
-            spread_penalty = max(spread_vals) if spread_vals else 0
-            score = (pop or 0) * 0.45 + (touch or 0) * 0.25 + min(100, liq / max(LONGVOL_MIN_LIQUIDITY_OI,1) * 50) * 0.15 + max(0, 100-spread_penalty*10) * 0.15
-            candidates.append((score, target, c, p, premium, lower, upper, pop, touch, iv))
-        if candidates:
-            best = max(candidates, key=lambda x: x[0])
-            _, target, chosen_call, chosen_put, premium, lower, upper, pop, touch, iv = best
-            selection_note = f"Auto-selected approx ±{target:.2f} delta strikes"
-        else:
-            chosen_call, chosen_put = calls[0], puts[0]
-            premium = float(chosen_call["ltp"]) + float(chosen_put["ltp"])
-            lower, upper, pop, touch, iv = float(chosen_put["strike"])-premium, float(chosen_call["strike"])+premium, None, None, None
-    else:
-        premium = float(chosen_call["ltp"] or 0) + float(chosen_put["ltp"] or 0)
-        lower, upper = spot - premium, spot + premium
-        rank = get_stock_rank(symbol) or {}
-        iv = rank.get("atm_iv_pct") or ((float(chosen_call.get("iv") or 0)+float(chosen_put.get("iv") or 0))/2)
-        days = max(1, (expiry - now_ist().date()).days)
-        pop = model_expiry_probability_between(spot, lower, upper, iv, days)
-        touch = _longvol_touch_probability(spot, lower, upper, iv, days)
-
-    rank = get_stock_rank(symbol) or {}
-    movement_score, trend, movement_reasons = _longvol_movement_score(symbol, rank)
-    iv_hv = classify_iv_hv(rank.get("atm_iv_pct"), rank.get("hv_annualized_pct"))
-    days = max(1, (expiry - now_ist().date()).days)
-    if strategy_type == "long_strangle" and 'premium' not in locals():
-        premium = float(chosen_call["ltp"]) + float(chosen_put["ltp"])
-        lower, upper = float(chosen_put["strike"]) - premium, float(chosen_call["strike"]) + premium
-        iv = rank.get("atm_iv_pct")
-        pop = model_expiry_probability_between(spot, lower, upper, iv, days) if iv else None
-        touch = _longvol_touch_probability(spot, lower, upper, iv, days) if iv else None
-
-    liquidity_oi = min(float(chosen_call.get("oi") or 0), float(chosen_put.get("oi") or 0))
-    spreads = [x.get("spread_pct") for x in (chosen_call, chosen_put) if x.get("spread_pct") is not None]
-    spread_pct = max(spreads) if spreads else None
-    liquidity_score = min(100.0, liquidity_oi / max(LONGVOL_MIN_LIQUIDITY_OI,1) * 50.0)
-    if spread_pct is not None:
-        liquidity_score = (liquidity_score + max(0.0, 100.0 - spread_pct * 10.0)) / 2
-    iv_rv_score = 50.0
-    if rank.get("hv_annualized_pct") and rank.get("atm_iv_pct"):
-        ratio = rank["hv_annualized_pct"] / max(rank["atm_iv_pct"], 0.01)
-        iv_rv_score = max(0.0, min(100.0, 50 + (ratio - 1.0) * 100))
-    ev = None
-    if pop is not None:
-        # Simple expiry EV approximation: outside the breakevens returns a weighted
-        # intrinsic proxy; inside loses the paid premium. Used for ranking, not a fill/P&L guarantee.
-        sigma = (iv or 0) / 100.0
-        T = days / 365.0
-        if sigma > 0:
-            up_move = max(upper - spot, 0)
-            dn_move = max(spot - lower, 0)
-            outside_prob = max(0.0, 1.0 - pop/100.0)
-            ev = round((outside_prob * ((up_move + dn_move) / 2.0) - (pop/100.0) * premium), 2)
-    final_score = round((pop or 0)*0.25 + movement_score*0.25 + iv_rv_score*0.15 + liquidity_score*0.10 + (touch or 0)*0.15 + (50 if ev is None else max(0,min(100,50+ev/max(premium,0.01)*50)))*0.10,1)
-    return {
-        "symbol": symbol, "spot": spot, "expiry": str(expiry), "days_to_expiry": days,
-        "lot_size": lot_size, "lots": max(1,int(lots)), "quantity": qty,
-        "strategy_type": strategy_type,
-        "legs": {"buy_call": leg(chosen_call,"buy_call"), "buy_put": leg(chosen_put,"buy_put")},
-        "total_premium_per_share": round(premium,2), "total_premium": round(premium*qty,2),
-        "max_loss": round(premium*qty,2), "breakeven_lower": round(lower,2), "breakeven_upper": round(upper,2),
-        "probability_of_profit_pct": pop, "probability_of_touch_pct": touch,
-        "movement_score": movement_score, "movement_reasons": movement_reasons,
-        "liquidity_score": round(liquidity_score,1), "min_leg_oi": int(liquidity_oi), "max_leg_spread_pct": round(spread_pct,2) if spread_pct is not None else None,
-        "iv_hv": iv_hv, "expected_move": expected_move(spot, rank.get("atm_iv_pct"), days),
-        "trend": trend, "selection_note": selection_note, "expected_value_per_share": ev,
-        "long_vol_score": final_score,
-        "event_before_expiry": get_event_before_expiry(str(expiry)),
-        "entry_event_warning": get_entry_warning(),
-        "trade_quality_label": "Excellent" if final_score>=80 else "Good" if final_score>=65 else "Watch" if final_score>=50 else "Avoid",
-        "model_note": "POP/EV/touch probability are model estimates, not guarantees; payoff assumes expiry unless explicitly simulated."
-    }
-
-
-@app.route("/api/longvol/build/<symbol>")
-def longvol_build(symbol):
-    if not require_session():
-        return jsonify({"error":"not_logged_in"}),401
-    strategy_type = request.args.get("strategy_type", LONGVOL_DEFAULT_STRATEGY)
-    if strategy_type not in ("long_straddle","long_strangle"):
-        return jsonify({"error":"strategy_type must be long_straddle or long_strangle"}),400
-    lots = int(request.args.get("lots",1))
-    result = _longvol_build_from_chain(symbol, strategy_type, request.args.get("expiry"), lots)
-    if "error" in result: return jsonify(result),404
-    return jsonify(result)
-
-
-def _longvol_market_status():
-    """Return a simple NSE cash-session status. Scanner is intentionally usable when closed:
-    it uses the latest available underlying/option quotes and historical candles and labels them
-    as reference/last-close data rather than pretending they are live ticks."""
-    now = now_ist()
-    weekday = now.weekday() < 5
-    market_open = weekday and (now.time() >= datetime.strptime("09:15", "%H:%M").time()
-                               and now.time() <= datetime.strptime("15:30", "%H:%M").time())
-    return {
-        "market_open": market_open,
-        "status": "OPEN" if market_open else "CLOSED",
-        "data_mode": "live_quotes" if market_open else "latest_available_quotes",
-        "as_of": now.isoformat(),
-        "note": ("Live-session quotes used." if market_open else
-                 "Market is closed; scanner uses the latest available quotes/historical candles. "
-                 "Build/execute should be rechecked when live quotes are available."),
-    }
-
-
-@app.route("/api/longvol/scan")
-def longvol_scan():
-    """Fast independent Long Vol scanner.
-
-    Important performance design:
-    - Never calls historical_data() once per stock inside the request.
-    - Gets the whole NSE stock quote universe in bulk.
-    - Gets ATM CE/PE quotes for the whole universe in one/few bulk requests.
-    - Uses the local AI market-history DB when available for momentum/volatility context.
-    - Falls back to today's move/range/volume from the bulk quote when history is unavailable.
-    - Does not depend on SCREENER_CACHE or the option-selling screener.
-
-    This avoids the 504 caused by hundreds of sequential historical-data REST calls.
-    """
-    if not require_session():
-        return jsonify({"error":"not_logged_in"}),401
-    strategy_type = request.args.get("strategy_type", LONGVOL_DEFAULT_STRATEGY)
-    if strategy_type not in ("long_straddle","long_strangle"):
-        return jsonify({"error":"strategy_type must be long_straddle or long_strangle"}),400
-    limit = max(5,min(200,int(request.args.get("limit",50))))
-    market_status = _longvol_market_status()
-
-    try:
-        # 1) Independent F&O universe.
-        universe = fo_stock_universe(force=False)
-        nfo, nse = get_instruments(force=False)
-        nse_map = {i["tradingsymbol"]: i for i in nse
-                   if i.get("exchange") == "NSE" and i.get("tradingsymbol")}
-        universe = [s for s in universe if s in nse_map]
-        if not universe:
-            return jsonify({"error":"No F&O stock universe available from Kite instruments."}),503
-
-        # 2) One bulk NSE quote request for current/last-available price, OHLC and volume.
-        nse_keys = [f"NSE:{s}" for s in universe]
-        nse_quotes = kite_quote_bulk(nse_keys, chunk_size=500, retries=1)
-
-        raw=[]
-        for symbol in universe:
-            q=nse_quotes.get(f"NSE:{symbol}") or {}
-            spot=extract_price(q)
-            ohlc=q.get("ohlc") or {}
-            prev=ohlc.get("close")
-            high=ohlc.get("high")
-            low=ohlc.get("low")
-            volume=float(q.get("volume") or 0)
-            if spot is None:
-                # Local AI history is a safe closed-market fallback for spot.
-                hist=ai_market_history(symbol,2)
-                if hist and hist[-1].get("spot"):
-                    spot=float(hist[-1]["spot"])
-            if spot is None or spot <= 0:
-                continue
-
-            day_move=((float(spot)/float(prev))-1)*100 if prev and float(prev)>0 else 0.0
-            day_range=((float(high)-float(low))/float(spot))*100 if high and low and spot else 0.0
-
-            # Local history is fast SQLite access, not a broker REST call.
-            hist=ai_market_history(symbol,120)
-            prices=[float(x["spot"]) for x in hist if x.get("spot") is not None]
-            prices.append(float(spot))
-            hv=None; atr_pct=None; ret5=day_move; ret20=day_move; vol10=day_range
-            if len(prices)>=11:
-                rets=np.diff(np.log(np.array(prices[-61:],dtype=float)))
-                if len(rets)>=5:
-                    hv=float(np.std(rets)*math.sqrt(252)*100)
-                if len(prices)>=15:
-                    recent=np.array(prices[-15:],dtype=float)
-                    ranges=np.abs(np.diff(recent))
-                    atr_pct=float(np.mean(ranges[-14:])/max(spot,0.01)*100)
-                if len(prices)>=6:
-                    ret5=(spot/prices[-6]-1)*100
-                if len(prices)>=21:
-                    ret20=(spot/prices[-21]-1)*100
-                m=float(np.mean(prices[-10:])); sd=float(np.std(prices[-10:]))
-                vol10=sd/max(m,0.01)*100
-            raw.append({
-                "symbol":symbol,"ltp":round(float(spot),2),
-                "hv_annualized_pct":round(hv,2) if hv is not None else None,
-                "atr_pct_of_price":round(atr_pct,2) if atr_pct is not None else round(day_range,2),
-                "ret5_pct":round(ret5,2),"ret20_pct":round(ret20,2),
-                "day_move_pct":round(day_move,2),"day_range_pct":round(day_range,2),
-                "volume":int(volume),"history_points":len(prices)
-            })
-
-        if not raw:
-            return jsonify({"error":"Kite returned no usable NSE prices for the F&O universe."}),503
-
-        # Keep the latest/last-close prices available to downstream build functions.
-        seed_spot_cache_from_prices(raw)
-
-        # 3) One/few bulk option quote calls for ATM CE/PE liquidity + IV.
-        iv_liq = get_atm_iv_and_liquidity_bulk(
-            [{"symbol":r["symbol"],"last_close":r["ltp"]} for r in raw], nfo)
-
-        # 4) Cross-sectional scores. This is deliberately Long-Vol logic, not the old
-        # option-selling score (which rewards calmness).
-        hvs=[r.get("hv_annualized_pct") for r in raw if r.get("hv_annualized_pct") is not None]
-        atrs=[r.get("atr_pct_of_price") for r in raw if r.get("atr_pct_of_price") is not None]
-        moves=[abs(r.get("ret5_pct") or 0) for r in raw]
-        ranges=[r.get("day_range_pct") or 0 for r in raw]
-        vols=[r.get("volume") or 0 for r in raw]
-
-        def pct(v, vals):
-            vals=[x for x in vals if x is not None]
-            if v is None or not vals:return 50.0
-            return 100.0*sum(1 for x in vals if x<=v)/len(vals)
-
-        results=[]
-        for r in raw:
-            q=iv_liq.get(r["symbol"]) or {}
-            r.update(q)
-            hv=r.get("hv_annualized_pct"); atr=r.get("atr_pct_of_price")
-            iv=r.get("atm_iv_pct")
-            hv_score=pct(hv,hvs) if hv is not None else 50.0
-            atr_score=pct(atr,atrs) if atr is not None else 50.0
-            move_score=pct(abs(r.get("ret5_pct") or 0),moves)
-            range_score=pct(r.get("day_range_pct") or 0,ranges)
-            volume_score=pct(r.get("volume") or 0,vols)
-
-            # Current movement / breakout proxy from live/last quote + local history.
-            trend_score=50.0
-            reasons=[]
-            hist=ai_market_history(r["symbol"],60)
-            hist_prices=[float(x["spot"]) for x in hist if x.get("spot") is not None]
-            if hist_prices:
-                h20=max(hist_prices[-20:]) if hist_prices else r["ltp"]
-                l20=min(hist_prices[-20:]) if hist_prices else r["ltp"]
-                if r["ltp"]>=h20*0.995:
-                    trend_score+=20; reasons.append("Near/above recent 20-bar high")
-                elif r["ltp"]<=l20*1.005:
-                    trend_score+=20; reasons.append("Near/below recent 20-bar low")
-                ma10=np.mean(hist_prices[-10:]) if len(hist_prices)>=10 else r["ltp"]
-                ma30=np.mean(hist_prices[-30:]) if len(hist_prices)>=30 else ma10
-                if ma30 and abs(ma10/ma30-1)>=0.01:
-                    trend_score+=10; reasons.append("Trend expansion")
-            if abs(r.get("day_move_pct") or 0)>=1.5:
-                trend_score+=8; reasons.append(f"Current move {r['day_move_pct']:+.1f}%")
-            if r.get("day_range_pct",0)>=2.0:
-                trend_score+=6; reasons.append("Wide current range")
-            if volume_score>=75:
-                trend_score+=6; reasons.append("Above-normal volume")
-            if atr_score>=75:
-                trend_score+=5; reasons.append("ATR/range expansion")
-            trend_score=max(0,min(100,trend_score))
-
-            iv_rv_score=50.0
-            if hv is not None and iv is not None and iv>0:
-                ratio=hv/iv
-                iv_rv_score=max(0,min(100,50+(ratio-1)*100))
-                if ratio>1.05: reasons.append("Realized volatility exceeds IV")
-
-            liquidity_score=float(q.get("atm_oi_total") or 0)
-            liquidity_score=min(100.0,liquidity_score/max(LONGVOL_MIN_LIQUIDITY_OI,1)*50)
-            sp=q.get("atm_spread_pct")
-            if sp is not None:
-                liquidity_score=(liquidity_score+max(0,100-float(sp)*10))/2
-
-            # Long-vol composite: current movement + historical movement + IV/RV + liquidity.
-            long_score=round(
-                trend_score*0.30 + hv_score*0.15 + atr_score*0.10 +
-                move_score*0.10 + range_score*0.05 + volume_score*0.05 +
-                iv_rv_score*0.15 + liquidity_score*0.10,1)
-
-            # For the fast scan we intentionally do not build every stock's complete chain.
-            # That is the Build button's job. This is what keeps Scan Market below proxy timeout.
-            results.append({
-                "symbol":r["symbol"],"spot":r["ltp"],"strategy_type":strategy_type,
-                "movement_score":round(trend_score,1),"breakout_score":round(trend_score,1),
-                "historical_vol_score":round(hv_score,1),"atr_score":round(atr_score,1),
-                "volume_score":round(volume_score,1),"iv_rv_score":round(iv_rv_score,1),
-                "liquidity_score":round(liquidity_score,1),
-                "hv_annualized_pct":hv,"atr_pct_of_price":atr,"atm_iv_pct":iv,
-                "atm_oi_total":r.get("atm_oi_total"),"atm_spread_pct":r.get("atm_spread_pct"),
-                "iv_hv":classify_iv_hv(iv,hv),
-                "expected_move":expected_move(r["ltp"],iv,30) if iv else None,
-                "probability_of_profit_pct":None,"probability_of_touch_pct":None,
-                "expected_value_per_share":None,"long_vol_score":long_score,
-                "movement_reasons":reasons[:8],"option_data_available":bool(q),
-                "build_pending":True,"data_status":market_status["data_mode"],
-                "selection_note":"Fast scan candidate. Click Build to construct exact CE/PE, POP, breakevens and payoff from the option chain.",
-                "model_note":"Scan ranking is a heuristic. Exact POP/EV are calculated only after building the selected option structure.",
-                "history_points":r.get("history_points",0)
-            })
-
-        # Prefer candidates with usable option liquidity, but keep reference candidates visible.
-        results.sort(key=lambda x:(x.get("long_vol_score",0), x.get("liquidity_score",0)), reverse=True)
-        for i,x in enumerate(results):x["rank"]=i+1
-        return jsonify({
-            "strategy_type":strategy_type,"scanned":len(raw),"count":len(results),
-            "results":results[:limit],"market_status":market_status,
-            "note":"Fast independent Long Vol scan. It does not use the option-selling screener cache. "
-                   "Scan uses bulk NSE/option quotes plus local historical AI data to avoid hundreds of sequential broker calls. "
-                   "Click Build for exact option-chain POP/EV/breakevens. Market-closed results use latest available data."
-        })
-    except Exception as e:
-        logger.exception("Long Vol scan failed")
-        return jsonify({"error":f"Long Vol scan failed: {e}"}),500
-
-
-@app.route("/api/longvol/payoff/<symbol>")
-def longvol_payoff(symbol):
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    strategy_type=request.args.get("strategy_type",LONGVOL_DEFAULT_STRATEGY)
-    lots=int(request.args.get("lots",1))
-    built=_longvol_build_from_chain(symbol,strategy_type,request.args.get("expiry"),lots)
-    if "error" in built: return jsonify(built),404
-    spot=built["spot"]; lo=max(spot*0.80,0.01); hi=spot*1.20
-    points=[]
-    for i in range(61):
-        px=lo+(hi-lo)*i/60
-        intrinsic=max(px-built["legs"]["buy_call"]["strike"],0)+max(built["legs"]["buy_put"]["strike"]-px,0)
-        pnl=(intrinsic-built["total_premium_per_share"])*built["quantity"]
-        points.append({"price":round(px,2),"pnl":round(pnl,2)})
-    return jsonify({"build":built,"points":points})
-
-
-@app.route("/api/longvol/simulate",methods=["POST"])
-def longvol_simulate():
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    body=request.json or {}
-    symbol=str(body.get("symbol","")).upper()
-    if not symbol: return jsonify({"error":"symbol required"}),400
-    strategy_type=body.get("strategy_type",LONGVOL_DEFAULT_STRATEGY)
-    built=_longvol_build_from_chain(symbol,strategy_type,body.get("expiry"),int(body.get("lots",1)))
-    if "error" in built: return jsonify(built),404
-    spot=float(body.get("spot",built["spot"]))
-    iv_change=float(body.get("iv_change_pct",0))/100.0
-    days_elapsed=max(0,int(body.get("days_elapsed",0)))
-    remaining=max(0,built["days_to_expiry"]-days_elapsed)
-    current_iv=max(0.001,(built.get("iv_hv") or {}).get("ratio",1.0)*0.01)
-    base_iv=(get_stock_rank(symbol) or {}).get("atm_iv_pct")
-    if base_iv: current_iv=max(0.001,base_iv/100.0*(1+iv_change))
-    rows=[]
-    for move in body.get("moves_pct",[-5,-3,-2,0,2,3,5]):
-        final_spot=spot*(1+float(move)/100.0)
-        T=max(remaining,0)/365.0
-        call=built["legs"]["buy_call"]; put=built["legs"]["buy_put"]
-        call_v=bs_price(final_spot,call["strike"],T,RISK_FREE_RATE,current_iv,"CE")
-        put_v=bs_price(final_spot,put["strike"],T,RISK_FREE_RATE,current_iv,"PE")
-        pnl=(call_v+put_v-built["total_premium_per_share"])*built["quantity"]
-        rows.append({"move_pct":float(move),"final_spot":round(final_spot,2),"estimated_pnl":round(pnl,2)})
-    return jsonify({"symbol":symbol,"strategy_type":strategy_type,"days_elapsed":days_elapsed,"iv_change_pct":body.get("iv_change_pct",0),"scenarios":rows,"note":"Simulation uses Black-Scholes revaluation with the selected IV shock; actual fills, slippage and volatility-surface changes can differ."})
-
-
-@app.route("/api/longvol/watchlist/add",methods=["POST"])
-def longvol_watchlist_add():
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    body=request.json or {}; symbol=str(body.get("symbol","")).upper()
-    built=_longvol_build_from_chain(symbol,body.get("strategy_type",LONGVOL_DEFAULT_STRATEGY),body.get("expiry"),int(body.get("lots",1)))
-    if "error" in built: return jsonify(built),404
-    today=now_ist().date().isoformat()
-    position={"id":f"LV_{symbol}_{int(time.time())}","symbol":symbol,"added_on":today,"entry_spot":built["spot"],"expiry":built["expiry"],"lot_size":built["lot_size"],"lots":built["lots"],"quantity":built["quantity"],"strategy_type":built["strategy_type"],"legs":built["legs"],"entry_net_debit_per_share":built["total_premium_per_share"],"entry_max_loss":built["max_loss"],"breakeven_lower":built["breakeven_lower"],"breakeven_upper":built["breakeven_upper"],"entry_estimated_charges":0,"broker_orders":[],"longvol":True,"auto_monitor":False,"monitor_mode":"paper","stop_loss_pct":LONGVOL_STOP_LOSS_PCT,"profit_target_pct":LONGVOL_PROFIT_TARGET_PCT,"history":[{"date":today,"spot":built["spot"],"pnl":0.0,"current_debit_per_share":built["total_premium_per_share"]}]}
-    positions=load_positions(); positions.append(position); save_positions(positions)
-    return jsonify({"ok":True,"position":position})
-
-
-def _longvol_mark_to_market(position):
-    keys=["buy_call","buy_put"]; quantity=position.get("quantity",position.get("lot_size",1))
-    quotes=kite_quote_bulk([f"NFO:{position['legs'][k]['tradingsymbol']}" for k in keys],force_refresh=True)
-    prices={}; missing=[]
-    for k in keys:
-        price=extract_price(quotes.get(f"NFO:{position['legs'][k]['tradingsymbol']}")); prices[k]=price
-        if price is None: missing.append(k)
-    if missing: return {"__error__":"No usable live price for: "+", ".join(missing)}
-    current=sum(prices.values()); entry=position["entry_net_debit_per_share"]; pnl=round((current-entry)*quantity,2)
-    spot,err=get_spot_price(position["symbol"])
-    if err:return {"__error__":err["error"]}
-    days=max(0,(datetime.strptime(position["expiry"],"%Y-%m-%d").date()-now_ist().date()).days)
-    rank=get_stock_rank(position["symbol"]) or {}; iv=rank.get("atm_iv_pct")
-    pop=model_expiry_probability_between(spot,position["breakeven_lower"],position["breakeven_upper"],iv,days) if iv and days else None
-    loss_pct=max(0,-pnl/(entry*quantity)*100) if entry*quantity else 0
-    gain_pct=max(0,pnl/(entry*quantity)*100) if entry*quantity else 0
-    action="HOLD"; reasons=[]
-    if gain_pct>=position.get("profit_target_pct",LONGVOL_PROFIT_TARGET_PCT): action="BOOK_PROFIT"; reasons.append(f"Profit target reached ({gain_pct:.1f}% of premium).")
-    elif loss_pct>=position.get("stop_loss_pct",LONGVOL_STOP_LOSS_PCT): action="STOP_LOSS"; reasons.append(f"Loss limit reached ({loss_pct:.1f}% of premium).")
-    elif days<=1: action="EXIT"; reasons.append("Expiry is within 1 day; time decay/expiry risk is high.")
-    elif spot<=position["breakeven_lower"] or spot>=position["breakeven_upper"]: action="HOLD"; reasons.append("Spot is beyond a model breakeven; revaluation remains favourable if movement persists.")
-    else: reasons.append("Movement thesis remains open; no exit threshold reached.")
-    return {"spot":spot,"pnl":pnl,"current_debit_per_share":round(current,2),"days_left":days,"probability_of_profit_pct":pop,"gain_pct_of_premium":round(gain_pct,1),"loss_pct_of_premium":round(loss_pct,1),"action":action,"action_reasons":reasons,"legs_current":{k:{"current_price":round(prices[k],2),"pnl":round((prices[k]-position["legs"][k]["ltp"])*quantity,2)} for k in keys}}
-
-
-@app.route("/api/longvol/monitor")
-def longvol_monitor():
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    positions=load_positions(); out=[]
-    for p in positions:
-        if not p.get("longvol"): continue
-        try: out.append({**p,"current":_longvol_mark_to_market(p)})
-        except Exception as e: out.append({**p,"current":{"__error__":str(e)}})
-    return jsonify({"positions":out,"refreshed_at":now_ist().isoformat(),"note":"Monitor generates a decision; it does not silently place real orders."})
-
-
-@app.route("/api/longvol/config",methods=["POST"])
-def longvol_config():
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    body=request.json or {}
-    state={"enabled":bool(body.get("enabled",False)),"mode":body.get("mode","paper"),
-           "auto_execute":bool(body.get("auto_execute",False)),
-           "profit_target_pct":float(body.get("profit_target_pct",LONGVOL_PROFIT_TARGET_PCT)),
-           "stop_loss_pct":float(body.get("stop_loss_pct",LONGVOL_STOP_LOSS_PCT))}
-    if state["mode"] not in ("paper","live"): return jsonify({"error":"mode must be paper or live"}),400
-    if state["mode"]=="live" and (body.get("ack") is not True or state["auto_execute"] is not True):
-        return jsonify({"error":"Live automatic execution requires explicit acknowledgement and auto_execute:true"}),400
-    Path(LONGVOL_STATE_FILE).write_text(json.dumps(state,indent=2))
-    return jsonify({"ok":True,"state":state})
-
-
-@app.route("/api/longvol/auto-cycle")
-def longvol_auto_cycle():
-    """Evaluate tracked Long Vol positions. In paper mode it only returns decisions.
-    In live+auto_execute mode it may close a tracked position when the decision engine
-    returns BOOK_PROFIT, STOP_LOSS or EXIT. It never opens a new position automatically."""
-    if not require_session(): return jsonify({"error":"not_logged_in"}),401
-    try: state=json.loads(Path(LONGVOL_STATE_FILE).read_text())
-    except Exception: state={"enabled":False,"mode":"paper","auto_execute":False}
-    positions=load_positions(); results=[]
-    for p in positions:
-        if not p.get("longvol"): continue
-        try: current=_longvol_mark_to_market(p)
-        except Exception as e: results.append({"id":p.get("id"),"symbol":p.get("symbol"),"error":str(e)}); continue
-        action=current.get("action","HOLD"); executed=False; exec_results=[]
-        if state.get("enabled") and state.get("mode")=="live" and state.get("auto_execute") and action in ("BOOK_PROFIT","STOP_LOSS","EXIT"):
-            close_legs=[]
-            qty=p.get("quantity",p.get("lot_size",1))
-            for k in ("buy_call","buy_put"):
-                close_legs.append({"leg":k,"tradingsymbol":p["legs"][k]["tradingsymbol"],"transaction_type":"SELL","quantity":qty,"price":p["legs"][k].get("ltp")})
-            exec_results=place_basket_orders(close_legs,"NRML","MARKET",sequence_for_margin=False)
-            executed=any(x.get("status")=="placed" for x in exec_results)
-            p["broker_orders"]=p.get("broker_orders",[])+exec_results
-            if executed: p["auto_last_action"]=action; p["auto_last_action_at"]=now_ist().isoformat()
-        results.append({"id":p.get("id"),"symbol":p.get("symbol"),"action":action,"executed":executed,"current":current,"execution":exec_results})
-    save_positions(positions)
-    return jsonify({"enabled":state.get("enabled",False),"mode":state.get("mode","paper"),"auto_execute":state.get("auto_execute",False),"results":results,"refreshed_at":now_ist().isoformat(),"note":"Live auto mode only closes existing tracked Long Vol positions; it never auto-opens a new trade."})
-
-
 @app.route("/api/strategy/<symbol>")
 def strategy(symbol):
     if not require_session():
@@ -3882,8 +3404,6 @@ def mark_to_market_calendar(position):
 
 
 def mark_to_market(position):
-    if position.get("longvol"):
-        return _longvol_mark_to_market(position)
     if position.get("strategy_type") == "double_calendar":
         return mark_to_market_calendar(position)
 
@@ -4047,8 +3567,6 @@ def leg_keys_for(position):
         return ["sell_call", "buy_call", "sell_put", "buy_put"]
     if st == "double_calendar":
         return ["sell_call_near", "sell_put_near", "buy_call_far", "buy_put_far"]
-    if st in ("long_straddle", "long_strangle"):
-        return ["buy_call", "buy_put"]
     return ["sell_call", "sell_put"]
 
 
@@ -4491,7 +4009,7 @@ def _classify_position_group(legs):
     if len(legs) == 2 and len(calls) == 1 and len(puts) == 1 and len(shorts) == 2:
         return "SHORT STRANGLE"
     if len(legs) == 2 and len(calls) == 1 and len(puts) == 1 and len(longs) == 2:
-        return "LONG STRADDLE"
+        return "LONG STRADDLE" if calls[0]["strike"] == puts[0]["strike"] else "LONG STRANGLE"
     if len(legs) == 2 and ((len(calls) == 2) or (len(puts) == 2)):
         return "VERTICAL SPREAD"
     if len(legs) == 4:
@@ -4601,6 +4119,32 @@ def _position_management_action(group, momentum):
     elif group["strategy"] == "IRON CONDOR" and captured is not None and captured >= 50:
         action, level = "HOLD / PROTECT PROFIT", "LOW"
         reasons.append(f"{captured:.0f}% of estimated entry credit is captured and no severe side breach is detected.")
+    elif group["strategy"] in ("LONG STRADDLE", "LONG STRANGLE"):
+        # Opposite economics from everything above: this position PAID a debit and wants a big
+        # move, so it never had an "entry credit" to capture — profit_captured_pct is None by
+        # construction. Judge it instead against the debit paid (entry_credit_total is negative
+        # for a debit trade) and against how much runway is left before theta finishes the job.
+        entry_debit_total = abs(group.get("entry_credit_total", 0) or 0)
+        if entry_debit_total and pnl >= MOVE_PROFIT_TARGET_MULTIPLE * entry_debit_total:
+            action, level = "BOOK PROFIT — CONSIDER CLOSING", "MEDIUM"
+            reasons.append(f"Profit (₹{pnl}) has reached {int(MOVE_PROFIT_TARGET_MULTIPLE*100)}% of the debit "
+                           f"paid (₹{round(entry_debit_total,2)}) — long options can give profit back fast if "
+                           f"the move stalls or IV drops.")
+        elif entry_debit_total and pnl <= -MOVE_STOP_LOSS_DEBIT_PCT * entry_debit_total:
+            action, level = "CUT LOSS — EXPECTED MOVE HASN'T SHOWN UP", "HIGH"
+            reasons.append(f"Loss (₹{abs(pnl)}) has reached {int(MOVE_STOP_LOSS_DEBIT_PCT*100)}%+ of the debit "
+                           f"paid (₹{round(entry_debit_total,2)}) — theta is doing its job against you.")
+        elif dte <= MOVE_EXPIRY_WARNING_DAYS:
+            action, level = "CLOSE BEFORE EXPIRY — THETA/GAMMA RISK", "MEDIUM"
+            reasons.append(f"Only {dte} DTE left on a long-premium position — decay accelerates fastest right here.")
+        elif strength == "STRONG" and pnl > 0:
+            action, level = "HOLD — MOVE APPEARS TO BE DEVELOPING", "LOW"
+            reasons.append(f"Underlying momentum is {strength.lower()} and the position is in profit — let the "
+                           f"move run, but watch for an IV crush after any anticipated event.")
+        else:
+            action, level = "HOLD AND MONITOR", "LOW"
+            reasons.append("No move of consequence yet on this long-premium position — it is decaying with "
+                           "time; re-check DTE and P&L regularly rather than waiting passively for expiry.")
     else:
         action, level = "HOLD AND MONITOR", "LOW"
         reasons.append("No current rule-based trigger for adjustment or full exit.")
@@ -9354,35 +8898,20 @@ def _hist_training_sequences(symbol):
     candidate=list(range(DL_SEQUENCE_LEN-1,usable,step))
     if candidate and candidate[-1] != usable-1:candidate.append(usable-1)
 
-    # IMPORTANT: build features lazily.  The previous eager comprehension
-    # materialised every candidate feature row before the progress loop began,
-    # which made the dashboard appear frozen at 13.3% for many minutes.
-    feature_rows={}
+    feature_rows={i:_hist_feature_row(rows,i,arrays) for i in candidate}
     seqs=[]; labels=[]; times=[]
     total_candidates=max(1,len(candidate))
     last_telemetry=time.monotonic()
     for cand_i,i in enumerate(candidate):
-        if i-DL_SEQUENCE_LEN+1<0 or i+AI_HIST_HORIZON_BARS>=len(rows):
-            continue
+        if i-DL_SEQUENCE_LEN+1<0 or i+AI_HIST_HORIZON_BARS>=len(rows):continue
         fseq=[]; ok=True
         for j in range(i-DL_SEQUENCE_LEN+1,i+1):
-            if j not in feature_rows:
-                feature_rows[j]=_hist_feature_row(rows,j,arrays)
+            # j is usually not in candidate; build it only once and cache it.
+            if j not in feature_rows:feature_rows[j]=_hist_feature_row(rows,j,arrays)
             f=feature_rows[j]
-            if not f:
-                ok=False
-                break
+            if not f:ok=False;break
             fseq.append([_norm_feature(n,f.get(n,0)) for n in SEQUENCE_FEATURE_NAMES])
-        if not ok:
-            continue
-        cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
-        if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):
-            continue
-        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if future>cur else 0); times.append(str(rows[i][0]))
-
-        # Emit progress from inside the actual expensive sequence-building loop.
-        # This means the displayed percentage reflects work really completed,
-        # not a CSS animation or a delayed phase boundary.
+        if not ok:continue
         now_mono=time.monotonic()
         if now_mono-last_telemetry>=0.5 or cand_i==total_candidates-1:
             try:
@@ -9396,8 +8925,10 @@ def _hist_training_sequences(symbol):
                 c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_elapsed_sec',?)",(str(round(elapsed,1)),))
                 c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_samples',?)",(str(len(seqs)),))
                 c.commit(); c.close(); last_telemetry=now_mono
-            except Exception:
-                pass
+            except Exception: pass
+        cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
+        if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):continue
+        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if future>cur else 0); times.append(str(rows[i][0]))
     return seqs,labels,times
 
 def _hist_set_status(status, detail=""):
@@ -10468,6 +9999,1007 @@ threading.Thread(target=ai_hist_loop,daemon=True).start()
 threading.Thread(target=_autotrade_loop, daemon=True).start()
 threading.Thread(target=_breakout_monitor_loop, daemon=True).start()
 threading.Thread(target=autotrade_ai_loop, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Long Straddle / Strangle — "Volatility Breakout" module (independent of the Condor/Strangle
+# module above — its own screener, its own builder, its own tracked-position store/execution).
+# ---------------------------------------------------------------------------
+def _daily_candles_for_squeeze(symbol, lookback_days=MOVE_SQUEEZE_LOOKBACK_DAYS):
+    token, err = resolve_token_for_symbol(symbol)
+    if err:
+        return None, err
+    to_date = now_ist()
+    from_date = to_date - timedelta(days=lookback_days + 20)
+    try:
+        candles = kite.historical_data(token, from_date, to_date, "day")
+    except Exception as e:
+        return None, f"Historical data fetch failed: {e}"
+    if len(candles) < 50:
+        return None, "Not enough daily history for a reliable squeeze read (need 50+ sessions)"
+    return candles, None
+
+
+def breakout_squeeze_diagnostics(symbol):
+    """Looks for the specific pre-breakout SETUP a long straddle/strangle wants: a tightening range
+    (Bollinger-band squeeze), an unusually narrow recent daily range (NR7), volume drying up into
+    the squeeze (fuel for an eventual expansion) or already picking up (the move may be starting),
+    ADX still low or just turning up off a low base (a trend that hasn't already run its course),
+    and proximity to a well-defined recent range edge (a plausible breakout trigger level). None of
+    this predicts DIRECTION — only that conditions are compressed/coiled enough for a move to be
+    more likely than usual, which is exactly what makes cheap, at-the-money option premium
+    attractive here (the opposite read of the Iron Condor builder's trend/ADX checks elsewhere)."""
+    candles, err = _daily_candles_for_squeeze(symbol)
+    if err:
+        return {"error": err}
+    closes = np.array([c["close"] for c in candles], dtype=float)
+    highs = np.array([c["high"] for c in candles], dtype=float)
+    lows = np.array([c["low"] for c in candles], dtype=float)
+    vols = np.array([float(c.get("volume") or 0) for c in candles], dtype=float)
+    n = len(closes)
+    if n < MOVE_BB_PERIOD + 30:
+        return {"error": "Not enough daily history for a reliable squeeze read (need 50+ sessions)"}
+
+    # Bollinger Band width (2 std-dev), as a % of the middle band, tracked across the whole
+    # lookback so today's width can be ranked against its OWN recent history — a genuine "is this
+    # unusually tight right now?" read rather than a semi-arbitrary fixed threshold.
+    bb_widths = []
+    for i in range(MOVE_BB_PERIOD, n + 1):
+        window = closes[i - MOVE_BB_PERIOD:i]
+        mid = float(np.mean(window))
+        sd = float(np.std(window))
+        if mid:
+            bb_widths.append(((mid + 2 * sd) - (mid - 2 * sd)) / mid * 100)
+    if not bb_widths:
+        return {"error": "Could not compute Bollinger band width"}
+    current_bb_width = bb_widths[-1]
+    squeeze_percentile = _percentile_rank(current_bb_width, bb_widths)  # low = unusually tight NOW
+    is_squeeze = squeeze_percentile <= 20
+
+    # NR7 — is today's high/low range the narrowest of the last 7 sessions? A classic simple
+    # pre-breakout marker, independent of the Bollinger read above.
+    ranges = highs - lows
+    last7 = ranges[-MOVE_NR_WINDOW:]
+    is_nr7 = bool(len(last7) == MOVE_NR_WINDOW and last7[-1] <= min(last7))
+    range_contraction_pct = (round((1 - last7[-1] / np.mean(ranges[-30:])) * 100, 1)
+                              if len(ranges) >= 30 and np.mean(ranges[-30:]) else None)
+
+    # ADX: for a LONG-vol trade we want it LOW, or just turning up off a low base — the opposite
+    # read from the Iron Condor builder (which treats low ADX as "stay range-bound, good for
+    # selling"). A trend that has already run hard (high ADX) has less "fuel" left for a fresh move.
+    adx_now = _adx(highs, lows, closes, 14)
+    adx_10ago = _adx(highs[:-10], lows[:-10], closes[:-10], 14) if n > 34 else None
+    adx_rising = bool(adx_now is not None and adx_10ago is not None and adx_now > adx_10ago)
+    low_adx_base = bool(adx_now is not None and adx_now < 22)
+
+    # Volume: a dry-up (low relative volume) INTO the squeeze is the classic "coiling" pattern; a
+    # sharp pickup on the most recent day(s) can mean the move is already starting. Score whichever
+    # is currently true rather than demanding one specific pattern.
+    avg_vol_20 = float(np.mean(vols[-21:-1])) if n > 22 and np.mean(vols[-21:-1]) > 0 else None
+    recent_vol_5 = float(np.mean(vols[-5:])) if n >= 5 else None
+    vol_ratio = (recent_vol_5 / avg_vol_20) if (avg_vol_20 and recent_vol_5 is not None) else None
+    volume_dry_up = bool(vol_ratio is not None and vol_ratio < 0.75)
+    volume_pickup_today = bool(avg_vol_20 and vols[-1] > 1.5 * avg_vol_20)
+
+    # Proximity to a breakout trigger: distance from spot to the recent 20-day high/low, in ATR
+    # units. Close to either edge means a normal day's range could already trigger the breakout;
+    # far from both means the range still needs to develop before this setup is actionable.
+    last_close = float(closes[-1])
+    hi20, lo20 = float(np.max(highs[-20:])), float(np.min(lows[-20:]))
+    atr14 = float(np.mean(ranges[-14:])) if len(ranges) >= 14 else None
+    dist_atr_values = []
+    if atr14:
+        dist_atr_values = [(hi20 - last_close) / atr14, (last_close - lo20) / atr14]
+    min_dist_atr = min(dist_atr_values) if dist_atr_values else None
+    near_trigger = bool(min_dist_atr is not None and min_dist_atr <= 1.5)
+
+    squeeze_score = round(max(0.0, min(100.0, 100 - squeeze_percentile)), 1)
+    momentum_score = round(min(100.0, (60 if low_adx_base else 20) + (40 if adx_rising else 0)), 1)
+    volume_score = round(min(100.0, (70 if volume_dry_up else 30) + (30 if volume_pickup_today else 0)), 1)
+    if min_dist_atr is not None:
+        proximity_score = round(100.0 if near_trigger else max(0.0, 60 - 10 * min_dist_atr), 1)
+    else:
+        proximity_score = 50.0
+
+    return {
+        "last_close": round(last_close, 2),
+        "bb_width_pct": round(current_bb_width, 2), "bb_width_percentile": round(squeeze_percentile, 1),
+        "is_squeeze": is_squeeze, "is_nr7": is_nr7, "range_contraction_pct": range_contraction_pct,
+        "adx14": round(adx_now, 1) if adx_now is not None else None,
+        "adx_10sessions_ago": round(adx_10ago, 1) if adx_10ago is not None else None,
+        "adx_rising": adx_rising, "low_adx_base": low_adx_base,
+        "volume_ratio_5v20": round(vol_ratio, 2) if vol_ratio is not None else None,
+        "volume_dry_up": volume_dry_up, "volume_pickup_today": volume_pickup_today,
+        "range_high_20d": round(hi20, 2), "range_low_20d": round(lo20, 2),
+        "atr14": round(atr14, 2) if atr14 else None, "near_breakout_trigger": near_trigger,
+        "squeeze_score": squeeze_score, "momentum_score": momentum_score,
+        "volume_score": volume_score, "proximity_score": proximity_score,
+        "note": ("Pattern-level heuristics (Bollinger squeeze, NR7, ADX base, volume dry-up/pickup, "
+                 "distance to the 20-day range edge in ATR units). None of this predicts DIRECTION — "
+                 "only that the range is unusually compressed/coiled, which is the setup a long "
+                 "straddle/strangle wants regardless of which way it eventually breaks."),
+    }
+
+
+def build_move_candidate_from_chain(spot, chain, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT):
+    calls = sorted([o for o in chain if o["instrument_type"] == "CE"], key=lambda x: x["strike"])
+    puts = sorted([o for o in chain if o["instrument_type"] == "PE"], key=lambda x: x["strike"])
+    if not calls or not puts:
+        return None
+
+    def closest(options, target):
+        return min(options, key=lambda o: abs(o["strike"] - target))
+
+    if mode == "strangle":
+        call_leg = closest(calls, spot * (1 + otm_pct))
+        put_leg = closest(puts, spot * (1 - otm_pct))
+    else:  # "straddle" (default) — both legs at the SAME at-the-money strike
+        atm_call = closest(calls, spot)
+        put_leg = closest(puts, atm_call["strike"])
+        call_leg = closest(calls, put_leg["strike"])  # re-snap in case call/put strike grids differ
+    return {"call": call_leg, "put": put_leg}
+
+
+def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, expiry_str=None, lots=1):
+    symbol = symbol.upper()
+    today = now_ist().date()
+    data, err = get_chain_for_symbol(symbol, expiry_str)
+    if err:
+        return err
+    spot, expiry, lot_size, chain = data["spot"], data["expiry"], data["lot_size"], data["chain"]
+    quantity = lot_size * max(1, int(lots))
+    days_to_expiry = (expiry - today).days
+
+    cand = build_move_candidate_from_chain(spot, chain, mode, otm_pct)
+    if not cand:
+        return {"error": f"Could not find a usable call/put pair for {symbol}"}
+    call_leg, put_leg = cand["call"], cand["put"]
+
+    def leg(o):
+        return {"strike": o["strike"], "ltp": o["ltp"], "mid": o.get("mid", o["ltp"]),
+                "bid": o.get("bid"), "ask": o.get("ask"), "delta": o["delta"], "iv": o.get("iv"),
+                "oi": o.get("oi"), "volume": o.get("volume"), "spread_pct": o.get("spread_pct"),
+                "tradingsymbol": o["tradingsymbol"]}
+
+    call_l, put_l = leg(call_leg), leg(put_leg)
+    net_debit_per_share = call_l["mid"] + put_l["mid"]
+    breakeven_upper = round(call_l["strike"] + net_debit_per_share, 2)
+    breakeven_lower = round(put_l["strike"] - net_debit_per_share, 2)
+    strategy_type = "long_strangle" if mode == "strangle" else "long_straddle"
+
+    result = {
+        "symbol": symbol, "spot": spot, "expiry": str(expiry), "days_to_expiry": days_to_expiry,
+        "lot_size": lot_size, "lots": lots, "quantity": quantity, "mode": mode,
+        "strategy_type": strategy_type, "otm_pct_used": otm_pct if mode == "strangle" else None,
+        "legs": {"buy_call": call_l, "buy_put": put_l},
+        "net_debit_per_share": round(net_debit_per_share, 2),
+        "max_loss": round(net_debit_per_share * quantity, 2), "max_profit": None,
+        "breakeven_upper": breakeven_upper, "breakeven_lower": breakeven_lower,
+        "move_required_up_pct": round((breakeven_upper - spot) / spot * 100, 2) if spot else None,
+        "move_required_down_pct": round((spot - breakeven_lower) / spot * 100, 2) if spot else None,
+        "all_expiries": data["all_expiries"],
+    }
+
+    # --- Payoff curve: at expiry (pure intrinsic value) and a live "today" mark (Black-Scholes at
+    # current implied vol on both legs) across a range of assumed spot outcomes ---
+    lo = spot * (1 - MOVE_CURVE_RANGE_PCT); hi = spot * (1 + MOVE_CURVE_RANGE_PCT)
+    step = (hi - lo) / (MOVE_CURVE_POINTS - 1)
+    call_iv = (call_l["iv"] or 20) / 100.0
+    put_iv = (put_l["iv"] or 20) / 100.0
+    T_now = max(days_to_expiry, 0) / 365.0
+    curve_expiry, curve_today = [], []
+    for i in range(MOVE_CURVE_POINTS):
+        s_t = lo + i * step
+        intrinsic = max(s_t - call_l["strike"], 0.0) + max(put_l["strike"] - s_t, 0.0)
+        curve_expiry.append({"spot": round(s_t, 2), "pnl": round((intrinsic - net_debit_per_share) * quantity, 2)})
+        today_value = (bs_price(s_t, call_l["strike"], T_now, RISK_FREE_RATE, call_iv, "CE") +
+                       bs_price(s_t, put_l["strike"], T_now, RISK_FREE_RATE, put_iv, "PE"))
+        curve_today.append({"spot": round(s_t, 2), "pnl": round((today_value - net_debit_per_share) * quantity, 2)})
+    result["curve_at_expiry"] = curve_expiry
+    result["curve_today"] = curve_today
+
+    legs_for_margin = [{"tradingsymbol": call_l["tradingsymbol"], "transaction_type": "BUY"},
+                        {"tradingsymbol": put_l["tradingsymbol"], "transaction_type": "BUY"}]
+    result["margin_required"], result["margin_error"] = compute_margin(legs_for_margin, quantity)
+    entry_orders = [{"price": call_l["mid"], "quantity": quantity, "transaction_type": "BUY"},
+                     {"price": put_l["mid"], "quantity": quantity, "transaction_type": "BUY"}]
+    result["estimated_entry_charges"] = estimate_charges(entry_orders)
+    result["entry_event_warning"] = get_entry_warning()
+    result["event_before_expiry"] = get_event_before_expiry(result["expiry"])
+
+    # --- IV/HV read, computed directly from THIS chain and a fresh historical fetch, independent
+    # of the Option-Selling screener's cache (this module never depends on that screener). ---
+    hv_pct = None
+    try:
+        token, terr = resolve_token_for_symbol(symbol)
+        if not terr:
+            hv_pct, _atr_pct, _ = historical_vol_and_atr(token)
+    except Exception:
+        pass
+    atm_iv_pct = (round((call_l["iv"] + put_l["iv"]) / 2, 1)
+                  if (call_l.get("iv") is not None and put_l.get("iv") is not None) else None)
+    iv_hv = classify_iv_hv(atm_iv_pct, hv_pct)
+    result["atm_iv_pct"] = atm_iv_pct
+    result["hv_annualized_pct"] = round(hv_pct, 2) if hv_pct is not None else None
+    result["iv_hv"] = iv_hv
+    if atm_iv_pct is not None:
+        iv_history = load_iv_history()
+        rank_pct, hist_days = update_iv_history_and_get_rank(symbol, atm_iv_pct, iv_history, today.isoformat())
+        save_iv_history(iv_history)
+        result["iv_rank_pct"] = rank_pct
+        result["iv_rank_history_days"] = hist_days
+
+    em = expected_move(spot, atm_iv_pct, days_to_expiry)
+    result["expected_move"] = em
+    if em:
+        reaches_breakeven = em["upper"] >= breakeven_upper or em["lower"] <= breakeven_lower
+        result["expected_move_vs_breakeven"] = (
+            f"{days_to_expiry}-day expected move is ±₹{em['expected_move']} ({em['lower']}–{em['upper']}); "
+            f"breakevens are {breakeven_lower}–{breakeven_upper}. " +
+            ("The expected move already reaches or exceeds one breakeven — a fairly ordinary move "
+             "could get this to profit."
+             if reaches_breakeven else
+             "The expected move alone doesn't reach breakeven — this needs a move LARGER than a "
+             "typical move over this timeframe, i.e. a genuine breakout/event, not just normal drift."))
+
+    trend = get_trend_regime(symbol)
+    result["trend"] = None if trend.get("error") else trend
+    squeeze = breakout_squeeze_diagnostics(symbol)
+    if squeeze.get("error"):
+        result["squeeze"] = None
+        result["squeeze_note"] = squeeze["error"]
+    else:
+        result["squeeze"] = squeeze
+
+    vix, vix_err = get_india_vix()
+    result["volatility_regime"] = classify_volatility_regime(vix, result.get("iv_rank_pct"))
+    result["vega_note"] = ("This trade is net LONG gamma and LONG vega, and net SHORT theta — the "
+                            "opposite exposure of the Iron Condor/Strangle builder. It profits from a "
+                            "big move OR a rise in IV, and loses a little value every day the "
+                            "underlying just sits still.")
+
+    # --- Composite "move score": how good the SETUP is for a long-vol trade (not a probability) ---
+    sq = result.get("squeeze")
+    squeeze_component = sq["squeeze_score"] if sq else 50.0
+    momentum_component = sq["momentum_score"] if sq else 50.0
+    volume_component = sq["volume_score"] if sq else 50.0
+    proximity_component = sq["proximity_score"] if sq else 50.0
+    iv_cheap_component = ({"avoid": 85, "fair": 65, "good": 45, "excellent": 20}.get(
+        (iv_hv.get("label") or "").lower(), 50) if iv_hv else 50)
+    event_component = 100 if result.get("event_before_expiry") else 30
+
+    move_score = round(
+        MOVE_SCORE_WEIGHTS["squeeze"] * squeeze_component +
+        MOVE_SCORE_WEIGHTS["iv_cheapness"] * iv_cheap_component +
+        MOVE_SCORE_WEIGHTS["momentum_building"] * momentum_component +
+        MOVE_SCORE_WEIGHTS["volume_setup"] * volume_component +
+        MOVE_SCORE_WEIGHTS["proximity"] * proximity_component +
+        MOVE_SCORE_WEIGHTS["event"] * event_component, 1)
+    result["move_score"] = move_score
+    result["move_score_label"] = ("Excellent setup" if move_score >= 75 else "Good setup" if move_score >= 60
+                                   else "Average setup" if move_score >= 45 else "Weak setup")
+    result["move_score_note"] = (
+        "Heuristic SETUP score for a long-vol trade: Bollinger squeeze/NR7 tightness 25%, IV cheap "
+        "relative to historical vol 25%, ADX low-and-turning-up 20%, volume dry-up/pickup pattern "
+        "15%, proximity to the 20-day range edge 10%, a scheduled event before expiry 5%. This is a "
+        "rough triage aid for HOW LIKELY a big move is to be setting up — it is NOT a directional "
+        "signal and NOT backtested.")
+
+    reasons = []
+    if sq and sq.get("is_squeeze"):
+        reasons.append("Bollinger band width is in the tightest 20% of its own recent history — a genuine squeeze.")
+    if sq and sq.get("is_nr7"):
+        reasons.append("Today's daily range is the narrowest of the last 7 sessions (NR7).")
+    if sq and sq.get("low_adx_base") and sq.get("adx_rising"):
+        reasons.append("ADX is off a low base and turning up — a trend may just be starting, not already spent.")
+    if sq and sq.get("volume_dry_up"):
+        reasons.append("Volume has dried up into the squeeze — this often precedes an expansion once it returns.")
+    if sq and sq.get("volume_pickup_today"):
+        reasons.append("Volume has already picked up sharply — the move may be starting right now.")
+    if sq and sq.get("near_breakout_trigger"):
+        reasons.append("Spot is close (within ~1.5x ATR) to the recent 20-day high or low — a normal day's range could trigger the breakout.")
+    if iv_hv and (iv_hv.get("label") or "").lower() in ("avoid", "fair"):
+        reasons.append(f"Options are relatively cheap here (IV/HV ratio {iv_hv.get('ratio')}) — you're not overpaying for the premium.")
+    if result.get("event_before_expiry"):
+        ev = result["event_before_expiry"]
+        reasons.append(f"{ev['label']} falls before expiry ({ev['date']}, {ev['days_away']}d away) — a concrete catalyst for a move.")
+    if not reasons:
+        reasons.append("No strong setup signals found — this looks like an ordinary day for this stock, a weak candidate for a premium-buying trade right now.")
+    result["move_reasons"] = reasons
+
+    result["suggested_mode"] = "strangle" if (atm_iv_pct and atm_iv_pct > 35) else "straddle"
+    result["suggested_mode_reason"] = (
+        "IV looks elevated — a wider (cheaper) strangle reduces the debit at risk while still needing a real move."
+        if result["suggested_mode"] == "strangle" else
+        "IV looks reasonable — the ATM straddle is simpler, with closer breakevens, needing a smaller move to profit.")
+
+    result["note"] = (
+        "LONG STRADDLE/STRANGLE: a net-DEBIT, defined-risk (max loss = debit paid) bet on a LARGE "
+        "move in EITHER direction before expiry. The move needs to exceed the breakeven distance "
+        "just to break even — time decay (theta) works against this every single day it doesn't "
+        "move, and a volatility crush right after an anticipated event (e.g. results day) can lose "
+        "money even if the direction was called correctly. Educational calculation only — verify "
+        "prices, margin and lot size on your broker terminal before trading.")
+    return result
+
+
+@app.route("/api/move-strategy/<symbol>")
+def move_strategy(symbol):
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    mode = request.args.get("mode", "straddle")
+    otm_pct = float(request.args.get("otm_pct", DEFAULT_MOVE_OTM_PCT))
+    expiry_str = request.args.get("expiry")
+    lots = int(request.args.get("lots", 1))
+    result = build_move_strategy(symbol, mode, otm_pct, expiry_str, lots)
+    if "error" in result:
+        return jsonify(result), 404
+    return jsonify(result)
+
+
+@app.route("/api/move-screener")
+def move_screener():
+    """Independent screener for LONG straddle/strangle candidates — scans the F&O universe for
+    stocks that look COILED for a big move, with options that are still relatively CHEAP to buy.
+    Does not require the Option-Selling screener (section 1 of the other tab) to have been run."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    limit = int(request.args.get("limit", 20))
+    max_symbols = min(int(request.args.get("max_symbols", 40)), 80)
+    force = request.args.get("force", "false").lower() == "true"
+
+    universe = fo_stock_universe(force=force)
+    nfo, nse = get_instruments(force=force)
+    symbol_to_token = {i["tradingsymbol"]: i["instrument_token"] for i in nse if i["exchange"] == "NSE"}
+
+    # Pass 1: cheap, universe-wide pass off daily closes (HV/ATR) — same data source the
+    # Option-Selling screener uses, just interpreted the other way (here, more ATR is GOOD, since
+    # it means the stock has some baseline ability to move at all).
+    base = []
+    for name in universe:
+        token = symbol_to_token.get(name)
+        if not token:
+            continue
+        try:
+            hv, atr_pct, ltp = historical_vol_and_atr(token)
+        except Exception:
+            continue
+        if hv is None:
+            continue
+        base.append({"symbol": name, "ltp": round(ltp, 2),
+                      "hv_annualized_pct": round(hv, 2), "atr_pct_of_price": round(atr_pct, 2)})
+        if len(base) >= 300:
+            break
+    seed_spot_cache_from_prices(base)
+
+    # Shortlist for the expensive per-symbol daily-candle squeeze read: highest-ATR names first
+    # (some baseline ability to move), capped to stay within Kite's historical-data rate limits.
+    base_sorted = sorted(base, key=lambda r: r["atr_pct_of_price"], reverse=True)
+    shortlist = base_sorted[:max_symbols]
+
+    candidates = [{"symbol": r["symbol"], "last_close": r["ltp"]} for r in shortlist]
+    try:
+        iv_liquidity = get_atm_iv_and_liquidity_bulk(candidates, nfo)
+    except Exception as e:
+        iv_liquidity = {}
+        logger.warning(f"Move screener ATM IV/liquidity batch fetch failed: {e}")
+
+    ban_symbols, ban_error = get_fo_ban_list()
+    upcoming_macro_events = get_upcoming_events(days_ahead=MOVE_PREFERRED_DTE_HIGH)
+    evaluated, errors = [], []
+    for r in shortlist:
+        sym = r["symbol"]
+        try:
+            info = iv_liquidity.get(sym)
+            atm_iv_pct = info.get("atm_iv_pct") if info else None
+            liquidity_ok = bool(info and info.get("atm_oi_total", 0) >= MOVE_MIN_ATM_TOTAL_OI and
+                                 info.get("atm_spread_pct") is not None and
+                                 info["atm_spread_pct"] <= MOVE_MAX_ATM_SPREAD_PCT)
+            iv_hv = classify_iv_hv(atm_iv_pct, r["hv_annualized_pct"])
+            squeeze = breakout_squeeze_diagnostics(sym)
+            if squeeze.get("error"):
+                errors.append({"symbol": sym, "error": squeeze["error"]})
+                continue
+            iv_cheap_component = ({"avoid": 85, "fair": 65, "good": 45, "excellent": 20}.get(
+                (iv_hv.get("label") or "").lower(), 50) if iv_hv else 50)
+            event_component = 100 if upcoming_macro_events else 30
+            move_score = round(
+                MOVE_SCORE_WEIGHTS["squeeze"] * squeeze["squeeze_score"] +
+                MOVE_SCORE_WEIGHTS["iv_cheapness"] * iv_cheap_component +
+                MOVE_SCORE_WEIGHTS["momentum_building"] * squeeze["momentum_score"] +
+                MOVE_SCORE_WEIGHTS["volume_setup"] * squeeze["volume_score"] +
+                MOVE_SCORE_WEIGHTS["proximity"] * squeeze["proximity_score"] +
+                MOVE_SCORE_WEIGHTS["event"] * event_component, 1)
+            out = dict(r)
+            out.update({
+                "atm_iv_pct": atm_iv_pct, "iv_hv": iv_hv, "liquidity_ok": liquidity_ok,
+                "fo_banned_today": bool(ban_symbols is not None and sym in ban_symbols),
+                "squeeze": squeeze, "move_score": move_score,
+                "move_score_label": ("Excellent" if move_score >= 75 else "Good" if move_score >= 60
+                                      else "Average" if move_score >= 45 else "Weak"),
+                "suggested_mode": "strangle" if (atm_iv_pct and atm_iv_pct > 35) else "straddle",
+                "near_macro_event": bool(upcoming_macro_events),
+            })
+            evaluated.append(out)
+        except Exception as e:
+            errors.append({"symbol": sym, "error": str(e)})
+            logger.exception("Move screener failed for %s", sym)
+
+    eligible = [r for r in evaluated if r["liquidity_ok"] and not r["fo_banned_today"]]
+    eligible.sort(key=lambda r: r["move_score"], reverse=True)
+    for i, r in enumerate(eligible, 1):
+        r["rank"] = i; r["total"] = len(eligible)
+    excluded = [r for r in evaluated if r not in eligible]
+    for r in excluded:
+        r["rank"] = None; r["total"] = len(eligible)
+    top = eligible[:limit]
+
+    MOVE_SCREENER_CACHE["results"] = eligible + excluded
+    MOVE_SCREENER_CACHE["fetched_at"] = now_ist()
+
+    return jsonify({
+        "count": len(base), "shortlisted": len(shortlist), "eligible_count": len(eligible),
+        "stocks": top, "excluded_sample": excluded[:10],
+        "evaluation_error_count": len(errors), "evaluation_errors_sample": errors[:10],
+        "ban_list_note": ban_error if ban_error else "F&O ban list fetched OK — banned symbols excluded above.",
+        "note": ("Independent screener for LONG straddle/strangle candidates — the OPPOSITE thesis "
+                 "from the Option-Selling screeners: it looks for stocks that are COILED for a big "
+                 "move (Bollinger squeeze, NR7, low-and-turning ADX, volume dry-up/pickup, proximity "
+                 "to the recent range edge) with options that are still relatively CHEAP to buy (low "
+                 "IV vs historical vol), plus a scheduled macro-event bonus. It ranks the widest-ATR "
+                 "names in the F&O universe first, then deep-evaluates up to max_symbols of them with "
+                 "real daily-candle diagnostics. Not a backtest, not a directional call — purely a "
+                 "'is a move plausible here' triage."),
+        "config": {"max_symbols": max_symbols, "weights": MOVE_SCORE_WEIGHTS,
+                   "min_atm_oi": MOVE_MIN_ATM_TOTAL_OI, "max_atm_spread_pct": MOVE_MAX_ATM_SPREAD_PCT},
+    })
+
+
+def classify_move_digest(position, mtm):
+    """Multi-factor 'is this long straddle/strangle still worth holding' read for a single tracked
+    position — the thing this file did NOT have before: a fixed 100%-profit / 45%-loss trigger tells
+    you the P&L number crossed a line, but says nothing about WHY. This looks at the trade's actual
+    state — how much of the expected move has shown up yet vs how much time has burned, whether IV is
+    still building or already crushing, whether daily value is trending up or down, and whether the
+    event this trade was built around is still ahead or already behind us — and turns that into one
+    action for right now plus a separate read on whether it's worth carrying overnight into tomorrow.
+    Always informational; this tool never auto-exits anything."""
+    today = now_ist().date()
+    spot = mtm["spot"]
+    entry_spot = position.get("entry_spot")
+    days_left = mtm["days_left"]
+    zone = mtm["zone"]
+    pnl = mtm["pnl"]
+    quantity = position.get("quantity", position["lot_size"])
+    entry_debit_total = abs(position["entry_net_debit_per_share"] * quantity)
+
+    # How much of the move priced in AT ENTRY has actually shown up so far?
+    realized_move_pct = round(abs(spot - entry_spot) / entry_spot * 100, 2) if entry_spot else None
+    entry_em = position.get("entry_expected_move") or {}
+    entry_em_pct = entry_em.get("expected_move_pct")
+    move_progress_pct = (round(realized_move_pct / entry_em_pct * 100, 1)
+                          if (realized_move_pct is not None and entry_em_pct) else None)
+
+    # How far along in TIME is this trade — theta accelerates non-linearly as expiry nears.
+    entry_dte = position.get("entry_days_to_expiry")
+    added_on = position.get("added_on")
+    days_elapsed = None
+    if added_on:
+        try:
+            days_elapsed = (today - datetime.strptime(added_on, "%Y-%m-%d").date()).days
+        except Exception:
+            pass
+    time_progress_pct = (round(days_elapsed / entry_dte * 100, 1)
+                          if (days_elapsed is not None and entry_dte) else None)
+
+    # IV then vs now — still expanding (feeding the trade) or already crushing?
+    entry_iv = position.get("entry_atm_iv_pct")
+    atm_iv_now = mtm.get("atm_iv_now")
+    iv_change_pct = (round((atm_iv_now - entry_iv) / entry_iv * 100, 1)
+                      if (atm_iv_now is not None and entry_iv) else None)
+
+    # Is daily position value (from the stored day-by-day marks) still building, flat, or decaying?
+    hist = position.get("history") or []
+    recent = [h for h in hist[-MOVE_MOMENTUM_LOOKBACK_DAYS:] if h.get("current_debit_per_share") is not None]
+    momentum = "unknown"
+    if len(recent) >= 2:
+        v0, v1 = recent[0]["current_debit_per_share"], recent[-1]["current_debit_per_share"]
+        band = MOVE_MOMENTUM_FLAT_BAND_PCT * v0 if v0 else 0
+        if v1 - v0 > band:
+            momentum = "building"
+        elif v1 - v0 < -band:
+            momentum = "decaying"
+        else:
+            momentum = "flat"
+
+    # Has the event this trade was built around already happened?
+    entry_event = position.get("event_before_expiry_at_entry")
+    event_status = "no_flagged_event"
+    if entry_event:
+        try:
+            ev_date = datetime.strptime(entry_event["date"], "%Y-%m-%d").date()
+            event_status = "event_passed" if ev_date < today else ("event_today" if ev_date == today else "event_ahead")
+        except Exception:
+            event_status = "unknown"
+
+    action, headline, reasons = "HOLD", "Hold — no single factor is decisive either way yet", []
+    tomorrow = "Re-run this check at tomorrow's mark; nothing here forces a decision today."
+    hard_stop = bool(entry_debit_total) and pnl <= -MOVE_STOP_LOSS_DEBIT_PCT * entry_debit_total
+
+    if hard_stop and momentum in ("decaying", "flat", "unknown"):
+        action = "EXIT_NOW"
+        headline = "Exit — loss threshold hit and value isn't rebuilding"
+        reasons.append(f"Down {int(MOVE_STOP_LOSS_DEBIT_PCT * 100)}%+ of the debit paid, and the last "
+                        f"{MOVE_MOMENTUM_LOOKBACK_DAYS} marks show the position {momentum}, not recovering.")
+        tomorrow = "Don't carry this overnight hoping it turns — theta keeps bleeding regardless of tomorrow's open."
+
+    elif days_left <= MOVE_EXPIRY_WARNING_DAYS and zone in ("between_strikes", "moving"):
+        action = "EXIT_NOW"
+        headline = f"Exit — only {days_left} day(s) left and spot hasn't cleared a breakeven"
+        reasons.append("Gamma/theta risk is highest in the final days with the trade still unresolved.")
+        tomorrow = "Not worth holding overnight this close to expiry without a clear breakeven already cleared."
+
+    elif move_progress_pct is not None and move_progress_pct >= MOVE_HIGH_MOVE_PROGRESS_PCT and pnl > 0:
+        action = "BOOK_PROFIT"
+        headline = "Move has largely played out — book it rather than pressing for more"
+        reasons.append(f"Realized move (₹{abs(round(spot - entry_spot, 2))}, {realized_move_pct}%) is already "
+                        f"~{move_progress_pct}% of the move priced in at entry.")
+        if iv_change_pct is not None and iv_change_pct < 0:
+            reasons.append(f"IV has also come off {abs(iv_change_pct)}% since entry — holding on risks giving profit back to decay.")
+        tomorrow = "If not squaring off fully today, at least trail/partial-book — overnight theta plus any IV settle works against you from here."
+
+    elif event_status == "event_ahead" and (move_progress_pct is None or move_progress_pct < MOVE_LOW_MOVE_PROGRESS_PCT) and not hard_stop:
+        action = "HOLD_FOR_EVENT"
+        headline = f"Hold — thesis ({entry_event['label']} on {entry_event['date']}) hasn't played out yet"
+        reasons.append("Little of the expected move has shown up and the catalyst is still ahead — "
+                        "exiting now gives up before the reason for the trade has even occurred.")
+        tomorrow = f"Worth carrying overnight toward {entry_event['date']} unless value starts decaying tomorrow — recheck momentum/IV at tomorrow's mark before assuming this."
+
+    elif event_status == "event_passed" and momentum == "decaying" and (pnl <= 0 or (move_progress_pct or 0) < MOVE_LOW_MOVE_PROGRESS_PCT):
+        action = "EXIT_SOON"
+        headline = "Event has passed without the move — likely IV crush already underway"
+        reasons.append("The flagged event date is behind us, daily value is decaying, and the expected "
+                        "move never really showed up. Holding further mostly just bleeds theta/IV now.")
+        tomorrow = "Better to close this than carry overnight — there's no fresh catalyst left before expiry to justify waiting."
+
+    elif momentum == "building" and not hard_stop:
+        action = "HOLD"
+        headline = "Hold — value is still building day over day"
+        reasons.append(f"Last {MOVE_MOMENTUM_LOOKBACK_DAYS} marks show the position gaining value, not decaying.")
+        tomorrow = "Reasonable to carry overnight; re-run this same check at tomorrow's mark before deciding again."
+
+    else:
+        reasons.append("No single factor (P&L, time elapsed, move realized, IV, momentum, event timing) is "
+                        "decisive on its own — this is a genuine hold-and-watch, not a trigger to act.")
+        if time_progress_pct is not None:
+            reasons.append(f"{time_progress_pct}% of the position's original time window has elapsed vs "
+                            f"{move_progress_pct if move_progress_pct is not None else 'an unclear'}% of the entry-expected move realized.")
+
+    return {
+        "action": action, "headline": headline, "reasons": reasons, "tomorrow_outlook": tomorrow,
+        "realized_move_pct": realized_move_pct, "move_progress_pct": move_progress_pct,
+        "time_progress_pct": time_progress_pct, "days_elapsed": days_elapsed,
+        "entry_atm_iv_pct": entry_iv, "atm_iv_now": atm_iv_now, "iv_change_pct": iv_change_pct,
+        "momentum": momentum, "event_status": event_status,
+    }
+
+
+def mark_to_market_move(position):
+    """Mark-to-market for a tracked LONG straddle/strangle position. Profits when the position's
+    CURRENT value rises above the debit paid at entry (from a real move, a rise in IV, or both) —
+    the mirror image of mark_to_market()'s credit-strategy math above."""
+    quantity = position.get("quantity", position["lot_size"])
+    leg_keys = ["buy_call", "buy_put"]
+    inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
+    quotes = kite_quote_bulk(inst_keys)
+
+    prices, missing_legs = {}, []
+    for k in leg_keys:
+        key = f"NFO:{position['legs'][k]['tradingsymbol']}"
+        price = extract_price(quotes.get(key))
+        prices[k] = price
+        if price is None:
+            missing_legs.append(f"{k} ({position['legs'][k]['tradingsymbol']})")
+    if missing_legs:
+        return {"__error__": "No usable price for: " + ", ".join(missing_legs) +
+                              ". Contract may be expired/delisted, or market closed with no resting orders."}
+
+    current_value_per_share = prices["buy_call"] + prices["buy_put"]
+    entry_debit = position["entry_net_debit_per_share"]
+    pnl_per_share = current_value_per_share - entry_debit
+    pnl = round(pnl_per_share * quantity, 2)
+    current_position_value = round(current_value_per_share * quantity, 2)
+
+    spot, err = get_spot_price(position["symbol"])
+    if err:
+        return {"__error__": err["error"]}
+
+    today = now_ist().date()
+    expiry_date = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
+    days_left = (expiry_date - today).days
+    T_remaining = max(days_left, 0) / 365.0
+
+    call_strike = position["legs"]["buy_call"]["strike"]
+    put_strike = position["legs"]["buy_put"]["strike"]
+
+    zone = "between_strikes"          # theta-bleed zone: no move yet — the enemy zone for this trade
+    if spot > position["breakeven_upper"] or spot < position["breakeven_lower"]:
+        zone = "past_breakeven"       # currently profitable if closed now
+    elif spot > call_strike or spot < put_strike:
+        zone = "moving"               # in-the-money on one side but hasn't cleared breakeven yet
+    if days_left <= MOVE_EXPIRY_WARNING_DAYS:
+        zone = "near_expiry"
+
+    delta_call = delta_put = atm_iv_now = None
+    if days_left > 0:
+        iv_call = implied_vol(prices["buy_call"], spot, call_strike, T_remaining, "CE")
+        iv_put = implied_vol(prices["buy_put"], spot, put_strike, T_remaining, "PE")
+        delta_call = bs_delta(spot, call_strike, T_remaining, RISK_FREE_RATE, iv_call, "CE")
+        delta_put = bs_delta(spot, put_strike, T_remaining, RISK_FREE_RATE, iv_put, "PE")
+        if iv_call > 0 and iv_put > 0:
+            atm_iv_now = round((iv_call + iv_put) / 2 * 100, 1)
+
+    # --- Exit suggestion (informational only — never auto-exits) ---
+    exit_suggested, exit_reasons = False, []
+    entry_debit_total = abs(entry_debit * quantity)
+    if entry_debit_total and pnl >= MOVE_PROFIT_TARGET_MULTIPLE * entry_debit_total:
+        exit_suggested = True
+        exit_reasons.append(
+            f"Profit (₹{pnl}) has reached {int(MOVE_PROFIT_TARGET_MULTIPLE * 100)}% of the debit paid "
+            f"(₹{round(entry_debit_total, 2)}) — consider booking some or all of it; long options can "
+            f"give profit back fast if the move stalls or IV drops.")
+    if entry_debit_total and pnl <= -MOVE_STOP_LOSS_DEBIT_PCT * entry_debit_total:
+        exit_suggested = True
+        exit_reasons.append(
+            f"Value has decayed to a loss of ₹{abs(pnl)}, {int(MOVE_STOP_LOSS_DEBIT_PCT * 100)}%+ of "
+            f"the debit paid — the expected move hasn't shown up; consider cutting the loss rather "
+            f"than waiting on theta to finish the job.")
+    if days_left <= MOVE_EXPIRY_WARNING_DAYS and days_left >= 0 and zone in ("between_strikes", "moving"):
+        exit_suggested = True
+        exit_reasons.append(
+            f"Only {days_left} day(s) to expiry and spot hasn't cleared a breakeven — theta decay "
+            f"accelerates fastest right here; consider closing rather than holding to expiry.")
+    if not exit_suggested and zone == "past_breakeven":
+        exit_reasons.append(
+            "Spot is past a breakeven — position is showing a profit at current prices; watch for an "
+            "IV crush (e.g. right after an event) that can erode profit even if price holds.")
+
+    event_flag = get_event_before_expiry(position["expiry"])
+
+    exit_orders_for_charges = [{"price": prices[k], "quantity": quantity, "transaction_type": "SELL"} for k in leg_keys]
+    exit_charges = estimate_charges(exit_orders_for_charges)
+    entry_charges_total = position.get("entry_estimated_charges") or 0
+    round_trip_charges = round(entry_charges_total + exit_charges["total"], 2)
+    net_pnl_after_charges = round(pnl - round_trip_charges, 2)
+
+    leg_details = {}
+    for k in leg_keys:
+        entry_price = position["legs"][k]["ltp"]
+        current_price = prices[k]
+        per_share = current_price - entry_price  # long leg profits when price rises
+        leg_details[k] = {
+            "tradingsymbol": position["legs"][k]["tradingsymbol"], "strike": position["legs"][k]["strike"],
+            "entry_price": entry_price, "current_price": round(current_price, 2),
+            "pnl": round(per_share * quantity, 2),
+        }
+    if delta_call is not None:
+        leg_details["buy_call"]["current_delta"] = round(delta_call, 3)
+    if delta_put is not None:
+        leg_details["buy_put"]["current_delta"] = round(delta_put, 3)
+
+    result = {
+        "spot": spot, "pnl": pnl, "current_debit_per_share": round(current_value_per_share, 2),
+        "current_position_value": current_position_value, "legs_current": leg_details,
+        "days_left": days_left, "zone": zone, "atm_iv_now": atm_iv_now,
+        "pct_of_debit": round((pnl / entry_debit_total * 100), 1) if entry_debit_total else None,
+        "exit_suggested": exit_suggested, "exit_reasons": exit_reasons,
+        "event_before_expiry": event_flag,
+        "entry_charges": entry_charges_total, "estimated_exit_charges": exit_charges["total"],
+        "estimated_round_trip_charges": round_trip_charges, "net_pnl_after_charges": net_pnl_after_charges,
+        "breakeven_upper": position["breakeven_upper"], "breakeven_lower": position["breakeven_lower"],
+    }
+    # The multi-factor hold/exit read — see classify_move_digest for what feeds this. This is the
+    # "don't just fire at a fixed 50%" read: it separately tells you what to do RIGHT NOW and whether
+    # it's worth carrying this position into tomorrow, based on the trade's actual state.
+    try:
+        result["digest"] = classify_move_digest(position, result)
+    except Exception as e:
+        logger.exception("classify_move_digest failed for position %s", position.get("id"))
+        result["digest"] = {"action": "HOLD", "headline": "Digest unavailable (internal error)",
+                             "reasons": [str(e)], "tomorrow_outlook": None}
+    return result
+
+
+@app.route("/api/move-watchlist/add", methods=["POST"])
+def move_watchlist_add():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    symbol = body.get("symbol", "").upper()
+    mode = body.get("mode", "straddle")
+    otm_pct = float(body.get("otm_pct", DEFAULT_MOVE_OTM_PCT))
+    expiry_str = body.get("expiry")
+    lots = int(body.get("lots", 1))
+
+    built = build_move_strategy(symbol, mode, otm_pct, expiry_str, lots)
+    if "error" in built:
+        return jsonify(built), 404
+
+    today_str = now_ist().date().isoformat()
+    position = {
+        "id": f"{symbol}_MV_{int(time.time())}",
+        "symbol": symbol, "added_on": today_str, "entry_spot": built["spot"],
+        "expiry": built["expiry"], "lot_size": built["lot_size"], "lots": built["lots"],
+        "quantity": built["quantity"], "strategy_type": built["strategy_type"], "mode": built["mode"],
+        "legs": built["legs"], "entry_net_debit_per_share": built["net_debit_per_share"],
+        "entry_max_loss": built["max_loss"], "entry_max_profit": built["max_profit"],
+        "entry_margin_required": built.get("margin_required"), "entry_margin_error": built.get("margin_error"),
+        "entry_estimated_charges": built.get("estimated_entry_charges", {}).get("total"),
+        "breakeven_upper": built["breakeven_upper"], "breakeven_lower": built["breakeven_lower"],
+        "move_score_at_entry": built.get("move_score"), "move_reasons_at_entry": built.get("move_reasons"),
+        # Snapshot needed later by classify_move_digest to judge progress-vs-plan, not just raw P&L.
+        "entry_atm_iv_pct": built.get("atm_iv_pct"), "entry_expected_move": built.get("expected_move"),
+        "entry_days_to_expiry": built.get("days_to_expiry"),
+        "event_before_expiry_at_entry": built.get("event_before_expiry"),
+        "broker_orders": [],
+        "history": [{"date": today_str, "spot": built["spot"], "pnl": 0.0,
+                     "current_debit_per_share": built["net_debit_per_share"]}],
+    }
+    positions = load_move_positions()
+    positions.append(position)
+    save_move_positions(positions)
+    return jsonify({"ok": True, "position": position})
+
+
+@app.route("/api/move-watchlist")
+def move_watchlist():
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    positions = load_move_positions()
+    today_str = now_ist().date().isoformat()
+    out, changed = [], False
+    for p in positions:
+        try:
+            mtm = mark_to_market_move(p)
+        except Exception as e:
+            logger.exception("mark_to_market_move failed for position %s (%s)", p.get("id"), p.get("symbol"))
+            out.append({**p, "mtm_error": f"Internal error while pricing this position: {e}"})
+            continue
+        if mtm and "__error__" in mtm:
+            out.append({**p, "mtm_error": mtm["__error__"]})
+            continue
+        if not p["history"] or p["history"][-1]["date"] != today_str:
+            p["history"].append({"date": today_str, "spot": mtm["spot"], "pnl": mtm["pnl"],
+                                  "current_debit_per_share": mtm["current_debit_per_share"]})
+            changed = True
+        out.append({**p, "current": mtm})
+    if changed:
+        save_move_positions(positions)
+    return jsonify({"positions": out})
+
+
+@app.route("/api/move-watchlist/<pos_id>", methods=["DELETE"])
+def move_watchlist_remove(pos_id):
+    positions = load_move_positions()
+    positions = [p for p in positions if p["id"] != pos_id]
+    save_move_positions(positions)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/move-watchlist/<pos_id>/curve")
+def move_watchlist_curve(pos_id):
+    """Live re-estimate of the payoff curve for an already-tracked position, using current spot and
+    today's implied vol on both legs (rather than the frozen entry-day curve)."""
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    position = find_move_position(pos_id)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+    spot, err = get_spot_price(position["symbol"])
+    if err:
+        return jsonify(err), 404
+
+    today = now_ist().date()
+    expiry_date = datetime.strptime(position["expiry"], "%Y-%m-%d").date()
+    days_left = max((expiry_date - today).days, 0)
+    call_strike = position["legs"]["buy_call"]["strike"]
+    put_strike = position["legs"]["buy_put"]["strike"]
+    quantity = position.get("quantity", position["lot_size"])
+    inst_keys = [f"NFO:{position['legs']['buy_call']['tradingsymbol']}",
+                 f"NFO:{position['legs']['buy_put']['tradingsymbol']}"]
+    try:
+        quotes = kite_quote_bulk(inst_keys)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    T = days_left / 365.0
+    call_ltp = extract_price(quotes.get(inst_keys[0]))
+    put_ltp = extract_price(quotes.get(inst_keys[1]))
+    if call_ltp is None or put_ltp is None:
+        return jsonify({"error": "No usable live price for one or both legs"}), 400
+    call_iv = implied_vol(call_ltp, spot, call_strike, T, "CE") if T > 0 else 0.20
+    put_iv = implied_vol(put_ltp, spot, put_strike, T, "PE") if T > 0 else 0.20
+    entry_debit = position["entry_net_debit_per_share"]
+
+    lo = spot * (1 - MOVE_CURVE_RANGE_PCT); hi = spot * (1 + MOVE_CURVE_RANGE_PCT)
+    step = (hi - lo) / (MOVE_CURVE_POINTS - 1)
+    curve = []
+    for i in range(MOVE_CURVE_POINTS):
+        s_t = lo + i * step
+        value = (bs_price(s_t, call_strike, T, RISK_FREE_RATE, call_iv, "CE") +
+                 bs_price(s_t, put_strike, T, RISK_FREE_RATE, put_iv, "PE"))
+        curve.append({"spot": round(s_t, 2), "pnl": round((value - entry_debit) * quantity, 2)})
+
+    return jsonify({"position_id": pos_id, "spot": spot, "days_left": days_left, "curve": curve,
+                     "call_strike": call_strike, "put_strike": put_strike,
+                     "call_iv_pct": round(call_iv * 100, 1), "put_iv_pct": round(put_iv * 100, 1),
+                     "quantity": quantity, "entry_debit_per_share": entry_debit,
+                     "note": "Live re-estimate using current spot and today's implied vol on both legs — "
+                             "the curve shape will keep shifting daily as time passes and IV moves."})
+
+
+def build_move_close_orders(position):
+    """Reverse of the entry orders (SELL both legs), with a fresh reference price from live quotes."""
+    quantity = position.get("quantity", position["lot_size"])
+    leg_keys = ["buy_call", "buy_put"]
+    inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
+    quotes = kite_quote_bulk(inst_keys)
+    orders = []
+    for k in leg_keys:
+        leg = position["legs"][k]
+        ref_price = extract_price(quotes.get(f"NFO:{leg['tradingsymbol']}"))
+        orders.append({"leg": k, "tradingsymbol": leg["tradingsymbol"], "transaction_type": "SELL",
+                        "quantity": quantity, "price": ref_price, "reference_price": ref_price,
+                        "entry_price": leg["ltp"], "original_transaction_type": "BUY"})
+    return orders
+
+
+@app.route("/api/move-execute/<pos_id>/preview")
+def move_execute_preview(pos_id):
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    position = find_move_position(pos_id)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+    quantity = position.get("quantity", position["lot_size"])
+    leg_keys = ["buy_call", "buy_put"]
+    inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
+    try:
+        quotes = kite_quote_bulk(inst_keys, force_refresh=True)
+    except Exception as e:
+        return jsonify({"error": f"Could not fetch live Bid/Ask: {e}"}), 502
+    orders = []
+    for k in leg_keys:
+        leg = position["legs"][k]
+        q = quotes.get(f"NFO:{leg['tradingsymbol']}") or {}
+        ltp = q.get("last_price")
+        bid, ask = extract_bid_ask(q)
+        auto_price = recommended_limit_price("BUY", bid, ask, ltp)
+        orders.append({"leg": k, "tradingsymbol": leg["tradingsymbol"], "transaction_type": "BUY",
+                        "quantity": quantity, "ltp": ltp, "bid": bid, "ask": ask,
+                        "recommended_limit_price": auto_price, "reference_price": auto_price,
+                        "price_source": "ASK" if ask is not None else "LTP_FALLBACK"})
+    return jsonify({"position_id": pos_id, "symbol": position["symbol"], "orders": orders,
+                     "default_product": "NRML", "default_order_type": "LIMIT",
+                     "warning": "LIMIT prices use best Ask (you're BUYING both legs). Quotes can "
+                                "change before the order reaches the exchange."})
+
+
+@app.route("/api/move-execute/<pos_id>/confirm", methods=["POST"])
+def move_execute_confirm(pos_id):
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    if not body.get("confirmed"):
+        return jsonify({"error": "Confirmation flag not set — nothing was placed."}), 400
+    position = find_move_position(pos_id)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+    product = body.get("product", "NRML")
+    order_type = body.get("order_type", "MARKET")
+    custom_orders = body.get("orders")
+    if custom_orders:
+        legs_to_place = custom_orders
+    else:
+        quantity = position.get("quantity", position["lot_size"])
+        legs_to_place = [{"leg": k, "tradingsymbol": position["legs"][k]["tradingsymbol"],
+                           "transaction_type": "BUY", "quantity": quantity, "price": position["legs"][k]["ltp"]}
+                          for k in ("buy_call", "buy_put")]
+    if not legs_to_place:
+        return jsonify({"error": "No legs left to place — every leg was removed in the review screen."}), 400
+
+    results = place_basket_orders(legs_to_place, product, order_type)
+    positions = load_move_positions()
+    for p in positions:
+        if p["id"] == pos_id:
+            p["broker_orders"] = p.get("broker_orders", []) + results
+    save_move_positions(positions)
+
+    any_failed = any(r["status"] == "failed" for r in results)
+    placed_count = sum(1 for r in results if r["status"] == "placed")
+    total_legs = len(legs_to_place)
+    partial = any_failed and placed_count > 0
+    return jsonify({
+        "results": results, "partial_failure": partial,
+        "note": ("PARTIAL EXECUTION: one leg placed, one failed — you may now hold an unhedged single "
+                 "long option. Open your Zerodha app / Kite web IMMEDIATELY to check and manually "
+                 "complete or exit as needed."
+                 if partial else
+                 "All legs failed — nothing was placed." if any_failed and placed_count == 0 else
+                 f"All {placed_count}/{total_legs} legs placed successfully. Verify fills in your Zerodha app.")
+    })
+
+
+@app.route("/api/move-execute/<pos_id>/close/preview")
+def move_close_preview(pos_id):
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    position = find_move_position(pos_id)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+    orders = build_move_close_orders(position)
+    return jsonify({"position_id": pos_id, "symbol": position["symbol"], "orders": orders,
+                     "default_product": "NRML", "default_order_type": "MARKET",
+                     "warning": "This will CLOSE/SQUARE OFF this position — SELLING both legs at "
+                                "current market prices. Review carefully, then confirm to send these "
+                                "real orders to your Zerodha account."})
+
+
+@app.route("/api/move-execute/<pos_id>/close/confirm", methods=["POST"])
+def move_close_confirm(pos_id):
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
+    body = request.json or {}
+    if not body.get("confirmed"):
+        return jsonify({"error": "Confirmation flag not set — nothing was placed."}), 400
+    position = find_move_position(pos_id)
+    if not position:
+        return jsonify({"error": "Position not found"}), 404
+    product = body.get("product", "NRML")
+    order_type = body.get("order_type", "MARKET")
+    custom_orders = body.get("orders")
+    legs_to_place = custom_orders if custom_orders else build_move_close_orders(position)
+    if not legs_to_place:
+        return jsonify({"error": "No legs left to place — every leg was removed in the review screen."}), 400
+
+    results = place_basket_orders(legs_to_place, product, order_type)
+
+    entry_by_leg = {o["leg"]: o.get("entry_price") for o in legs_to_place}
+    for r in results:
+        if r["status"] != "placed":
+            continue
+        entry_price = entry_by_leg.get(r["leg"])
+        close_price = next((o.get("reference_price") for o in legs_to_place if o["leg"] == r["leg"]), None)
+        if entry_price is not None and close_price is not None:
+            r["estimated_realized_pnl"] = round((close_price - entry_price) * r["quantity"], 2)
+
+    positions = load_move_positions()
+    still_present = None
+    for p in positions:
+        if p["id"] == pos_id:
+            p["broker_orders"] = p.get("broker_orders", []) + results
+            still_present = p
+
+    any_failed = any(r["status"] == "failed" for r in results)
+    placed_count = sum(1 for r in results if r["status"] == "placed")
+    total_legs = len(legs_to_place)
+    fully_closed = placed_count == total_legs and not any_failed
+
+    if fully_closed and still_present:
+        archive_closed_position(still_present, results)
+        positions = [p for p in positions if p["id"] != pos_id]
+        note = (f"Position fully closed and archived to trade_history.json. Estimated realized P&L: "
+                f"₹{round(sum(r.get('estimated_realized_pnl', 0) for r in results), 2)} (based on quoted "
+                f"prices at close, not confirmed fills — check your contract note).")
+    elif any_failed and placed_count > 0:
+        note = ("PARTIAL CLOSE: one leg closed, one failed. You may now hold a mismatched position. "
+                "Open your Zerodha app / Kite web IMMEDIATELY to check and manually complete the close.")
+    elif any_failed:
+        note = "All legs failed — nothing was closed."
+    else:
+        note = f"All {placed_count}/{total_legs} legs placed to close this position. Verify fills in your Zerodha app."
+
+    save_move_positions(positions)
+    return jsonify({"results": results, "fully_closed": fully_closed, "note": note})
 
 
 # ---------------------------------------------------------------------------
