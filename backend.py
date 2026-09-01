@@ -182,18 +182,30 @@ FO_BAN_LIST_URL = "https://nsearchives.nseindia.com/content/fo/fo_secban.csv"
 # Option-Selling Condor/Strangle module above — it does not require that screener to have been run
 # first, and it stores its own tracked positions in a separate file so the two can never collide.
 DEFAULT_MOVE_OTM_PCT = 0.03            # each strangle leg this far OTM from spot, by default
-MOVE_MIN_DTE = 7
+DEFAULT_MOVE_TARGET_DELTA = 0.30       # smart strangle: balanced ~30-delta call + put
+DEFAULT_MOVE_MAX_RISK_RUPEES = 25000.0
+MOVE_MIN_DTE = 10
 MOVE_MAX_DTE = 45
 MOVE_PREFERRED_DTE_LOW = 14
 MOVE_PREFERRED_DTE_HIGH = 30
 MOVE_CURVE_POINTS = 41
 MOVE_CURVE_RANGE_PCT = 0.20             # payoff chart spans spot x (1 +/- this)
 MOVE_MIN_ATM_TOTAL_OI = 300
-MOVE_MAX_ATM_SPREAD_PCT = 6.0
+MOVE_MIN_LEG_OI = 150
+MOVE_MAX_ATM_SPREAD_PCT = 4.0
+MOVE_MAX_LEG_SPREAD_PCT = 4.0
+MOVE_MAX_IV_HV_RATIO = 1.25
+MOVE_MAX_BREAKEVEN_EM_RATIO = 1.25
+MOVE_MAX_ENTRY_SLIPPAGE_PCT = 2.5
+MOVE_MIN_READY_SCORE = 60.0
 # Exit-suggestion thresholds for tracked positions (informational only — this tool never auto-exits)
-MOVE_PROFIT_TARGET_MULTIPLE = 1.0       # suggest booking profit once gain reaches 100% of debit paid
-MOVE_STOP_LOSS_DEBIT_PCT = 0.45         # suggest cutting loss once value has decayed by this fraction of debit
-MOVE_EXPIRY_WARNING_DAYS = 5            # theta/gamma warning window as expiry nears
+MOVE_PROFIT_TARGET_MULTIPLE = 0.40      # take/trim at +40% of debit instead of waiting for a rare double
+MOVE_STOP_LOSS_DEBIT_PCT = 0.30         # cap premium decay at 30% of debit
+MOVE_TRAIL_ACTIVATE_DEBIT_PCT = 0.25    # start protecting profit after +25% of debit
+MOVE_TRAIL_GIVEBACK_DEBIT_PCT = 0.12    # exit/trim after giving back 12% of debit from peak
+MOVE_TIME_STOP_PROGRESS_PCT = 40        # if 40% of the time window is gone...
+MOVE_TIME_STOP_MAX_MOVE_PCT = 35        # ...and <35% of expected move appeared, stop financing theta
+MOVE_EXPIRY_WARNING_DAYS = 7            # avoid the steepest theta/gamma part of the curve
 # --- "Digest" thresholds — the multi-factor hold/exit read (see classify_move_digest) that replaces
 # a single fixed 50%-profit / 50%-loss trigger with a read of where the trade ACTUALLY stands: how
 # much of the expected move has shown up, how much time has elapsed, whether IV is still expanding or
@@ -648,12 +660,12 @@ def save_trade_history(history):
 def archive_closed_position(position, close_results):
     history = load_trade_history()
     est_realized_pnl = sum(
-        r.get("estimated_realized_pnl", 0) for r in close_results if r["status"] == "placed"
+        r.get("estimated_realized_pnl", 0) for r in close_results if r["status"] in ("placed", "filled")
     )
     exit_orders_for_charges = [
         {"price": r.get("reference_price") or 0, "quantity": r.get("quantity", 0),
          "transaction_type": r.get("transaction_type", "SELL")}
-        for r in close_results if r["status"] == "placed"
+        for r in close_results if r["status"] in ("placed", "filled")
     ]
     exit_charges = estimate_charges(exit_orders_for_charges)
     entry_charges_total = position.get("entry_estimated_charges") or 0
@@ -7269,21 +7281,22 @@ AI_DIRECTIONAL_POLL_SECONDS = int(os.environ.get("AI_DIRECTIONAL_POLL_SECONDS", 
 # Stability/performance controls for the large historical archive.
 AI_HIST_STATUS_CACHE_SECONDS = float(os.environ.get("AI_HIST_STATUS_CACHE_SECONDS", "5"))
 AI_HIST_TRAIN_RETRY_MINUTES = float(os.environ.get("AI_HIST_TRAIN_RETRY_MINUTES", "15"))
-# STAGE 1 FIX: the old defaults (1200 per symbol / 2400 pooled) capped training
-# to well under 1% of the ~645,000-candle archive, and the final pooled cap in
-# ai_hist_train_deep() then kept only the MOST RECENT 2400 rows -- discarding
-# nearly all of the 12-year span every time it retrained. That combination is
-# the direct cause of the "samples=2400, AUC=0.457" baseline in the audit.
-# New sizing: each sample is (sequence_len=20 x len(SEQUENCE_FEATURE_NAMES)=15)
-# float64 = 2,400 bytes. 60,000 pooled samples ~= 144 MB resident during
-# training -- bounded and safe on a small VM, while using ~25x more of the
-# archive than before. Per-symbol point budget is raised proportionally so the
-# per-symbol stratified stride (already chronological/full-span, see
-# _hist_training_sequences) keeps its span but at much higher resolution.
-AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL = int(os.environ.get("AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL", "25000"))
-AI_HIST_TRAIN_MAX_SAMPLES = int(os.environ.get("AI_HIST_TRAIN_MAX_SAMPLES", "60000"))
-AI_HIST_TRAIN_EPOCHS = int(os.environ.get("AI_HIST_TRAIN_EPOCHS", "24"))
+# The first revision raised this to 25k points per symbol / 60k pooled samples,
+# but the NumPy-only GRU and Python feature builder then did too much work for a
+# small Oracle VM. More importantly, the old sequence builder retained a Python
+# dict for almost every source candle, so a nominally bounded job could still
+# swap or be OOM-killed. These defaults use ~12x the original 2,400-sample
+# baseline while remaining practical; deployments with more CPU/RAM can raise
+# them through the existing environment variables.
+AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL = int(os.environ.get("AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL", "12000"))
+AI_HIST_TRAIN_MAX_SAMPLES = int(os.environ.get("AI_HIST_TRAIN_MAX_SAMPLES", "30000"))
+AI_HIST_TRAIN_EPOCHS = int(os.environ.get("AI_HIST_TRAIN_EPOCHS", "12"))
+AI_HIST_TRAIN_BATCH_SIZE = int(os.environ.get("AI_HIST_TRAIN_BATCH_SIZE", "256"))
+AI_HIST_TRAIN_HEARTBEAT_SECONDS = float(os.environ.get("AI_HIST_TRAIN_HEARTBEAT_SECONDS", "2"))
+AI_HIST_TRAIN_STALE_SECONDS = float(os.environ.get("AI_HIST_TRAIN_STALE_SECONDS", "180"))
 AI_HIST_TRAIN_LOCK = threading.Lock()
+AI_HIST_TRAIN_START_LOCK = threading.Lock()
+_AI_HIST_TRAIN_THREAD = None
 _AI_HIST_STATUS_CACHE = {"at": 0.0, "value": None}
 _AI_HIST_STATUS_CACHE_LOCK = threading.Lock()
 
@@ -7878,28 +7891,46 @@ def _dl_sigmoid_vec(x):
 
 
 def _dl_auc(y,p):
-    pos=[float(a) for a,b in zip(p,y) if int(b)==1]
-    neg=[float(a) for a,b in zip(p,y) if int(b)==0]
-    if not pos or not neg:return 0.0
-    return sum(1 if a>b else 0.5 if a==b else 0 for a in pos for b in neg)/(len(pos)*len(neg))
+    """Rank-based AUC in O(n log n), including average ranks for ties.
+
+    The previous pairwise implementation was O(positive * negative). On a
+    6,000-row validation set that can mean millions of Python comparisons after
+    the last epoch, making a completed model look stuck.
+    """
+    y=np.asarray(y,dtype=np.int8).reshape(-1)
+    p=np.asarray(p,dtype=np.float64).reshape(-1)
+    mask=np.isfinite(p)
+    y=y[mask];p=p[mask]
+    n_pos=int(np.sum(y==1));n_neg=int(np.sum(y==0))
+    if not n_pos or not n_neg:return 0.0
+    order=np.argsort(p,kind="mergesort")
+    sorted_p=p[order]
+    ranks=np.empty(len(p),dtype=np.float64)
+    i=0
+    while i<len(sorted_p):
+        j=i+1
+        while j<len(sorted_p) and sorted_p[j]==sorted_p[i]:j+=1
+        ranks[order[i:j]]=(i+j+1)/2.0  # one-based average rank
+        i=j
+    return float((np.sum(ranks[y==1])-n_pos*(n_pos+1)/2.0)/(n_pos*n_neg))
 
 
 def _gru_init(input_dim, hidden, seed=42):
     rng=np.random.default_rng(seed)
     scale=1.0/math.sqrt(max(1,input_dim))
     return {
-        "Wz":rng.normal(0,scale,(input_dim,hidden)),"Uz":rng.normal(0,1/math.sqrt(hidden),(hidden,hidden)),"bz":np.zeros(hidden),
-        "Wr":rng.normal(0,scale,(input_dim,hidden)),"Ur":rng.normal(0,1/math.sqrt(hidden),(hidden,hidden)),"br":np.zeros(hidden),
-        "Wh":rng.normal(0,scale,(input_dim,hidden)),"Uh":rng.normal(0,1/math.sqrt(hidden),(hidden,hidden)),"bh":np.zeros(hidden),
-        "Wo":rng.normal(0,1/math.sqrt(hidden),(hidden,1)),"bo":np.zeros(1),
+        "Wz":rng.normal(0,scale,(input_dim,hidden)).astype(np.float32),"Uz":rng.normal(0,1/math.sqrt(hidden),(hidden,hidden)).astype(np.float32),"bz":np.zeros(hidden,dtype=np.float32),
+        "Wr":rng.normal(0,scale,(input_dim,hidden)).astype(np.float32),"Ur":rng.normal(0,1/math.sqrt(hidden),(hidden,hidden)).astype(np.float32),"br":np.zeros(hidden,dtype=np.float32),
+        "Wh":rng.normal(0,scale,(input_dim,hidden)).astype(np.float32),"Uh":rng.normal(0,1/math.sqrt(hidden),(hidden,hidden)).astype(np.float32),"bh":np.zeros(hidden,dtype=np.float32),
+        "Wo":rng.normal(0,1/math.sqrt(hidden),(hidden,1)).astype(np.float32),"bo":np.zeros(1,dtype=np.float32),
     }
 
 
 def _gru_forward(params,X,cache=False):
-    X=np.asarray(X,dtype=float)
+    X=np.asarray(X,dtype=np.float32)
     if X.ndim==2:X=X[None,:,:]
     B,T,D=X.shape; H=params["Wo"].shape[0]
-    h=np.zeros((B,H)); states=[]
+    h=np.zeros((B,H),dtype=np.float32); states=[]
     for t in range(T):
         x=X[:,t,:]; hp=h
         z=_dl_sigmoid_vec(x@params["Wz"]+hp@params["Uz"]+params["bz"])
@@ -7913,7 +7944,7 @@ def _gru_forward(params,X,cache=False):
 
 
 def _gru_backward(params,X,Y,states,prob):
-    X=np.asarray(X,dtype=float); Y=np.asarray(Y,dtype=float).reshape(-1)
+    X=np.asarray(X,dtype=np.float32); Y=np.asarray(Y,dtype=np.float32).reshape(-1)
     B,T,D=X.shape; H=params["Wo"].shape[0]
     g={k:np.zeros_like(v) for k,v in params.items()}
     # BCE derivative wrt final logits.
@@ -7954,7 +7985,7 @@ def _gru_to_json(params):
 
 
 def _gru_from_json(blob):
-    return {k:np.asarray(v,dtype=float) for k,v in blob.items()}
+    return {k:np.asarray(v,dtype=np.float32) for k,v in blob.items()}
 
 
 def ai_dl_model():
@@ -7996,29 +8027,46 @@ def ai_dl_predict_sequence(seq):
     return p,ai_dl_model()
 
 
-def _ai_dl_train_arrays(X,Y,status_name="TRAINED",seed=42,epochs_override=None):
-    X=np.asarray(X,dtype=float);Y=np.asarray(Y,dtype=float).reshape(-1)
+def _ai_dl_train_arrays(X,Y,status_name="TRAINED",seed=42,epochs_override=None,training_started_at=None):
+    X=np.asarray(X,dtype=np.float32);Y=np.asarray(Y,dtype=np.float32).reshape(-1)
     if len(X)<2 or len(set(Y.astype(int).tolist()))<2:return None
     # Chronological 80/20 holdout. No validation sample is used for fitting.
     cut=max(1,int(len(X)*0.8));cut=min(cut,len(X)-1)
     Xtr,Ytr=X[:cut],Y[:cut];Xv,Yv=X[cut:],Y[cut:]
     params=_gru_init(X.shape[2],DL_GRU_HIDDEN,seed)
     p=ai_settings();lr=float(p.get("dl_learning_rate",0.01));epochs=min(60,max(8,int(epochs_override if epochs_override is not None else p.get("dl_epochs",30))))
-    bs=max(8,min(DL_BATCH_SIZE,len(Xtr)))
-    rng=np.random.default_rng(seed)
+    requested_bs=AI_HIST_TRAIN_BATCH_SIZE if status_name == "HISTORICAL_PRETRAINED" else DL_BATCH_SIZE
+    bs=max(8,min(requested_bs,len(Xtr)))
+    total_batches=max(1,int(math.ceil(len(Xtr)/bs)))
+    last_telemetry=0.0
+    try: started_dt=datetime.fromisoformat(training_started_at) if training_started_at else None
+    except Exception: started_dt=None
     # Training batches remain chronological inside each batch; batch order may change, but
     # validation remains untouched and chronological.
     for ep in range(epochs):
         # deterministic contiguous mini-batches; no leakage from validation
-        for lo in range(0,len(Xtr),bs):
+        for batch_i,lo in enumerate(range(0,len(Xtr),bs)):
             xb=Xtr[lo:lo+bs];yb=Ytr[lo:lo+bs]
             pred,cache=_gru_forward(params,xb,cache=True)
             grads=_gru_backward(params,xb,yb,cache,pred)
             _gru_apply(params,grads,lr,clip=1.0)
+            now_mono=time.monotonic()
+            if status_name == "HISTORICAL_PRETRAINED" and now_mono-last_telemetry>=AI_HIST_TRAIN_HEARTBEAT_SECONDS:
+                frac=(ep+(batch_i+1)/total_batches)/epochs
+                elapsed=(datetime.now(IST)-started_dt).total_seconds() if started_dt else 0.0
+                _hist_training_update(
+                    epoch=ep+1, epochs=epochs,
+                    progress=round(35.0+60.0*frac,1),
+                    phase=f"TRAINING GRU · epoch {ep+1}/{epochs} · batch {batch_i+1}/{total_batches}",
+                    elapsed_sec=round(elapsed,1), samples=len(X))
+                last_telemetry=now_mono
         if status_name == "HISTORICAL_PRETRAINED":
-            try:
-                c=ai_db(); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_epoch',?)",(str(ep+1),)); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_epochs',?)",(str(epochs),)); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",(str(round(35.0+60.0*(ep+1)/epochs,1)),)); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",(f"TRAINING GRU · epoch {ep+1}/{epochs}",)); c.commit(); c.close()
-            except Exception: pass
+            elapsed=(datetime.now(IST)-started_dt).total_seconds() if started_dt else 0.0
+            _hist_training_update(
+                epoch=ep+1, epochs=epochs,
+                progress=round(35.0+60.0*(ep+1)/epochs,1),
+                phase=f"TRAINING GRU · epoch {ep+1}/{epochs}",
+                elapsed_sec=round(elapsed,1), samples=len(X))
     pv=_gru_forward(params,Xv)
     acc=float(np.mean((pv>=0.5)==(Yv>=0.5))*100) if len(Yv) else 0.0
     auc=float(_dl_auc(Yv.astype(int),pv)) if len(set(Yv.astype(int).tolist()))>=2 else 0.0
@@ -8709,17 +8757,68 @@ def ai_capture_option_chains(force=False):
 # ---------------------------------------------------------------------------
 # Historical index data collector + pre-training layer
 # ---------------------------------------------------------------------------
+def _hist_training_update(**fields):
+    """Write training telemetry as one short transaction.
+
+    Every update also renews the worker heartbeat. Keeping this in one helper
+    prevents the UI from observing a new progress value with an old phase (or
+    vice versa), and gives us a reliable way to recover a stale persisted flag
+    after a process restart.
+    """
+    fields.setdefault("heartbeat_at",datetime.now(IST).isoformat())
+    c=ai_db()
+    try:
+        for name,value in fields.items():
+            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES(?,?)",
+                      (f"hist_training_{name}",str(value)))
+        c.commit()
+    finally:
+        c.close()
+
+
+def _hist_training_age_seconds(value):
+    try:
+        dt=datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt=dt.replace(tzinfo=IST)
+        return max(0.0,(datetime.now(IST)-dt.astimezone(IST)).total_seconds())
+    except Exception:
+        return None
+
+
 def ai_hist_training_active():
     """Return whether historical GRU retraining is currently running.
-    Persisted in ai_runtime so a browser refresh cannot lose the state."""
+    Persisted in ai_runtime so a browser refresh cannot lose the state. A stale
+    flag left by a dead/restarted process is cleared only when no in-process
+    worker owns the training lock."""
     try:
-        c=ai_db(); r=c.execute("SELECT value FROM ai_runtime WHERE key='hist_training_active'").fetchone(); c.close()
-        return str(r[0] if r else "0") == "1"
+        c=ai_db()
+        rt={r["key"]:r["value"] for r in c.execute(
+            "SELECT key,value FROM ai_runtime WHERE key IN "
+            "('hist_training_active','hist_training_heartbeat_at','hist_training_started_at')").fetchall()}
+        c.close()
+        if str(rt.get("hist_training_active","0")) != "1":return False
+        heartbeat=rt.get("hist_training_heartbeat_at") or rt.get("hist_training_started_at")
+        age=_hist_training_age_seconds(heartbeat)
+        if age is not None and age<=AI_HIST_TRAIN_STALE_SECONDS:return True
+        if AI_HIST_TRAIN_LOCK.locked():return True
+        detail=(f"Previous training worker stopped responding {int(age)}s ago; safe retry is available."
+                if age is not None else "Previous training worker has no valid heartbeat; safe retry is available.")
+        c=ai_db()
+        for key,value in (
+            ("hist_training_active","0"),("hist_training_phase","INTERRUPTED — RETRY AVAILABLE"),
+            ("hist_training_error",detail),("hist_model_status","TRAINING INTERRUPTED — RETRY AVAILABLE")):
+            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES(?,?)",(key,value))
+        c.commit();c.close();_hist_invalidate_status_cache()
+        return False
     except Exception:
         return False
 
 def ai_hist_status():
     """Cached history status; safe for a frequent browser heartbeat."""
+    # This inexpensive lease check also clears a persisted active=1 left by a
+    # process crash, so the Retrain button cannot remain disabled forever.
+    ai_hist_training_active()
     now_m=time.monotonic()
     with _AI_HIST_STATUS_CACHE_LOCK:
         cached=_AI_HIST_STATUS_CACHE.get("value")
@@ -8734,11 +8833,21 @@ def ai_hist_status():
     oldest=c.execute("SELECT MIN(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     newest=c.execute("SELECT MAX(ts) FROM ai_hist_candles WHERE interval=?",(AI_HIST_INTERVAL,)).fetchone()[0]
     c.close()
-    value={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,"max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,"horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),"oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],"runs":[dict(r) for r in runs],"model":dict(model) if model else None,"last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),"train_detail":rt.get("hist_train_detail"),"status":rt.get("hist_status","WAITING FOR KITE"),"collector_status":rt.get("hist_collector_status",rt.get("hist_status","WAITING FOR KITE")),"model_status":rt.get("hist_model_status",(dict(model).get("status") if model else "NOT TRAINED")),"detail":rt.get("hist_detail",""),"archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),"training_requested":rt.get("hist_training_requested","0"),"training_started_at":rt.get("hist_training_started_at"),"training_error":rt.get("hist_training_error",""),"training_active":rt.get("hist_training_active","0"),"training_progress":float(rt.get("hist_training_progress","0") or 0),"training_phase":rt.get("hist_training_phase","IDLE"),"training_epoch":int(float(rt.get("hist_training_epoch","0") or 0)),"training_epochs":int(float(rt.get("hist_training_epochs","0") or 0)),"training_elapsed_sec":float(rt.get("hist_training_elapsed_sec","0") or 0),"training_samples":int(float(rt.get("hist_training_samples","0") or 0)),"option_capture":ai_option_capture_status()}
+    active=str(rt.get("hist_training_active","0"))=="1"
+    heartbeat=rt.get("hist_training_heartbeat_at") or rt.get("hist_training_started_at")
+    heartbeat_age=_hist_training_age_seconds(heartbeat)
+    elapsed=float(rt.get("hist_training_elapsed_sec","0") or 0)
+    if active:
+        live_elapsed=_hist_training_age_seconds(rt.get("hist_training_started_at"))
+        if live_elapsed is not None:elapsed=max(elapsed,live_elapsed)
+    value={"interval":AI_HIST_INTERVAL,"lookback_days":AI_HIST_LOOKBACK_DAYS,"max_years":AI_HIST_MAX_YEARS,"chunk_days":AI_HIST_CHUNK_DAYS,"horizon_bars":AI_HIST_HORIZON_BARS,"candles":int(total),"oldest":oldest,"newest":newest,"symbols":[dict(r) for r in rows],"runs":[dict(r) for r in runs],"model":dict(model) if model else None,"last_sync_at":rt.get("hist_last_sync_at"),"last_train_at":rt.get("hist_last_train_at"),"train_detail":rt.get("hist_train_detail"),"status":rt.get("hist_status","WAITING FOR KITE"),"collector_status":rt.get("hist_collector_status",rt.get("hist_status","WAITING FOR KITE")),"model_status":rt.get("hist_model_status",(dict(model).get("status") if model else "NOT TRAINED")),"detail":rt.get("hist_detail",""),"archive_mode":rt.get("archive_mode","FRESH_ARCHIVE"),"training_requested":rt.get("hist_training_requested","0"),"training_started_at":rt.get("hist_training_started_at"),"training_error":rt.get("hist_training_error",""),"training_active":"1" if active else "0","training_progress":float(rt.get("hist_training_progress","0") or 0),"training_phase":rt.get("hist_training_phase","IDLE"),"training_epoch":int(float(rt.get("hist_training_epoch","0") or 0)),"training_epochs":int(float(rt.get("hist_training_epochs","0") or 0)),"training_elapsed_sec":elapsed,"training_samples":int(float(rt.get("hist_training_samples","0") or 0)),"training_heartbeat_at":heartbeat,"training_heartbeat_age_sec":heartbeat_age,"training_stalled":bool(active and (heartbeat_age is None or heartbeat_age>AI_HIST_TRAIN_STALE_SECONDS)),"option_capture":ai_option_capture_status()}
     with _AI_HIST_STATUS_CACHE_LOCK:
         _AI_HIST_STATUS_CACHE["at"]=now_m
         _AI_HIST_STATUS_CACHE["value"]=value
     return value
+
+_HIST_EMA_WEIGHT_CACHE = {}
+
 
 def _hist_feature_row(rows, i, arrays=None):
     """Fast, deterministic historical feature builder.
@@ -8776,7 +8885,11 @@ def _hist_feature_row(rows, i, arrays=None):
         m=len(x)-1
         if m<=0:return float(x[0])
         # EMA_i = a*sum(x[i-k]*r**k, k=0..m-1) + x[lo]*r**m
-        weights=a*np.power(r,np.arange(m-1,-1,-1,dtype=float))
+        cache_key=(n,m)
+        weights=_HIST_EMA_WEIGHT_CACHE.get(cache_key)
+        if weights is None:
+            weights=(a*np.power(r,np.arange(m-1,-1,-1,dtype=np.float32))).astype(np.float32)
+            _HIST_EMA_WEIGHT_CACHE[cache_key]=weights
         return float(np.dot(x[1:],weights) + x[0]*(r**m))
     def rsi(n=14):
         lo=max(0,i-int(n))
@@ -8793,8 +8906,11 @@ def _hist_feature_row(rows, i, arrays=None):
     e9,e20,e50=ema(9),ema(20),ema(50)
     trend=max(0,min(25,12.5+(e20/e50-1)*500)) if e50 else 12.5
     mom=max(0,min(25,12.5+ret(5)*3+ret(20)))
-    row_i=rows[i]
-    ts=str(row_i[0] if not isinstance(row_i,dict) else row_i["ts"])
+    if arrays is not None and arrays.get("ts") is not None:
+        ts=str(arrays["ts"][i])
+    else:
+        row_i=rows[i]
+        ts=str(row_i[0] if not isinstance(row_i,dict) else row_i["ts"])
     try:
         dt=datetime.fromisoformat(ts.replace("Z","+00:00"))
         if dt.tzinfo: dt=dt.astimezone(IST).replace(tzinfo=None)
@@ -8872,64 +8988,87 @@ def build_live_index_sequence(symbol):
         "feature_engine_version": FEATURE_ENGINE_VERSION,
     }, None
 
-def _hist_training_sequences(symbol):
+def _hist_training_sequences(symbol,symbol_index=0,symbol_count=1,started_at=None,sample_base=0):
+    """Build bounded historical sequences without retaining per-candle dicts.
+
+    The previous implementation cached a feature dictionary for nearly every
+    candle touched by overlapping windows. With ~215k rows per index this could
+    consume hundreds of MB and make the process appear frozen at the final
+    candidate while the VM swapped. A dense float32 matrix is both smaller and
+    faster, and is discarded as soon as this symbol's sequences are assembled.
+    """
     c=ai_db()
-    # Fetch only the fields required by the historical feature builder.  The old
-    # SELECT * + dict() materialisation consumed a large amount of RAM for ~215k
-    # candles and could push the 512 MiB VM into swap before GRU training began.
-    rows=c.execute(
+    raw_rows=c.execute(
         "SELECT ts,close,high,low,volume FROM ai_hist_candles WHERE symbol=? AND interval=? ORDER BY ts",
         (symbol,AI_HIST_INTERVAL)).fetchall()
     c.close()
     need=DL_SEQUENCE_LEN+AI_HIST_HORIZON_BARS+5
-    if len(rows)<need:return [],[]
+    empty_x=np.empty((0,DL_SEQUENCE_LEN,len(SEQUENCE_FEATURE_NAMES)),dtype=np.float32)
+    if len(raw_rows)<need:return empty_x,np.empty(0,dtype=np.float32),[]
 
-    # Keep training bounded for the Oracle VM.  We deliberately sample chronologically,
-    # rather than randomly, so the eventual 80/20 split remains a genuine walk-forward test.
-    usable=len(rows)-AI_HIST_HORIZON_BARS
+    times_all=[str(r[0]) for r in raw_rows]
     arrays={
-        "close":np.asarray([float(r[1]) for r in rows],dtype=float),
-        "high":np.asarray([float(r[2]) for r in rows],dtype=float),
-        "low":np.asarray([float(r[3]) for r in rows],dtype=float),
-        "volume":np.asarray([float(r[4] or 0) for r in rows],dtype=float),
+        "ts":times_all,
+        "close":np.asarray([float(r[1]) for r in raw_rows],dtype=np.float32),
+        "high":np.asarray([float(r[2]) for r in raw_rows],dtype=np.float32),
+        "low":np.asarray([float(r[3]) for r in raw_rows],dtype=np.float32),
+        "volume":np.asarray([float(r[4] or 0) for r in raw_rows],dtype=np.float32),
     }
-    max_points=AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL
-    step=max(1,usable//max_points)
-    candidate=list(range(DL_SEQUENCE_LEN-1,usable,step))
-    if candidate and candidate[-1] != usable-1:candidate.append(usable-1)
+    del raw_rows
+    usable=len(times_all)-AI_HIST_HORIZON_BARS
+    step=max(1,usable//max(1,AI_HIST_TRAIN_MAX_POINTS_PER_SYMBOL))
+    candidate=np.arange(DL_SEQUENCE_LEN-1,usable,step,dtype=np.int32)
+    if len(candidate) and candidate[-1]!=usable-1:
+        candidate=np.append(candidate,np.int32(usable-1))
+    if not len(candidate):return empty_x,np.empty(0,dtype=np.float32),[]
 
-    feature_rows={i:_hist_feature_row(rows,i,arrays) for i in candidate}
-    seqs=[]; labels=[]; times=[]
-    total_candidates=max(1,len(candidate))
-    last_telemetry=time.monotonic()
-    for cand_i,i in enumerate(candidate):
-        if i-DL_SEQUENCE_LEN+1<0 or i+AI_HIST_HORIZON_BARS>=len(rows):continue
-        fseq=[]; ok=True
-        for j in range(i-DL_SEQUENCE_LEN+1,i+1):
-            # j is usually not in candidate; build it only once and cache it.
-            if j not in feature_rows:feature_rows[j]=_hist_feature_row(rows,j,arrays)
-            f=feature_rows[j]
-            if not f:ok=False;break
-            fseq.append([_norm_feature(n,f.get(n,0)) for n in SEQUENCE_FEATURE_NAMES])
-        if not ok:continue
+    # Mark only rows that belong to at least one selected lookback window. For
+    # dense archives these windows overlap heavily; each feature row is still
+    # computed once and stored as 15 float32 values rather than a Python dict.
+    starts=candidate-(DL_SEQUENCE_LEN-1)
+    diff=np.zeros(usable+1,dtype=np.int32)
+    np.add.at(diff,starts,1);np.add.at(diff,candidate+1,-1)
+    required=np.flatnonzero(np.cumsum(diff[:-1])>0)
+    feature_matrix=np.zeros((usable,len(SEQUENCE_FEATURE_NAMES)),dtype=np.float32)
+    valid=np.zeros(usable,dtype=bool)
+    last_telemetry=0.0
+    total_required=max(1,len(required));symbol_count=max(1,int(symbol_count))
+    try: started_dt=datetime.fromisoformat(started_at) if started_at else None
+    except Exception: started_dt=None
+    for req_i,row_i in enumerate(required):
+        f=_hist_feature_row(times_all,int(row_i),arrays)
+        if f:
+            feature_matrix[row_i]=[_norm_feature(n,f.get(n,0)) for n in SEQUENCE_FEATURE_NAMES]
+            valid[row_i]=True
         now_mono=time.monotonic()
-        if now_mono-last_telemetry>=0.5 or cand_i==total_candidates-1:
-            try:
-                c=ai_db()
-                sym_i=int(globals().get('_HIST_BUILD_SYMBOL_INDEX',0) or 0)
-                sym_n=max(1,int(globals().get('_HIST_BUILD_SYMBOL_COUNT',len(AI_HIST_SYMBOLS)) or 1))
-                p=5.0+25.0*((sym_i+(cand_i+1)/total_candidates)/sym_n)
-                elapsed=(datetime.now(IST)-datetime.fromisoformat(str(globals().get('_HIST_BUILD_STARTED_AT',datetime.now(IST).isoformat())))).total_seconds()
-                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",(str(round(p,1)),))
-                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",(f"BUILDING SEQUENCES · {AI_HIST_SYMBOLS[sym_i] if sym_i < len(AI_HIST_SYMBOLS) else symbol} · {cand_i+1:,}/{total_candidates:,}",))
-                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_elapsed_sec',?)",(str(round(elapsed,1)),))
-                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_samples',?)",(str(len(seqs)),))
-                c.commit(); c.close(); last_telemetry=now_mono
-            except Exception: pass
-        cur=float(rows[i][1]); future=float(rows[i+AI_HIST_HORIZON_BARS][1])
-        if cur<=0 or not np.isfinite(cur) or not np.isfinite(future):continue
-        seqs.append(np.asarray(fseq,dtype=float)); labels.append(1 if future>cur else 0); times.append(str(rows[i][0]))
-    return seqs,labels,times
+        if now_mono-last_telemetry>=AI_HIST_TRAIN_HEARTBEAT_SECONDS or req_i==total_required-1:
+            frac=(req_i+1)/total_required
+            progress=5.0+25.0*((symbol_index+0.85*frac)/symbol_count)
+            elapsed=(datetime.now(IST)-started_dt).total_seconds() if started_dt else 0.0
+            _hist_training_update(
+                progress=round(progress,1),
+                phase=f"COMPUTING FEATURES · {symbol} · {req_i+1:,}/{total_required:,}",
+                elapsed_sec=round(elapsed,1),samples=sample_base)
+            last_telemetry=now_mono
+
+    invalid_prefix=np.concatenate(([0],np.cumsum(~valid,dtype=np.int32)))
+    window_ok=(invalid_prefix[candidate+1]-invalid_prefix[starts])==0
+    current=arrays["close"][candidate]
+    future=arrays["close"][candidate+AI_HIST_HORIZON_BARS]
+    label_ok=np.isfinite(current)&np.isfinite(future)&(current>0)
+    candidate=candidate[window_ok&label_ok]
+    if not len(candidate):return empty_x,np.empty(0,dtype=np.float32),[]
+    starts=candidate-(DL_SEQUENCE_LEN-1)
+    window_offsets=np.arange(DL_SEQUENCE_LEN,dtype=np.int32)
+    seqs=feature_matrix[starts[:,None]+window_offsets[None,:]]
+    labels=(arrays["close"][candidate+AI_HIST_HORIZON_BARS]>arrays["close"][candidate]).astype(np.float32)
+    sample_times=[times_all[int(i)] for i in candidate]
+    elapsed=(datetime.now(IST)-started_dt).total_seconds() if started_dt else 0.0
+    _hist_training_update(
+        progress=round(5.0+25.0*((symbol_index+1)/symbol_count),1),
+        phase=f"SEQUENCES READY · {symbol} · {len(seqs):,}",
+        elapsed_sec=round(elapsed,1),samples=sample_base+len(seqs))
+    return np.asarray(seqs,dtype=np.float32),labels,sample_times
 
 def _hist_set_status(status, detail=""):
     """Set collector status only.  Model/training status is kept separately so a
@@ -8956,44 +9095,50 @@ def ai_hist_train_deep(force=False):
         return ai_hist_status()
     try:
         started=datetime.now(IST).isoformat()
+        run_id=f"{os.getpid()}-{threading.get_ident()}-{int(time.time()*1000)}"
         c=ai_db()
-        for k,v in (("hist_training_started_at",started),("hist_training_requested","0"),("hist_training_error",""),("hist_training_active","1"),("hist_training_progress","1"),("hist_training_phase","INITIALIZING"),("hist_training_epoch","0"),("hist_training_epochs",str(AI_HIST_TRAIN_EPOCHS)),("hist_training_elapsed_sec","0"),("hist_training_samples","0")):
+        for k,v in (("hist_training_started_at",started),("hist_training_heartbeat_at",started),("hist_training_run_id",run_id),("hist_training_requested","0"),("hist_training_error",""),("hist_training_active","1"),("hist_training_progress","1"),("hist_training_phase","INITIALIZING"),("hist_training_epoch","0"),("hist_training_epochs",str(AI_HIST_TRAIN_EPOCHS)),("hist_training_elapsed_sec","0"),("hist_training_samples","0")):
             c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES(?,?)",(k,v))
         c.commit();c.close()
+        _hist_invalidate_status_cache()
         _hist_set_model_status("BUILDING SEQUENCES","Preparing chronological GRU sequences from historical archive")
-        allx=[];ally=[];all_times=[];per_symbol={}
+        x_chunks=[];y_chunks=[];time_chunks=[];per_symbol={};sample_base=0
         total_symbols=max(1,len(AI_HIST_SYMBOLS))
         for sym_i,sym in enumerate(AI_HIST_SYMBOLS):
-            globals()['_HIST_BUILD_SYMBOL_INDEX']=sym_i
-            globals()['_HIST_BUILD_SYMBOL_COUNT']=total_symbols
-            globals()['_HIST_BUILD_STARTED_AT']=started
             try:
-                x,y,t=_hist_training_sequences(sym);per_symbol[sym]=len(x);allx.extend(x);ally.extend(y);all_times.extend(t);ai_log("LEARNING","HIST_SEQUENCE_BUILD",f"{sym}: GRU sequences={len(x)}")
+                x,y,t=_hist_training_sequences(sym,sym_i,total_symbols,started,sample_base)
+                per_symbol[sym]=len(x)
+                if len(x):
+                    x_chunks.append(x);y_chunks.append(y);time_chunks.append(np.asarray(t,dtype="U40"))
+                    sample_base+=len(x)
+                ai_log("LEARNING","HIST_SEQUENCE_BUILD",f"{sym}: GRU sequences={len(x)}")
             except Exception as e:
                 per_symbol[sym]=0;ai_log("ERROR","HIST_SEQUENCE_BUILD",f"{sym}: {e}")
-            c=ai_db(); p=5.0+25.0*(sym_i+1)/total_symbols
             elapsed=(datetime.now(IST)-datetime.fromisoformat(started)).total_seconds()
-            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",(str(round(p,1)),))
-            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",(f"BUILDING SEQUENCES · {sym_i+1}/{total_symbols}",))
-            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_elapsed_sec',?)",(str(round(elapsed,1)),)); c.commit(); c.close()
-        if allx and len(allx)==len(ally)==len(all_times):
-            order=sorted(range(len(allx)),key=lambda i:all_times[i]);allx=[allx[i] for i in order];ally=[ally[i] for i in order]
-        if len(allx)<AI_HIST_MIN_TRAIN:
-            detail=f"sequences={len(allx)} need={AI_HIST_MIN_TRAIN} per_symbol={per_symbol}";_hist_set_model_status("READY — NEED MORE TRAINING SAMPLES",detail);return ai_hist_status()
-        if len(set(ally))<2:
-            detail=f"only one target class in historical labels; samples={len(ally)}";_hist_set_model_status("READY — TARGET CLASS INSUFFICIENT",detail);return ai_hist_status()
-        X=np.asarray(allx,dtype=float);Y=np.asarray(ally,dtype=float)
-        if len(X)>AI_HIST_TRAIN_MAX_SAMPLES:
-            # STAGE 1 FIX: previously `X[-AI_HIST_TRAIN_MAX_SAMPLES:]` kept only the
-            # most recent slice after chronological sort, silently discarding most
-            # of the 12-year archive on every retrain. A uniform stride preserves
-            # full-span coverage (early, middle, and recent years all represented)
-            # while still respecting the same memory-bounded sample budget.
-            keep_idx=np.linspace(0,len(X)-1,AI_HIST_TRAIN_MAX_SAMPLES).round().astype(int)
-            keep_idx=np.unique(keep_idx)
-            X=X[keep_idx];Y=Y[keep_idx]
+            _hist_training_update(progress=round(5.0+25.0*(sym_i+1)/total_symbols,1),phase=f"SEQUENCES READY · {sym_i+1}/{total_symbols}",elapsed_sec=round(elapsed,1),samples=sample_base)
+        if sample_base<AI_HIST_MIN_TRAIN:
+            detail=f"sequences={sample_base} need={AI_HIST_MIN_TRAIN} per_symbol={per_symbol}";_hist_set_model_status("READY — NEED MORE TRAINING SAMPLES",detail);return ai_hist_status()
+        _hist_training_update(progress=32.0,phase="MERGING CHRONOLOGICAL SEQUENCES",elapsed_sec=round((datetime.now(IST)-datetime.fromisoformat(started)).total_seconds(),1),samples=sample_base)
+        X_all=np.concatenate(x_chunks,axis=0).astype(np.float32,copy=False)
+        Y_all=np.concatenate(y_chunks,axis=0).astype(np.float32,copy=False)
+        T_all=np.concatenate(time_chunks,axis=0)
+        x_chunks.clear();y_chunks.clear();time_chunks.clear()
+        try:del x,y,t
+        except Exception:pass
+        if len(np.unique(Y_all.astype(np.int8)))<2:
+            detail=f"only one target class in historical labels; samples={len(Y_all)}";_hist_set_model_status("READY — TARGET CLASS INSUFFICIENT",detail);return ai_hist_status()
+        order=np.argsort(T_all,kind="mergesort")
+        if len(order)>AI_HIST_TRAIN_MAX_SAMPLES:
+            positions=np.linspace(0,len(order)-1,AI_HIST_TRAIN_MAX_SAMPLES).round().astype(np.int64)
+            positions=np.unique(positions)
+            keep_idx=order[positions]
+        else:
+            keep_idx=order
+        X=X_all[keep_idx];Y=Y_all[keep_idx]
+        del X_all,Y_all,T_all,order,keep_idx
+        _hist_training_update(progress=35.0,phase=f"TRAINING TENSORS READY · {len(X):,} samples",elapsed_sec=round((datetime.now(IST)-datetime.fromisoformat(started)).total_seconds(),1),samples=len(X))
         _hist_set_model_status("TRAINING GRU SEQUENCE MODEL",f"GRU hidden={DL_GRU_HIDDEN} sequence_len={DL_SEQUENCE_LEN} samples={len(X)} epochs={AI_HIST_TRAIN_EPOCHS}")
-        trained=_ai_dl_train_arrays(X,Y,"HISTORICAL_PRETRAINED",seed=20260825,epochs_override=AI_HIST_TRAIN_EPOCHS)
+        trained=_ai_dl_train_arrays(X,Y,"HISTORICAL_PRETRAINED",seed=20260825,epochs_override=AI_HIST_TRAIN_EPOCHS,training_started_at=started)
         if not trained:
             detail="GRU training returned no two-class model";_hist_set_model_status("TRAINING ERROR — RETRYING",detail);c=ai_db();c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_error',?)",(detail,));c.commit();c.close();return ai_hist_status()
         params,acc,auc,samples,train_samples,val_samples=trained
@@ -9010,8 +9155,11 @@ def ai_hist_train_deep(force=False):
             c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_active',?)",("0",))
             if "TRAINING ERROR" in status:
                 c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",("ERROR",))
+            elif "NEED MORE" in status or "INSUFFICIENT" in status:
+                c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",("NOT ENOUGH TRAINING DATA",))
             else:
                 c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_progress',?)",("100",)); c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_phase',?)",("COMPLETE",))
+            c.execute("INSERT OR REPLACE INTO ai_runtime(key,value) VALUES('hist_training_heartbeat_at',?)",(datetime.now(IST).isoformat(),))
             c.commit(); c.close()
         except Exception: pass
         try:AI_HIST_TRAIN_LOCK.release()
@@ -9276,13 +9424,17 @@ def ai_learning_progress_api():
     total=int(hs.get('candles',0) or 0); model=hs.get('model') or {}
     hist_samples=int(model.get('samples',0) or 0); train_samples=int(model.get('train_samples',0) or 0); val_samples=int(model.get('validation_samples',0) or 0)
     ml_samples=int(ml.get('samples',0) or 0); dl_samples=int(dl.get('samples',0) or 0)
-    hist_ready=total>0 and (bool(model) or str(hs.get('status','')).upper().startswith('HISTORY COLLECTION COMPLETE'))
+    training_active=str(hs.get('training_active','0'))=='1'
+    training_progress=max(0.0,min(100.0,float(hs.get('training_progress',0) or 0)))
+    training_status=hs.get('training_phase') or hs.get('model_status') or 'TRAINING'
+    shown_hist_samples=int(hs.get('training_samples',0) or 0) if training_active else hist_samples
+    hist_ready=bool(model) and hist_samples>0
     ml_need=max(1,int(ai_params().get('ml_min_samples',40))); dl_need=max(1,int(ai_params().get('dl_min_samples',80)))
     live_progress=min(100.0,max(ml_samples/ml_need*100.0,dl_samples/dl_need*100.0))
     return jsonify({
-        'historical': {'progress':100 if hist_ready else (100 if total else 0),'status':hs.get('status','WAITING FOR KITE'),'candles':total,'oldest':hs.get('oldest'),'newest':hs.get('newest')},
+        'historical': {'progress':training_progress if training_active else (100 if hist_ready else 0),'status':training_status if training_active else hs.get('model_status',hs.get('status','WAITING FOR KITE')),'candles':total,'oldest':hs.get('oldest'),'newest':hs.get('newest'),'training_active':training_active},
         'ml': {'progress':min(100.0,ml_samples/ml_need*100.0),'status':ml.get('status','WAITING FOR PAPER OUTCOMES') if ml_samples else 'WAITING FOR PAPER OUTCOMES','samples':ml_samples,'accuracy':ml.get('accuracy'),'auc':ml.get('auc')},
-        'dl': {'progress':100 if hist_samples else min(100.0,dl_samples/dl_need*100.0),'status':model.get('status') or dl.get('status') or 'NOT TRAINED','samples':hist_samples or dl_samples,'train_samples':train_samples,'validation_samples':val_samples,'accuracy':model.get('accuracy',dl.get('accuracy')),'auc':model.get('auc',dl.get('auc'))},
+        'dl': {'progress':training_progress if training_active else (100 if hist_samples else min(100.0,dl_samples/dl_need*100.0)),'status':training_status if training_active else (model.get('status') or dl.get('status') or 'NOT TRAINED'),'samples':shown_hist_samples or dl_samples,'train_samples':train_samples,'validation_samples':val_samples,'accuracy':model.get('accuracy',dl.get('accuracy')),'auc':model.get('auc',dl.get('auc'))},
         'validation': {'progress':100 if val_samples else 0,'status':f'{val_samples:,} chronological validation samples' if val_samples else 'WAITING'},
         'live': {'ml_samples':ml_samples,'dl_samples':dl_samples,'progress':live_progress}
     })
@@ -9330,17 +9482,35 @@ def ai_events_api():
     c=ai_db();r=[dict(x) for x in c.execute('SELECT * FROM ai_events ORDER BY id DESC LIMIT 150')];c.close();return jsonify(r)
 @app.route('/api/ai-evolution/historical/retrain', methods=['POST'])
 def ai_historical_retrain_api():
-    if ai_hist_training_active() or not AI_HIST_TRAIN_LOCK.acquire(blocking=False):
-        try: AI_HIST_TRAIN_LOCK.release()
-        except Exception: pass
-        return jsonify({"ok":True,"started":False,"status":"ALREADY_RUNNING","historical":ai_hist_status()}),200
-    AI_HIST_TRAIN_LOCK.release()
-    hs=ai_hist_status(); total=int(hs.get("candles") or 0)
-    if total < AI_HIST_MIN_TRAIN:
-        return jsonify({"ok":False,"status":"NOT_ENOUGH_HISTORY","candles":total,"required":int(AI_HIST_MIN_TRAIN),"message":f"Need at least {int(AI_HIST_MIN_TRAIN):,} historical candles."}),400
-    def _job():
-        ai_hist_train_deep(force=True)
-    threading.Thread(target=_job,daemon=True,name="manual-historical-gru-retrain").start()
+    global _AI_HIST_TRAIN_THREAD
+    with AI_HIST_TRAIN_START_LOCK:
+        thread_alive=bool(_AI_HIST_TRAIN_THREAD and _AI_HIST_TRAIN_THREAD.is_alive())
+        if ai_hist_training_active() or AI_HIST_TRAIN_LOCK.locked() or thread_alive:
+            return jsonify({"ok":True,"started":False,"status":"ALREADY_RUNNING","historical":ai_hist_status()}),200
+        hs=ai_hist_status(); total=int(hs.get("candles") or 0)
+        if total < AI_HIST_MIN_TRAIN:
+            return jsonify({"ok":False,"status":"NOT_ENOUGH_HISTORY","candles":total,"required":int(AI_HIST_MIN_TRAIN),"message":f"Need at least {int(AI_HIST_MIN_TRAIN):,} historical candles."}),400
+        # Reserve the persistent state before starting the thread so two near-
+        # simultaneous HTTP requests cannot both pass the pre-flight check.
+        queued_at=datetime.now(IST).isoformat()
+        _hist_training_update(active=1,requested=0,progress=0.5,phase="QUEUED",error="",started_at=queued_at)
+        def _job():
+            try:
+                ai_hist_train_deep(force=True)
+            finally:
+                global _AI_HIST_TRAIN_THREAD
+                with AI_HIST_TRAIN_START_LOCK:
+                    if _AI_HIST_TRAIN_THREAD is threading.current_thread():
+                        _AI_HIST_TRAIN_THREAD=None
+        worker=threading.Thread(target=_job,daemon=True,name="manual-historical-gru-retrain")
+        _AI_HIST_TRAIN_THREAD=worker
+        try:
+            worker.start()
+        except Exception as e:
+            _AI_HIST_TRAIN_THREAD=None
+            _hist_training_update(active=0,phase="START FAILED",error=f"{type(e).__name__}: {e}")
+            return jsonify({"ok":False,"started":False,"status":"START_FAILED","message":str(e)}),500
+    _hist_invalidate_status_cache()
     return jsonify({"ok":True,"started":True,"status":"TRAINING_STARTED","historical":ai_hist_status()}),202
 
 @app.route('/api/ai-evolution/historical')
@@ -9563,9 +9733,13 @@ def autotrade_ai_live_allowed():
 
 def _autotrade_ai_size(setup, capital_per_trade):
     entry = float(setup["entry"]); lot = int(setup["lot_size"])
-    if entry <= 0 or lot <= 0:
+    capital=float(capital_per_trade or 0)
+    if entry <= 0 or lot <= 0 or capital <= 0:
         return 0
-    lots = max(1, int(capital_per_trade // (entry * lot)))
+    # Never silently force one lot when the configured capital cannot fund it.
+    # The caller already handles a zero quantity as SIZE_REJECTED.
+    lots=int(capital//(entry*lot))
+    if lots<1:return 0
     return lots * lot
 
 
@@ -10121,48 +10295,199 @@ def breakout_squeeze_diagnostics(symbol):
     }
 
 
-def build_move_candidate_from_chain(spot, chain, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT):
-    calls = sorted([o for o in chain if o["instrument_type"] == "CE"], key=lambda x: x["strike"])
-    puts = sorted([o for o in chain if o["instrument_type"] == "PE"], key=lambda x: x["strike"])
+def classify_long_vol_value(iv_hv):
+    """Translate the selling-oriented IV/HV labels into a buyer-oriented read."""
+    if not iv_hv or iv_hv.get("ratio") is None:return {"label":"UNKNOWN","score":50}
+    ratio=float(iv_hv["ratio"])
+    if ratio<=0.90:return {"label":"CHEAP","score":90}
+    if ratio<=1.05:return {"label":"FAIR","score":72}
+    if ratio<=1.20:return {"label":"RICH","score":42}
+    return {"label":"VERY RICH","score":15}
+
+
+def _move_positive(value):
+    try:return float(value) if value is not None and float(value)>0 else None
+    except Exception:return None
+
+
+def _move_leg_buy_price(option):
+    """Conservative entry mark: a long option is bought at the executable ask."""
+    ask=_move_positive(option.get("ask"));mid=_move_positive(option.get("mid"));ltp=_move_positive(option.get("ltp"))
+    if ask is not None:return ask,"ASK"
+    if mid is not None:return mid,"MID_FALLBACK"
+    return ltp,"LTP_FALLBACK"
+
+
+def _move_event_score(event, iv_hv):
+    """A catalyst helps only when it has not already made option premium rich."""
+    if not event:return 30.0
+    ratio=float((iv_hv or {}).get("ratio") or 1.0)
+    if ratio<=1.05:return 75.0
+    if ratio<=1.20:return 40.0
+    return 10.0
+
+
+def build_move_candidate_from_chain(spot,chain,mode="straddle",otm_pct=DEFAULT_MOVE_OTM_PCT,
+                                    selection_mode="smart_delta",target_delta=DEFAULT_MOVE_TARGET_DELTA):
+    calls=sorted([o for o in chain if o["instrument_type"]=="CE" and _move_positive(o.get("mid") or o.get("ltp"))],key=lambda x:x["strike"])
+    puts=sorted([o for o in chain if o["instrument_type"]=="PE" and _move_positive(o.get("mid") or o.get("ltp"))],key=lambda x:x["strike"])
     if not calls or not puts:
         return None
 
     def closest(options, target):
         return min(options, key=lambda o: abs(o["strike"] - target))
 
-    if mode == "strangle":
-        call_leg = closest(calls, spot * (1 + otm_pct))
-        put_leg = closest(puts, spot * (1 - otm_pct))
+    selection_used="ATM"
+    if mode=="strangle" and selection_mode=="smart_delta":
+        target=max(0.18,min(0.40,float(target_delta or DEFAULT_MOVE_TARGET_DELTA)))
+        call_pool=[o for o in calls if o["strike"]>=spot and o.get("delta") is not None and 0.12<=abs(float(o["delta"]))<=0.45]
+        put_pool=[o for o in puts if o["strike"]<=spot and o.get("delta") is not None and 0.12<=abs(float(o["delta"]))<=0.45]
+        pairs=[]
+        for c in call_pool:
+            for p in put_pool:
+                cd,pd=abs(float(c["delta"])),abs(float(p["delta"]))
+                delta_error=abs(cd-target)+abs(pd-target)+1.5*abs(cd-pd)
+                width_error=abs((c["strike"]-spot)-(spot-p["strike"]))/max(spot,1)
+                spreads=[float(x) for x in (c.get("spread_pct"),p.get("spread_pct")) if x is not None]
+                spread_penalty=(sum(spreads)/len(spreads)/100.0) if spreads else 0.20
+                oi=min(int(c.get("oi") or 0),int(p.get("oi") or 0))
+                oi_penalty=0.0 if oi>=MOVE_MIN_LEG_OI else 0.20
+                pairs.append((delta_error+2*width_error+spread_penalty+oi_penalty,c,p))
+        if pairs:
+            _,call_leg,put_leg=min(pairs,key=lambda x:x[0]);selection_used=f"SMART_DELTA_{target:.2f}"
+        else:
+            call_leg=closest(calls,spot*(1+otm_pct));put_leg=closest(puts,spot*(1-otm_pct));selection_used="FIXED_OTM_FALLBACK"
+    elif mode=="strangle":
+        call_leg=closest(calls,spot*(1+otm_pct));put_leg=closest(puts,spot*(1-otm_pct));selection_used="FIXED_OTM"
     else:  # "straddle" (default) — both legs at the SAME at-the-money strike
         atm_call = closest(calls, spot)
         put_leg = closest(puts, atm_call["strike"])
         call_leg = closest(calls, put_leg["strike"])  # re-snap in case call/put strike grids differ
-    return {"call": call_leg, "put": put_leg}
+    return {"call":call_leg,"put":put_leg,"selection_used":selection_used}
 
 
-def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, expiry_str=None, lots=1):
+def _assess_move_entry(result,max_risk_rupees=None,fo_banned=False):
+    """Hard execution gates plus softer WAIT warnings for long-vol entries."""
+    blockers=[];warnings=[];positives=[]
+    dte=int(result.get("days_to_expiry") or 0)
+    if dte<MOVE_MIN_DTE or dte>MOVE_MAX_DTE:
+        blockers.append(f"Expiry has {dte} DTE; allowed risk window is {MOVE_MIN_DTE}–{MOVE_MAX_DTE} days.")
+    elif not MOVE_PREFERRED_DTE_LOW<=dte<=MOVE_PREFERRED_DTE_HIGH:
+        warnings.append(f"{dte} DTE is outside the preferred {MOVE_PREFERRED_DTE_LOW}–{MOVE_PREFERRED_DTE_HIGH}-day theta/convexity window.")
+    if fo_banned:blockers.append("Symbol is in the current F&O ban period; do not initiate a new position.")
+
+    legs=result.get("legs") or {}
+    for name,label in (("buy_call","Call"),("buy_put","Put")):
+        leg=legs.get(name) or {}
+        if _move_positive(leg.get("bid")) is None or _move_positive(leg.get("ask")) is None:
+            blockers.append(f"{label} has no two-sided executable quote.")
+        spread=leg.get("spread_pct")
+        if spread is None or float(spread)>MOVE_MAX_LEG_SPREAD_PCT:
+            blockers.append(f"{label} spread is {spread if spread is not None else 'unavailable'}%; maximum is {MOVE_MAX_LEG_SPREAD_PCT:.1f}%.")
+        elif float(spread)>2.5:
+            warnings.append(f"{label} spread is {float(spread):.1f}%; execution cost is meaningful.")
+        oi=int(leg.get("oi") or 0)
+        if oi<MOVE_MIN_LEG_OI:blockers.append(f"{label} OI is {oi:,}; minimum is {MOVE_MIN_LEG_OI:,}.")
+        if int(leg.get("volume") or 0)<=0:warnings.append(f"{label} has no reported volume today; use a marketable limit and verify the fill.")
+
+    score=float(result.get("move_score") or 0)
+    if score<50:blockers.append(f"Move score is only {score:.1f}/100.")
+    elif score<MOVE_MIN_READY_SCORE:warnings.append(f"Move score {score:.1f} is below the {MOVE_MIN_READY_SCORE:.0f} trade-ready threshold.")
+    else:positives.append(f"Move score {score:.1f} clears the setup threshold.")
+
+    ratio=(result.get("iv_hv") or {}).get("ratio")
+    if ratio is not None and float(ratio)>MOVE_MAX_IV_HV_RATIO:
+        blockers.append(f"IV/HV is {float(ratio):.2f}; option premium is too rich for a long-vol entry.")
+    elif ratio is not None and float(ratio)>1.10:
+        warnings.append(f"IV/HV is {float(ratio):.2f}; much of the move may already be priced in.")
+    elif ratio is not None:positives.append(f"IV/HV {float(ratio):.2f} is acceptable for a premium buyer.")
+
+    be_ratio=result.get("breakeven_expected_move_ratio")
+    if be_ratio is None:
+        warnings.append("Expected-move economics are unavailable.")
+    elif float(be_ratio)>MOVE_MAX_BREAKEVEN_EM_RATIO:
+        blockers.append(f"Average breakeven needs {float(be_ratio):.2f}× the priced expected move; payoff hurdle is too high.")
+    elif float(be_ratio)>1.05:
+        warnings.append(f"Breakeven needs {float(be_ratio):.2f}× the expected move; a larger-than-normal move is required.")
+    else:positives.append(f"Breakeven hurdle is {float(be_ratio):.2f}× expected move.")
+
+    slippage_pct=float(result.get("entry_slippage_pct") or 0)
+    if slippage_pct>MOVE_MAX_ENTRY_SLIPPAGE_PCT:
+        blockers.append(f"Ask-vs-mid entry slippage is {slippage_pct:.2f}% of debit; maximum is {MOVE_MAX_ENTRY_SLIPPAGE_PCT:.1f}%.")
+    squeeze=result.get("squeeze") or {}
+    compression=bool(squeeze.get("is_squeeze") or squeeze.get("is_nr7"))
+    if compression:positives.append("A current squeeze/NR7 compression signal is present.")
+    else:warnings.append("No current squeeze or NR7 confirmation; wait for a cleaner compression trigger.")
+
+    requested_lots=int(result.get("lots") or 1);recommended_lots=result.get("recommended_lots")
+    if max_risk_rupees is not None:
+        if not recommended_lots:
+            blockers.append(f"Risk budget ₹{float(max_risk_rupees):,.0f} cannot fund even one lot at the executable ask.")
+        elif requested_lots>int(recommended_lots):
+            blockers.append(f"Requested {requested_lots} lot(s) exceed the risk-budget limit of {int(recommended_lots)}.")
+
+    event=result.get("event_before_expiry")
+    if event and ratio is not None and float(ratio)>1.05:
+        warnings.append(f"{event.get('label')} is ahead but IV is already rich; post-event IV crush can offset a correct move.")
+
+    hhmm=now_ist().strftime("%H:%M")
+    if ai_market_open() and (hhmm<"09:30" or hhmm>"14:45"):
+        warnings.append("Entry is outside the preferred 09:30–14:45 liquidity window; spreads and overnight theta risk are less favourable.")
+
+    trade_ready=not blockers and score>=MOVE_MIN_READY_SCORE and compression and (be_ratio is None or float(be_ratio)<=1.15)
+    decision="ENTER" if trade_ready else ("AVOID" if blockers else "WAIT")
+    return {"decision":decision,"trade_ready":trade_ready,"blockers":blockers,"warnings":warnings,
+            "positive_checks":positives,"checked_at":datetime.now(IST).isoformat(),
+            "rules":{"min_score":MOVE_MIN_READY_SCORE,"dte":[MOVE_MIN_DTE,MOVE_MAX_DTE],
+                     "preferred_dte":[MOVE_PREFERRED_DTE_LOW,MOVE_PREFERRED_DTE_HIGH],
+                     "max_leg_spread_pct":MOVE_MAX_LEG_SPREAD_PCT,"max_iv_hv":MOVE_MAX_IV_HV_RATIO,
+                     "max_breakeven_em_ratio":MOVE_MAX_BREAKEVEN_EM_RATIO}}
+
+
+def build_move_strategy(symbol,mode="straddle",otm_pct=DEFAULT_MOVE_OTM_PCT,expiry_str=None,lots=1,
+                        selection_mode="smart_delta",target_delta=DEFAULT_MOVE_TARGET_DELTA,
+                        max_risk_rupees=DEFAULT_MOVE_MAX_RISK_RUPEES):
     symbol = symbol.upper()
+    mode = mode if mode in ("straddle", "strangle") else "straddle"
+    selection_mode = selection_mode if selection_mode in ("smart_delta", "fixed_otm") else "smart_delta"
+    lots = max(1, min(50, int(lots or 1)))
+    otm_pct = max(0.005, min(0.10, float(otm_pct or DEFAULT_MOVE_OTM_PCT)))
+    target_delta = max(0.18, min(0.40, float(target_delta or DEFAULT_MOVE_TARGET_DELTA)))
+    max_risk_rupees = max(0.0, float(max_risk_rupees or 0))
     today = now_ist().date()
     data, err = get_chain_for_symbol(symbol, expiry_str)
     if err:
         return err
     spot, expiry, lot_size, chain = data["spot"], data["expiry"], data["lot_size"], data["chain"]
-    quantity = lot_size * max(1, int(lots))
+    quantity = lot_size * lots
     days_to_expiry = (expiry - today).days
 
-    cand = build_move_candidate_from_chain(spot, chain, mode, otm_pct)
+    cand = build_move_candidate_from_chain(spot, chain, mode, otm_pct, selection_mode, target_delta)
     if not cand:
         return {"error": f"Could not find a usable call/put pair for {symbol}"}
     call_leg, put_leg = cand["call"], cand["put"]
 
     def leg(o):
+        entry_price, pricing_source = _move_leg_buy_price(o)
         return {"strike": o["strike"], "ltp": o["ltp"], "mid": o.get("mid", o["ltp"]),
                 "bid": o.get("bid"), "ask": o.get("ask"), "delta": o["delta"], "iv": o.get("iv"),
                 "oi": o.get("oi"), "volume": o.get("volume"), "spread_pct": o.get("spread_pct"),
+                "entry_price": entry_price, "pricing_source": pricing_source,
                 "tradingsymbol": o["tradingsymbol"]}
 
     call_l, put_l = leg(call_leg), leg(put_leg)
-    net_debit_per_share = call_l["mid"] + put_l["mid"]
+    if call_l["entry_price"] is None or put_l["entry_price"] is None:
+        return {"error": "Could not obtain a usable entry price for both option legs"}
+    mid_debit_per_share = sum(float(x.get("mid") or x["entry_price"]) for x in (call_l, put_l))
+    # A long-vol payoff must be judged from the price actually needed to enter, not an optimistic
+    # midpoint that may never fill. For a BUY that is the best ask (with a clearly-labelled fallback).
+    net_debit_per_share = float(call_l["entry_price"]) + float(put_l["entry_price"])
+    liquidation_bid_per_share = (float(call_l["bid"]) + float(put_l["bid"])
+                                 if _move_positive(call_l.get("bid")) and _move_positive(put_l.get("bid"))
+                                 else None)
+    entry_slippage_per_share = max(0.0, net_debit_per_share - mid_debit_per_share)
+    entry_slippage_pct = (entry_slippage_per_share / net_debit_per_share * 100
+                          if net_debit_per_share else None)
     breakeven_upper = round(call_l["strike"] + net_debit_per_share, 2)
     breakeven_lower = round(put_l["strike"] - net_debit_per_share, 2)
     strategy_type = "long_strangle" if mode == "strangle" else "long_straddle"
@@ -10171,8 +10496,17 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
         "symbol": symbol, "spot": spot, "expiry": str(expiry), "days_to_expiry": days_to_expiry,
         "lot_size": lot_size, "lots": lots, "quantity": quantity, "mode": mode,
         "strategy_type": strategy_type, "otm_pct_used": otm_pct if mode == "strangle" else None,
+        "selection_mode": selection_mode, "selection_used": cand.get("selection_used"),
+        "target_delta": target_delta if mode == "strangle" and selection_mode == "smart_delta" else None,
         "legs": {"buy_call": call_l, "buy_put": put_l},
         "net_debit_per_share": round(net_debit_per_share, 2),
+        "executable_debit_per_share": round(net_debit_per_share, 2),
+        "mid_debit_per_share": round(mid_debit_per_share, 2),
+        "entry_slippage_per_share": round(entry_slippage_per_share, 2),
+        "entry_slippage_pct": round(entry_slippage_pct, 2) if entry_slippage_pct is not None else None,
+        "liquidation_bid_per_share": round(liquidation_bid_per_share, 2) if liquidation_bid_per_share is not None else None,
+        "round_trip_spread_per_share": (round(net_debit_per_share - liquidation_bid_per_share, 2)
+                                         if liquidation_bid_per_share is not None else None),
         "max_loss": round(net_debit_per_share * quantity, 2), "max_profit": None,
         "breakeven_upper": breakeven_upper, "breakeven_lower": breakeven_lower,
         "move_required_up_pct": round((breakeven_upper - spot) / spot * 100, 2) if spot else None,
@@ -10201,8 +10535,8 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
     legs_for_margin = [{"tradingsymbol": call_l["tradingsymbol"], "transaction_type": "BUY"},
                         {"tradingsymbol": put_l["tradingsymbol"], "transaction_type": "BUY"}]
     result["margin_required"], result["margin_error"] = compute_margin(legs_for_margin, quantity)
-    entry_orders = [{"price": call_l["mid"], "quantity": quantity, "transaction_type": "BUY"},
-                     {"price": put_l["mid"], "quantity": quantity, "transaction_type": "BUY"}]
+    entry_orders = [{"price": call_l["entry_price"], "quantity": quantity, "transaction_type": "BUY"},
+                     {"price": put_l["entry_price"], "quantity": quantity, "transaction_type": "BUY"}]
     result["estimated_entry_charges"] = estimate_charges(entry_orders)
     result["entry_event_warning"] = get_entry_warning()
     result["event_before_expiry"] = get_event_before_expiry(result["expiry"])
@@ -10222,6 +10556,7 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
     result["atm_iv_pct"] = atm_iv_pct
     result["hv_annualized_pct"] = round(hv_pct, 2) if hv_pct is not None else None
     result["iv_hv"] = iv_hv
+    result["long_vol_value"] = classify_long_vol_value(iv_hv)
     if atm_iv_pct is not None:
         iv_history = load_iv_history()
         rank_pct, hist_days = update_iv_history_and_get_rank(symbol, atm_iv_pct, iv_history, today.isoformat())
@@ -10232,6 +10567,9 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
     em = expected_move(spot, atm_iv_pct, days_to_expiry)
     result["expected_move"] = em
     if em:
+        avg_be_distance = ((breakeven_upper - spot) + (spot - breakeven_lower)) / 2
+        result["breakeven_expected_move_ratio"] = (round(avg_be_distance / em["expected_move"], 2)
+                                                     if em.get("expected_move") else None)
         reaches_breakeven = em["upper"] >= breakeven_upper or em["lower"] <= breakeven_lower
         result["expected_move_vs_breakeven"] = (
             f"{days_to_expiry}-day expected move is ±₹{em['expected_move']} ({em['lower']}–{em['upper']}); "
@@ -10241,6 +10579,8 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
              if reaches_breakeven else
              "The expected move alone doesn't reach breakeven — this needs a move LARGER than a "
              "typical move over this timeframe, i.e. a genuine breakout/event, not just normal drift."))
+    else:
+        result["breakeven_expected_move_ratio"] = None
 
     trend = get_trend_regime(symbol)
     result["trend"] = None if trend.get("error") else trend
@@ -10264,9 +10604,8 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
     momentum_component = sq["momentum_score"] if sq else 50.0
     volume_component = sq["volume_score"] if sq else 50.0
     proximity_component = sq["proximity_score"] if sq else 50.0
-    iv_cheap_component = ({"avoid": 85, "fair": 65, "good": 45, "excellent": 20}.get(
-        (iv_hv.get("label") or "").lower(), 50) if iv_hv else 50)
-    event_component = 100 if result.get("event_before_expiry") else 30
+    iv_cheap_component = result["long_vol_value"]["score"]
+    event_component = _move_event_score(result.get("event_before_expiry"), iv_hv)
 
     move_score = round(
         MOVE_SCORE_WEIGHTS["squeeze"] * squeeze_component +
@@ -10281,9 +10620,9 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
     result["move_score_note"] = (
         "Heuristic SETUP score for a long-vol trade: Bollinger squeeze/NR7 tightness 25%, IV cheap "
         "relative to historical vol 25%, ADX low-and-turning-up 20%, volume dry-up/pickup pattern "
-        "15%, proximity to the 20-day range edge 10%, a scheduled event before expiry 5%. This is a "
+        "15%, proximity to the 20-day range edge 10%, catalyst value after adjusting for IV 5%. This is a "
         "rough triage aid for HOW LIKELY a big move is to be setting up — it is NOT a directional "
-        "signal and NOT backtested.")
+        "signal and NOT backtested. Debit and breakevens use executable Ask prices, not midpoint marks.")
 
     reasons = []
     if sq and sq.get("is_squeeze"):
@@ -10298,7 +10637,7 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
         reasons.append("Volume has already picked up sharply — the move may be starting right now.")
     if sq and sq.get("near_breakout_trigger"):
         reasons.append("Spot is close (within ~1.5x ATR) to the recent 20-day high or low — a normal day's range could trigger the breakout.")
-    if iv_hv and (iv_hv.get("label") or "").lower() in ("avoid", "fair"):
+    if result["long_vol_value"]["label"] in ("CHEAP", "FAIR"):
         reasons.append(f"Options are relatively cheap here (IV/HV ratio {iv_hv.get('ratio')}) — you're not overpaying for the premium.")
     if result.get("event_before_expiry"):
         ev = result["event_before_expiry"]
@@ -10307,11 +10646,44 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
         reasons.append("No strong setup signals found — this looks like an ordinary day for this stock, a weak candidate for a premium-buying trade right now.")
     result["move_reasons"] = reasons
 
-    result["suggested_mode"] = "strangle" if (atm_iv_pct and atm_iv_pct > 35) else "straddle"
+    economics_ratio = result.get("breakeven_expected_move_ratio")
+    result["suggested_mode"] = "strangle" if (iv_hv.get("ratio") and iv_hv["ratio"] > 1.05) else "straddle"
     result["suggested_mode_reason"] = (
-        "IV looks elevated — a wider (cheaper) strangle reduces the debit at risk while still needing a real move."
+        "IV is rich versus realized volatility — a balanced delta strangle reduces debit, but only use it if its breakeven/expected-move hurdle remains acceptable."
         if result["suggested_mode"] == "strangle" else
-        "IV looks reasonable — the ATM straddle is simpler, with closer breakevens, needing a smaller move to profit.")
+        "IV is fair/cheap versus realized volatility — the ATM straddle keeps breakevens closer and participates sooner in either direction.")
+
+    # Position sizing is capped by the entire debit at risk, including estimated entry charges.
+    one_lot_orders = [{"price": call_l["entry_price"], "quantity": lot_size, "transaction_type": "BUY"},
+                      {"price": put_l["entry_price"], "quantity": lot_size, "transaction_type": "BUY"}]
+    one_lot_charges = estimate_charges(one_lot_orders).get("total", 0)
+    risk_per_lot = round(net_debit_per_share * lot_size + one_lot_charges, 2)
+    recommended_lots = min(50, int(max_risk_rupees // risk_per_lot)) if risk_per_lot and max_risk_rupees else 0
+    result["max_risk_rupees"] = round(max_risk_rupees, 2)
+    result["risk_per_lot"] = risk_per_lot
+    result["recommended_lots"] = recommended_lots
+    result["requested_risk_with_charges"] = round(net_debit_per_share * quantity +
+                                                   result["estimated_entry_charges"].get("total", 0), 2)
+    result["risk_plan"] = {
+        "profit_target_pnl": round(MOVE_PROFIT_TARGET_MULTIPLE * net_debit_per_share * quantity, 2),
+        "profit_target_pct_of_debit": round(MOVE_PROFIT_TARGET_MULTIPLE * 100),
+        "stop_loss_pnl": round(-MOVE_STOP_LOSS_DEBIT_PCT * net_debit_per_share * quantity, 2),
+        "stop_loss_pct_of_debit": round(MOVE_STOP_LOSS_DEBIT_PCT * 100),
+        "trail_activate_pct_of_debit": round(MOVE_TRAIL_ACTIVATE_DEBIT_PCT * 100),
+        "trail_giveback_pct_of_debit": round(MOVE_TRAIL_GIVEBACK_DEBIT_PCT * 100),
+        "time_stop_after_pct": MOVE_TIME_STOP_PROGRESS_PCT,
+        "time_stop_if_move_below_pct": MOVE_TIME_STOP_MAX_MOVE_PCT,
+        "expiry_exit_dte": MOVE_EXPIRY_WARNING_DAYS,
+    }
+
+    fo_banned = False
+    try:
+        ban_symbols, _ = get_fo_ban_list()
+        fo_banned = bool(ban_symbols is not None and symbol in ban_symbols)
+    except Exception:
+        pass
+    result["fo_banned_today"] = fo_banned
+    result["entry_gate"] = _assess_move_entry(result, max_risk_rupees, fo_banned)
 
     result["note"] = (
         "LONG STRADDLE/STRANGLE: a net-DEBIT, defined-risk (max loss = debit paid) bet on a LARGE "
@@ -10319,7 +10691,8 @@ def build_move_strategy(symbol, mode="straddle", otm_pct=DEFAULT_MOVE_OTM_PCT, e
         "just to break even — time decay (theta) works against this every single day it doesn't "
         "move, and a volatility crush right after an anticipated event (e.g. results day) can lose "
         "money even if the direction was called correctly. Educational calculation only — verify "
-        "prices, margin and lot size on your broker terminal before trading.")
+        "prices, margin and lot size on your broker terminal before trading. Entry economics here "
+        "use best Ask and exits are marked at best Bid so displayed P&L does not assume midpoint fills.")
     return result
 
 
@@ -10328,10 +10701,17 @@ def move_strategy(symbol):
     if not require_session():
         return jsonify({"error": "not_logged_in"}), 401
     mode = request.args.get("mode", "straddle")
-    otm_pct = float(request.args.get("otm_pct", DEFAULT_MOVE_OTM_PCT))
+    try:
+        otm_pct = float(request.args.get("otm_pct", DEFAULT_MOVE_OTM_PCT))
+        lots = int(request.args.get("lots", 1))
+        target_delta = float(request.args.get("target_delta", DEFAULT_MOVE_TARGET_DELTA))
+        max_risk_rupees = float(request.args.get("max_risk_rupees", DEFAULT_MOVE_MAX_RISK_RUPEES))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid numeric strategy parameter"}), 400
     expiry_str = request.args.get("expiry")
-    lots = int(request.args.get("lots", 1))
-    result = build_move_strategy(symbol, mode, otm_pct, expiry_str, lots)
+    selection_mode = request.args.get("selection_mode", "smart_delta")
+    result = build_move_strategy(symbol, mode, otm_pct, expiry_str, lots, selection_mode,
+                                 target_delta, max_risk_rupees)
     if "error" in result:
         return jsonify(result), 404
     return jsonify(result)
@@ -10372,17 +10752,33 @@ def move_screener():
             break
     seed_spot_cache_from_prices(base)
 
-    # Shortlist for the expensive per-symbol daily-candle squeeze read: highest-ATR names first
-    # (some baseline ability to move), capped to stay within Kite's historical-data rate limits.
-    base_sorted = sorted(base, key=lambda r: r["atr_pct_of_price"], reverse=True)
-    shortlist = base_sorted[:max_symbols]
-
-    candidates = [{"symbol": r["symbol"], "last_close": r["ltp"]} for r in shortlist]
+    # Price every universe member's ATM pair in bulk before choosing the expensive deep-diagnostic
+    # shortlist. Selecting only the highest-ATR stocks first systematically overpaid for volatility;
+    # this pre-pass prioritises liquid options whose IV is fair/cheap versus each stock's own HV.
+    candidates = [{"symbol": r["symbol"], "last_close": r["ltp"]} for r in base]
     try:
         iv_liquidity = get_atm_iv_and_liquidity_bulk(candidates, nfo)
     except Exception as e:
         iv_liquidity = {}
         logger.warning(f"Move screener ATM IV/liquidity batch fetch failed: {e}")
+
+    for r in base:
+        info = iv_liquidity.get(r["symbol"]) or {}
+        r["atm_iv_pct"] = info.get("atm_iv_pct")
+        r["atm_oi_total"] = info.get("atm_oi_total", 0)
+        r["atm_spread_pct"] = info.get("atm_spread_pct")
+        r["iv_hv"] = classify_iv_hv(r["atm_iv_pct"], r["hv_annualized_pct"])
+        r["long_vol_value"] = classify_long_vol_value(r["iv_hv"])
+        r["liquidity_ok"] = bool(r["atm_oi_total"] >= MOVE_MIN_ATM_TOTAL_OI and
+                                  r["atm_spread_pct"] is not None and
+                                  r["atm_spread_pct"] <= MOVE_MAX_ATM_SPREAD_PCT)
+    atr_values = [r["atr_pct_of_price"] for r in base]
+    for r in base:
+        atr_component = _percentile_rank(r["atr_pct_of_price"], atr_values) or 0
+        r["pre_score"] = round(0.70 * r["long_vol_value"]["score"] + 0.30 * atr_component, 1)
+    liquid_base = [r for r in base if r["liquidity_ok"] and r["atm_iv_pct"] is not None]
+    liquid_base.sort(key=lambda r: r["pre_score"], reverse=True)
+    shortlist = liquid_base[:max_symbols]
 
     ban_symbols, ban_error = get_fo_ban_list()
     upcoming_macro_events = get_upcoming_events(days_ahead=MOVE_PREFERRED_DTE_HIGH)
@@ -10390,19 +10786,16 @@ def move_screener():
     for r in shortlist:
         sym = r["symbol"]
         try:
-            info = iv_liquidity.get(sym)
-            atm_iv_pct = info.get("atm_iv_pct") if info else None
-            liquidity_ok = bool(info and info.get("atm_oi_total", 0) >= MOVE_MIN_ATM_TOTAL_OI and
-                                 info.get("atm_spread_pct") is not None and
-                                 info["atm_spread_pct"] <= MOVE_MAX_ATM_SPREAD_PCT)
-            iv_hv = classify_iv_hv(atm_iv_pct, r["hv_annualized_pct"])
+            atm_iv_pct = r.get("atm_iv_pct")
+            liquidity_ok = r.get("liquidity_ok", False)
+            iv_hv = r.get("iv_hv") or classify_iv_hv(atm_iv_pct, r["hv_annualized_pct"])
+            long_vol_value = r.get("long_vol_value") or classify_long_vol_value(iv_hv)
             squeeze = breakout_squeeze_diagnostics(sym)
             if squeeze.get("error"):
                 errors.append({"symbol": sym, "error": squeeze["error"]})
                 continue
-            iv_cheap_component = ({"avoid": 85, "fair": 65, "good": 45, "excellent": 20}.get(
-                (iv_hv.get("label") or "").lower(), 50) if iv_hv else 50)
-            event_component = 100 if upcoming_macro_events else 30
+            iv_cheap_component = long_vol_value["score"]
+            event_component = _move_event_score(upcoming_macro_events[0] if upcoming_macro_events else None, iv_hv)
             move_score = round(
                 MOVE_SCORE_WEIGHTS["squeeze"] * squeeze["squeeze_score"] +
                 MOVE_SCORE_WEIGHTS["iv_cheapness"] * iv_cheap_component +
@@ -10413,20 +10806,30 @@ def move_screener():
             out = dict(r)
             out.update({
                 "atm_iv_pct": atm_iv_pct, "iv_hv": iv_hv, "liquidity_ok": liquidity_ok,
+                "long_vol_value": long_vol_value, "atm_oi_total": r.get("atm_oi_total", 0),
+                "atm_spread_pct": r.get("atm_spread_pct"),
                 "fo_banned_today": bool(ban_symbols is not None and sym in ban_symbols),
                 "squeeze": squeeze, "move_score": move_score,
                 "move_score_label": ("Excellent" if move_score >= 75 else "Good" if move_score >= 60
                                       else "Average" if move_score >= 45 else "Weak"),
-                "suggested_mode": "strangle" if (atm_iv_pct and atm_iv_pct > 35) else "straddle",
+                "suggested_mode": "strangle" if (iv_hv.get("ratio") and iv_hv["ratio"] > 1.05) else "straddle",
                 "near_macro_event": bool(upcoming_macro_events),
             })
+            compression = bool(squeeze.get("is_squeeze") or squeeze.get("is_nr7"))
+            out["trade_ready"] = bool(liquidity_ok and not out["fo_banned_today"] and
+                                      move_score >= MOVE_MIN_READY_SCORE and compression and
+                                      (iv_hv.get("ratio") is None or iv_hv["ratio"] <= 1.15))
+            out["entry_status"] = ("READY" if out["trade_ready"] else
+                                   "AVOID" if (out["fo_banned_today"] or not liquidity_ok or
+                                                (iv_hv.get("ratio") is not None and iv_hv["ratio"] > MOVE_MAX_IV_HV_RATIO))
+                                   else "WAIT")
             evaluated.append(out)
         except Exception as e:
             errors.append({"symbol": sym, "error": str(e)})
             logger.exception("Move screener failed for %s", sym)
 
     eligible = [r for r in evaluated if r["liquidity_ok"] and not r["fo_banned_today"]]
-    eligible.sort(key=lambda r: r["move_score"], reverse=True)
+    eligible.sort(key=lambda r: (r.get("trade_ready", False), r["move_score"]), reverse=True)
     for i, r in enumerate(eligible, 1):
         r["rank"] = i; r["total"] = len(eligible)
     excluded = [r for r in evaluated if r not in eligible]
@@ -10446,19 +10849,20 @@ def move_screener():
                  "from the Option-Selling screeners: it looks for stocks that are COILED for a big "
                  "move (Bollinger squeeze, NR7, low-and-turning ADX, volume dry-up/pickup, proximity "
                  "to the recent range edge) with options that are still relatively CHEAP to buy (low "
-                 "IV vs historical vol), plus a scheduled macro-event bonus. It ranks the widest-ATR "
-                 "names in the F&O universe first, then deep-evaluates up to max_symbols of them with "
+                 "IV vs historical vol). It first prices ATM pairs across the universe, removes poor "
+                 "liquidity, and shortlists on buyer value plus baseline ATR before deep-evaluating "
+                 "up to max_symbols with "
                  "real daily-candle diagnostics. Not a backtest, not a directional call — purely a "
                  "'is a move plausible here' triage."),
         "config": {"max_symbols": max_symbols, "weights": MOVE_SCORE_WEIGHTS,
-                   "min_atm_oi": MOVE_MIN_ATM_TOTAL_OI, "max_atm_spread_pct": MOVE_MAX_ATM_SPREAD_PCT},
+                   "min_atm_oi": MOVE_MIN_ATM_TOTAL_OI, "max_atm_spread_pct": MOVE_MAX_ATM_SPREAD_PCT,
+                   "min_ready_score": MOVE_MIN_READY_SCORE, "max_iv_hv": MOVE_MAX_IV_HV_RATIO},
     })
 
 
 def classify_move_digest(position, mtm):
     """Multi-factor 'is this long straddle/strangle still worth holding' read for a single tracked
-    position — the thing this file did NOT have before: a fixed 100%-profit / 45%-loss trigger tells
-    you the P&L number crossed a line, but says nothing about WHY. This looks at the trade's actual
+    position. A fixed P&L trigger alone says nothing about WHY it moved. This looks at the trade's actual
     state — how much of the expected move has shown up yet vs how much time has burned, whether IV is
     still building or already crushing, whether daily value is trending up or down, and whether the
     event this trade was built around is still ahead or already behind us — and turns that into one
@@ -10472,6 +10876,10 @@ def classify_move_digest(position, mtm):
     pnl = mtm["pnl"]
     quantity = position.get("quantity", position["lot_size"])
     entry_debit_total = abs(position["entry_net_debit_per_share"] * quantity)
+    peak_pnl = max(float(position.get("peak_pnl") or 0), float(mtm.get("peak_pnl") or pnl))
+    giveback_from_peak = max(0.0, peak_pnl - pnl)
+    peak_pct_of_debit = round(peak_pnl / entry_debit_total * 100, 1) if entry_debit_total else None
+    giveback_pct_of_debit = round(giveback_from_peak / entry_debit_total * 100, 1) if entry_debit_total else None
 
     # How much of the move priced in AT ENTRY has actually shown up so far?
     realized_move_pct = round(abs(spot - entry_spot) / entry_spot * 100, 2) if entry_spot else None
@@ -10525,19 +10933,38 @@ def classify_move_digest(position, mtm):
     action, headline, reasons = "HOLD", "Hold — no single factor is decisive either way yet", []
     tomorrow = "Re-run this check at tomorrow's mark; nothing here forces a decision today."
     hard_stop = bool(entry_debit_total) and pnl <= -MOVE_STOP_LOSS_DEBIT_PCT * entry_debit_total
+    trail_hit = bool(entry_debit_total and peak_pnl >= MOVE_TRAIL_ACTIVATE_DEBIT_PCT * entry_debit_total and
+                     giveback_from_peak >= MOVE_TRAIL_GIVEBACK_DEBIT_PCT * entry_debit_total)
+    time_stop = bool(time_progress_pct is not None and time_progress_pct >= MOVE_TIME_STOP_PROGRESS_PCT and
+                     (move_progress_pct or 0) < MOVE_TIME_STOP_MAX_MOVE_PCT and
+                     momentum in ("decaying", "flat", "unknown"))
 
-    if hard_stop and momentum in ("decaying", "flat", "unknown"):
+    if hard_stop:
         action = "EXIT_NOW"
-        headline = "Exit — loss threshold hit and value isn't rebuilding"
-        reasons.append(f"Down {int(MOVE_STOP_LOSS_DEBIT_PCT * 100)}%+ of the debit paid, and the last "
-                        f"{MOVE_MOMENTUM_LOOKBACK_DAYS} marks show the position {momentum}, not recovering.")
+        headline = "Exit — premium-loss limit reached"
+        reasons.append(f"Down {int(MOVE_STOP_LOSS_DEBIT_PCT * 100)}%+ of the debit paid. The risk cap takes "
+                       f"priority even though recent position-value momentum is {momentum}.")
         tomorrow = "Don't carry this overnight hoping it turns — theta keeps bleeding regardless of tomorrow's open."
 
-    elif days_left <= MOVE_EXPIRY_WARNING_DAYS and zone in ("between_strikes", "moving"):
+    elif days_left <= MOVE_EXPIRY_WARNING_DAYS and zone != "past_breakeven":
         action = "EXIT_NOW"
         headline = f"Exit — only {days_left} day(s) left and spot hasn't cleared a breakeven"
         reasons.append("Gamma/theta risk is highest in the final days with the trade still unresolved.")
         tomorrow = "Not worth holding overnight this close to expiry without a clear breakeven already cleared."
+
+    elif trail_hit:
+        action = "BOOK_PROFIT"
+        headline = "Protect the winner — profit has retraced from its peak"
+        reasons.append(f"Peak P&L reached ₹{round(peak_pnl, 2)} ({peak_pct_of_debit}% of debit), then gave "
+                       f"back ₹{round(giveback_from_peak, 2)} ({giveback_pct_of_debit}% of debit).")
+        tomorrow = "Close or materially trim now; the configured trailing giveback has been breached."
+
+    elif entry_debit_total and pnl >= MOVE_PROFIT_TARGET_MULTIPLE * entry_debit_total:
+        action = "BOOK_PROFIT"
+        headline = f"Profit target reached — book or trim at +{round(pnl / entry_debit_total * 100, 1)}% of debit"
+        reasons.append(f"The position cleared its +{int(MOVE_PROFIT_TARGET_MULTIPLE * 100)}% debit target; "
+                       "protecting realised convexity is preferable to financing more theta.")
+        tomorrow = "If retaining a runner, size it down and enforce the peak-P&L trail."
 
     elif move_progress_pct is not None and move_progress_pct >= MOVE_HIGH_MOVE_PROGRESS_PCT and pnl > 0:
         action = "BOOK_PROFIT"
@@ -10547,6 +10974,19 @@ def classify_move_digest(position, mtm):
         if iv_change_pct is not None and iv_change_pct < 0:
             reasons.append(f"IV has also come off {abs(iv_change_pct)}% since entry — holding on risks giving profit back to decay.")
         tomorrow = "If not squaring off fully today, at least trail/partial-book — overnight theta plus any IV settle works against you from here."
+
+    elif time_stop and event_status != "event_ahead":
+        action = "EXIT_SOON"
+        headline = "Time stop — theta is being spent faster than the move is developing"
+        reasons.append(f"{time_progress_pct}% of the original time window has elapsed, while only "
+                       f"{move_progress_pct or 0}% of the entry-expected move has appeared.")
+        tomorrow = "Close rather than keep financing theta without a live catalyst or improving mark."
+
+    elif event_status in ("event_passed", "event_today") and iv_change_pct is not None and iv_change_pct <= -15 and pnl <= 0:
+        action = "EXIT_NOW"
+        headline = "Post-event IV crush — the catalyst passed and premium is shrinking"
+        reasons.append(f"IV is down {abs(iv_change_pct)}% from entry and the trade is not profitable after the event.")
+        tomorrow = "The original catalyst is gone; carrying overnight adds theta without restoring the event premium."
 
     elif event_status == "event_ahead" and (move_progress_pct is None or move_progress_pct < MOVE_LOW_MOVE_PROGRESS_PCT) and not hard_stop:
         action = "HOLD_FOR_EVENT"
@@ -10581,6 +11021,11 @@ def classify_move_digest(position, mtm):
         "time_progress_pct": time_progress_pct, "days_elapsed": days_elapsed,
         "entry_atm_iv_pct": entry_iv, "atm_iv_now": atm_iv_now, "iv_change_pct": iv_change_pct,
         "momentum": momentum, "event_status": event_status,
+        "peak_pnl": round(peak_pnl, 2), "peak_pct_of_debit": peak_pct_of_debit,
+        "giveback_from_peak": round(giveback_from_peak, 2),
+        "giveback_pct_of_debit": giveback_pct_of_debit,
+        "trail_active": bool(entry_debit_total and peak_pnl >= MOVE_TRAIL_ACTIVATE_DEBIT_PCT * entry_debit_total),
+        "time_stop_active": time_stop,
     }
 
 
@@ -10593,11 +11038,16 @@ def mark_to_market_move(position):
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
     quotes = kite_quote_bulk(inst_keys)
 
-    prices, missing_legs = {}, []
+    prices, quote_details, missing_legs = {}, {}, []
     for k in leg_keys:
         key = f"NFO:{position['legs'][k]['tradingsymbol']}"
-        price = extract_price(quotes.get(key))
+        q = quotes.get(key) or {}
+        st = quote_stats(q)
+        # Closing a long option means SELLING it. Mark at best bid so P&L remains executable and
+        # never assumes a midpoint fill; use LTP/mid only as an explicitly-labelled fallback.
+        price = _move_positive(st.get("bid")) or extract_price(q)
         prices[k] = price
+        quote_details[k] = {**st, "price_source": "BID" if _move_positive(st.get("bid")) else "LTP_MID_FALLBACK"}
         if price is None:
             missing_legs.append(f"{k} ({position['legs'][k]['tradingsymbol']})")
     if missing_legs:
@@ -10609,6 +11059,9 @@ def mark_to_market_move(position):
     pnl_per_share = current_value_per_share - entry_debit
     pnl = round(pnl_per_share * quantity, 2)
     current_position_value = round(current_value_per_share * quantity, 2)
+    entry_debit_total = abs(entry_debit * quantity)
+    peak_pnl = max(float(position.get("peak_pnl") or 0), pnl)
+    giveback_from_peak = max(0.0, peak_pnl - pnl)
 
     spot, err = get_spot_price(position["symbol"])
     if err:
@@ -10627,7 +11080,7 @@ def mark_to_market_move(position):
         zone = "past_breakeven"       # currently profitable if closed now
     elif spot > call_strike or spot < put_strike:
         zone = "moving"               # in-the-money on one side but hasn't cleared breakeven yet
-    if days_left <= MOVE_EXPIRY_WARNING_DAYS:
+    if days_left <= MOVE_EXPIRY_WARNING_DAYS and zone != "past_breakeven":
         zone = "near_expiry"
 
     delta_call = delta_put = atm_iv_now = None
@@ -10641,7 +11094,6 @@ def mark_to_market_move(position):
 
     # --- Exit suggestion (informational only — never auto-exits) ---
     exit_suggested, exit_reasons = False, []
-    entry_debit_total = abs(entry_debit * quantity)
     if entry_debit_total and pnl >= MOVE_PROFIT_TARGET_MULTIPLE * entry_debit_total:
         exit_suggested = True
         exit_reasons.append(
@@ -10654,7 +11106,14 @@ def mark_to_market_move(position):
             f"Value has decayed to a loss of ₹{abs(pnl)}, {int(MOVE_STOP_LOSS_DEBIT_PCT * 100)}%+ of "
             f"the debit paid — the expected move hasn't shown up; consider cutting the loss rather "
             f"than waiting on theta to finish the job.")
-    if days_left <= MOVE_EXPIRY_WARNING_DAYS and days_left >= 0 and zone in ("between_strikes", "moving"):
+    if (entry_debit_total and peak_pnl >= MOVE_TRAIL_ACTIVATE_DEBIT_PCT * entry_debit_total and
+            giveback_from_peak >= MOVE_TRAIL_GIVEBACK_DEBIT_PCT * entry_debit_total):
+        exit_suggested = True
+        exit_reasons.append(
+            f"Peak P&L was ₹{round(peak_pnl, 2)} and ₹{round(giveback_from_peak, 2)} has been given back — "
+            "the configured profit trail has fired; consider closing or materially trimming.")
+    if (days_left <= MOVE_EXPIRY_WARNING_DAYS and days_left >= 0 and
+            not (spot > position["breakeven_upper"] or spot < position["breakeven_lower"])):
         exit_suggested = True
         exit_reasons.append(
             f"Only {days_left} day(s) to expiry and spot hasn't cleared a breakeven — theta decay "
@@ -10674,12 +11133,16 @@ def mark_to_market_move(position):
 
     leg_details = {}
     for k in leg_keys:
-        entry_price = position["legs"][k]["ltp"]
+        entry_price = (position["legs"][k].get("entry_price") or
+                       position["legs"][k].get("ask") or position["legs"][k]["ltp"])
         current_price = prices[k]
+        qd = quote_details[k]
         per_share = current_price - entry_price  # long leg profits when price rises
         leg_details[k] = {
             "tradingsymbol": position["legs"][k]["tradingsymbol"], "strike": position["legs"][k]["strike"],
             "entry_price": entry_price, "current_price": round(current_price, 2),
+            "bid": qd.get("bid"), "ask": qd.get("ask"), "spread_pct": qd.get("spread_pct"),
+            "price_source": qd.get("price_source"),
             "pnl": round(per_share * quantity, 2),
         }
     if delta_call is not None:
@@ -10692,6 +11155,10 @@ def mark_to_market_move(position):
         "current_position_value": current_position_value, "legs_current": leg_details,
         "days_left": days_left, "zone": zone, "atm_iv_now": atm_iv_now,
         "pct_of_debit": round((pnl / entry_debit_total * 100), 1) if entry_debit_total else None,
+        "peak_pnl": round(peak_pnl, 2),
+        "peak_pct_of_debit": round(peak_pnl / entry_debit_total * 100, 1) if entry_debit_total else None,
+        "giveback_from_peak": round(giveback_from_peak, 2),
+        "giveback_pct_of_debit": round(giveback_from_peak / entry_debit_total * 100, 1) if entry_debit_total else None,
         "exit_suggested": exit_suggested, "exit_reasons": exit_reasons,
         "event_before_expiry": event_flag,
         "entry_charges": entry_charges_total, "estimated_exit_charges": exit_charges["total"],
@@ -10707,7 +11174,53 @@ def mark_to_market_move(position):
         logger.exception("classify_move_digest failed for position %s", position.get("id"))
         result["digest"] = {"action": "HOLD", "headline": "Digest unavailable (internal error)",
                              "reasons": [str(e)], "tomorrow_outlook": None}
+    if result["digest"].get("action") in ("EXIT_NOW", "EXIT_SOON", "BOOK_PROFIT"):
+        result["exit_suggested"] = True
+        digest_reason = result["digest"].get("headline")
+        if digest_reason and digest_reason not in result["exit_reasons"]:
+            result["exit_reasons"].append(digest_reason)
     return result
+
+
+def _move_reconcile_order_states(positions):
+    """Refresh previously pending order ids once, so late fills cannot leave the UI stuck."""
+    pending = [o for p in positions for o in p.get("broker_orders", [])
+               if o.get("order_id") and o.get("status") in ("placed", "pending")]
+    if not pending:
+        return False
+    try:
+        broker_by_id = {o.get("order_id"): o for o in kite.orders() if o.get("order_id")}
+    except Exception:
+        return False
+    changed = False
+    for p in positions:
+        for saved in p.get("broker_orders", []):
+            if saved.get("status") not in ("placed", "pending"):
+                continue
+            live = broker_by_id.get(saved.get("order_id"))
+            if not live:
+                continue
+            terminal = live.get("status")
+            saved["fill_status"] = terminal
+            if terminal == "COMPLETE":
+                saved["status"] = "filled"
+                fill_price = _move_positive(live.get("average_price"))
+                if fill_price is not None:
+                    saved["fill_price"] = fill_price
+                    saved["reference_price"] = fill_price
+                if saved.get("transaction_type") == "SELL":
+                    leg = (p.get("legs") or {}).get(saved.get("leg")) or {}
+                    entry_price = leg.get("entry_price") or leg.get("ask") or leg.get("ltp")
+                    close_price = fill_price or _move_positive(saved.get("reference_price"))
+                    if entry_price is not None and close_price is not None:
+                        saved["estimated_realized_pnl"] = round(
+                            (close_price - entry_price) * int(saved.get("quantity") or 0), 2)
+                changed = True
+            elif terminal in ("REJECTED", "CANCELLED"):
+                saved["status"] = "failed"
+                saved["error"] = live.get("status_message") or f"Order reached broker status {terminal}."
+                changed = True
+    return changed
 
 
 @app.route("/api/move-watchlist/add", methods=["POST"])
@@ -10717,13 +11230,27 @@ def move_watchlist_add():
     body = request.json or {}
     symbol = body.get("symbol", "").upper()
     mode = body.get("mode", "straddle")
-    otm_pct = float(body.get("otm_pct", DEFAULT_MOVE_OTM_PCT))
+    try:
+        otm_pct = float(body.get("otm_pct", DEFAULT_MOVE_OTM_PCT))
+        lots = int(body.get("lots", 1))
+        target_delta = float(body.get("target_delta", DEFAULT_MOVE_TARGET_DELTA))
+        max_risk_rupees = float(body.get("max_risk_rupees", DEFAULT_MOVE_MAX_RISK_RUPEES))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid numeric strategy parameter"}), 400
     expiry_str = body.get("expiry")
-    lots = int(body.get("lots", 1))
+    selection_mode = body.get("selection_mode", "smart_delta")
 
-    built = build_move_strategy(symbol, mode, otm_pct, expiry_str, lots)
+    built = build_move_strategy(symbol, mode, otm_pct, expiry_str, lots, selection_mode,
+                                target_delta, max_risk_rupees)
     if "error" in built:
         return jsonify(built), 404
+
+    positions = load_move_positions()
+    duplicate = next((p for p in positions if p.get("symbol") == symbol and p.get("expiry") == built["expiry"] and
+                      p.get("mode") == built["mode"]), None)
+    if duplicate:
+        return jsonify({"error": "An identical symbol/expiry/mode is already tracked.",
+                        "position_id": duplicate.get("id")}), 409
 
     today_str = now_ist().date().isoformat()
     position = {
@@ -10731,6 +11258,7 @@ def move_watchlist_add():
         "symbol": symbol, "added_on": today_str, "entry_spot": built["spot"],
         "expiry": built["expiry"], "lot_size": built["lot_size"], "lots": built["lots"],
         "quantity": built["quantity"], "strategy_type": built["strategy_type"], "mode": built["mode"],
+        "selection_mode": built.get("selection_mode"), "selection_used": built.get("selection_used"),
         "legs": built["legs"], "entry_net_debit_per_share": built["net_debit_per_share"],
         "entry_max_loss": built["max_loss"], "entry_max_profit": built["max_profit"],
         "entry_margin_required": built.get("margin_required"), "entry_margin_error": built.get("margin_error"),
@@ -10741,11 +11269,14 @@ def move_watchlist_add():
         "entry_atm_iv_pct": built.get("atm_iv_pct"), "entry_expected_move": built.get("expected_move"),
         "entry_days_to_expiry": built.get("days_to_expiry"),
         "event_before_expiry_at_entry": built.get("event_before_expiry"),
+        "entry_gate": built.get("entry_gate"), "risk_plan": built.get("risk_plan"),
+        "max_risk_rupees": built.get("max_risk_rupees"),
+        "breakeven_expected_move_ratio": built.get("breakeven_expected_move_ratio"),
+        "peak_pnl": 0.0, "peak_pct_of_debit": 0.0,
         "broker_orders": [],
         "history": [{"date": today_str, "spot": built["spot"], "pnl": 0.0,
                      "current_debit_per_share": built["net_debit_per_share"]}],
     }
-    positions = load_move_positions()
     positions.append(position)
     save_move_positions(positions)
     return jsonify({"ok": True, "position": position})
@@ -10757,7 +11288,19 @@ def move_watchlist():
         return jsonify({"error": "not_logged_in"}), 401
     positions = load_move_positions()
     today_str = now_ist().date().isoformat()
-    out, changed = [], False
+    out, changed = [], _move_reconcile_order_states(positions)
+    active_positions = []
+    for p in positions:
+        filled_close_legs = {o.get("leg") for o in p.get("broker_orders", [])
+                             if o.get("transaction_type") == "SELL" and o.get("status") == "filled"}
+        if filled_close_legs == {"buy_call", "buy_put"}:
+            close_results = [o for o in p.get("broker_orders", [])
+                             if o.get("transaction_type") == "SELL" and o.get("status") == "filled"]
+            archive_closed_position(p, close_results)
+            changed = True
+            continue
+        active_positions.append(p)
+    positions = active_positions
     for p in positions:
         try:
             mtm = mark_to_market_move(p)
@@ -10768,10 +11311,17 @@ def move_watchlist():
         if mtm and "__error__" in mtm:
             out.append({**p, "mtm_error": mtm["__error__"]})
             continue
-        if not p["history"] or p["history"][-1]["date"] != today_str:
-            p["history"].append({"date": today_str, "spot": mtm["spot"], "pnl": mtm["pnl"],
-                                  "current_debit_per_share": mtm["current_debit_per_share"]})
-            changed = True
+        mark = {"date": today_str, "spot": mtm["spot"], "pnl": mtm["pnl"],
+                "current_debit_per_share": mtm["current_debit_per_share"]}
+        history = p.setdefault("history", [])
+        if not history or history[-1]["date"] != today_str:
+            history.append(mark)
+        else:
+            history[-1] = mark
+        p["peak_pnl"] = mtm.get("peak_pnl", p.get("peak_pnl", 0))
+        p["peak_pct_of_debit"] = mtm.get("peak_pct_of_debit")
+        p["last_mark_at"] = datetime.now(IST).isoformat()
+        changed = True
         out.append({**p, "current": mtm})
     if changed:
         save_move_positions(positions)
@@ -10780,6 +11330,8 @@ def move_watchlist():
 
 @app.route("/api/move-watchlist/<pos_id>", methods=["DELETE"])
 def move_watchlist_remove(pos_id):
+    if not require_session():
+        return jsonify({"error": "not_logged_in"}), 401
     positions = load_move_positions()
     positions = [p for p in positions if p["id"] != pos_id]
     save_move_positions(positions)
@@ -10838,7 +11390,7 @@ def move_watchlist_curve(pos_id):
 
 
 def build_move_close_orders(position):
-    """Reverse of the entry orders (SELL both legs), with a fresh reference price from live quotes."""
+    """Reverse of entry: SELL both legs with a marketable limit at the executable best bid."""
     quantity = position.get("quantity", position["lot_size"])
     leg_keys = ["buy_call", "buy_put"]
     inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
@@ -10846,11 +11398,106 @@ def build_move_close_orders(position):
     orders = []
     for k in leg_keys:
         leg = position["legs"][k]
-        ref_price = extract_price(quotes.get(f"NFO:{leg['tradingsymbol']}"))
+        q = quotes.get(f"NFO:{leg['tradingsymbol']}") or {}
+        st = quote_stats(q)
+        ref_price = _move_positive(st.get("bid")) or extract_price(q)
         orders.append({"leg": k, "tradingsymbol": leg["tradingsymbol"], "transaction_type": "SELL",
                         "quantity": quantity, "price": ref_price, "reference_price": ref_price,
-                        "entry_price": leg["ltp"], "original_transaction_type": "BUY"})
+                        "bid": st.get("bid"), "ask": st.get("ask"), "spread_pct": st.get("spread_pct"),
+                        "price_source": "BID" if _move_positive(st.get("bid")) else "LTP_MID_FALLBACK",
+                        "entry_price": leg.get("entry_price") or leg.get("ask") or leg["ltp"],
+                        "original_transaction_type": "BUY"})
     return orders
+
+
+def _move_finalize_order_results(results):
+    """Turn an accepted order id into filled/pending/failed; accepted is not the same as filled."""
+    for r in results:
+        if r.get("status") != "placed" or not r.get("order_id"):
+            continue
+        terminal = wait_for_order_terminal(r["order_id"], timeout_seconds=8)
+        r["fill_status"] = terminal
+        if terminal == "COMPLETE":
+            r["status"] = "filled"
+        elif terminal in ("REJECTED", "CANCELLED"):
+            r["status"] = "failed"
+            r["error"] = f"Order reached broker status {terminal}."
+        else:
+            r["status"] = "pending"
+    return results
+
+
+def _move_filled_entry_legs(position):
+    return {o.get("leg") for o in position.get("broker_orders", [])
+            if o.get("transaction_type") == "BUY" and o.get("status") == "filled"}
+
+
+def _move_active_close_orders(position):
+    return [o for o in position.get("broker_orders", [])
+            if o.get("transaction_type") == "SELL" and o.get("status") in ("placed", "pending", "filled")]
+
+
+def _move_validate_custom_orders(position, orders, closing=False):
+    """Bind browser-edited prices to the two tracked contracts; reject symbol/side/size tampering."""
+    if not isinstance(orders, list) or len(orders) != 2:
+        return None, "Exactly two option legs are required."
+    expected_side = "SELL" if closing else "BUY"
+    quantity = int(position.get("quantity", position["lot_size"]))
+    expected = {k: position["legs"][k] for k in ("buy_call", "buy_put")}
+    seen, safe = set(), []
+    for raw in orders:
+        if not isinstance(raw, dict):
+            return None, "Each order leg must be an object."
+        leg_key = raw.get("leg")
+        if leg_key not in expected or leg_key in seen:
+            return None, "Order legs do not match the tracked call and put."
+        leg = expected[leg_key]
+        if raw.get("tradingsymbol") != leg["tradingsymbol"]:
+            return None, f"Contract mismatch for {leg_key}."
+        if str(raw.get("transaction_type", "")).upper() != expected_side:
+            return None, f"{leg_key} must be a {expected_side} order."
+        try:
+            raw_quantity = int(raw.get("quantity") or 0)
+        except (TypeError, ValueError):
+            return None, f"{leg_key} has an invalid quantity."
+        if raw_quantity != quantity:
+            return None, f"{leg_key} quantity must equal the tracked quantity ({quantity})."
+        price = _move_positive(raw.get("price") or raw.get("reference_price"))
+        if price is None:
+            return None, f"{leg_key} needs a positive LIMIT price."
+        item = {"leg": leg_key, "tradingsymbol": leg["tradingsymbol"],
+                "transaction_type": expected_side, "quantity": quantity,
+                "price": price, "reference_price": price}
+        if closing:
+            item["entry_price"] = leg.get("entry_price") or leg.get("ask") or leg.get("ltp")
+        safe.append(item); seen.add(leg_key)
+    return safe, None
+
+
+def _move_build_entry_orders(position):
+    quantity = int(position.get("quantity", position["lot_size"]))
+    leg_keys = ("buy_call", "buy_put")
+    inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
+    quotes = kite_quote_bulk(inst_keys, force_refresh=True)
+    orders, blockers = [], []
+    for k in leg_keys:
+        leg = position["legs"][k]
+        q = quotes.get(f"NFO:{leg['tradingsymbol']}") or {}
+        ltp = q.get("last_price")
+        bid, ask = extract_bid_ask(q)
+        st = quote_stats(q)
+        if bid is None or ask is None:
+            blockers.append(f"{k} has no two-sided live quote.")
+        if st.get("spread_pct") is None or st["spread_pct"] > MOVE_MAX_LEG_SPREAD_PCT:
+            blockers.append(f"{k} live spread is {st.get('spread_pct')}%; maximum is {MOVE_MAX_LEG_SPREAD_PCT:.1f}%.")
+        if int(st.get("oi") or 0) < MOVE_MIN_LEG_OI:
+            blockers.append(f"{k} live OI is {int(st.get('oi') or 0):,}; minimum is {MOVE_MIN_LEG_OI:,}.")
+        auto_price = recommended_limit_price("BUY", bid, ask, ltp)
+        orders.append({"leg": k, "tradingsymbol": leg["tradingsymbol"], "transaction_type": "BUY",
+                       "quantity": quantity, "ltp": ltp, "bid": bid, "ask": ask,
+                       "recommended_limit_price": auto_price, "reference_price": auto_price,
+                       "price_source": "ASK" if ask is not None else "LTP_FALLBACK"})
+    return orders, blockers
 
 
 @app.route("/api/move-execute/<pos_id>/preview")
@@ -10860,24 +11507,22 @@ def move_execute_preview(pos_id):
     position = find_move_position(pos_id)
     if not position:
         return jsonify({"error": "Position not found"}), 404
-    quantity = position.get("quantity", position["lot_size"])
-    leg_keys = ["buy_call", "buy_put"]
-    inst_keys = [f"NFO:{position['legs'][k]['tradingsymbol']}" for k in leg_keys]
+    gate = position.get("entry_gate") or {}
+    if gate and not gate.get("trade_ready"):
+        return jsonify({"error": "Entry gate is not READY. Rebuild/re-track after the setup improves.",
+                        "entry_gate": gate}), 409
+    existing_entries = [o for o in position.get("broker_orders", [])
+                        if o.get("transaction_type") == "BUY" and o.get("status") in ("placed", "pending", "filled")]
+    if existing_entries:
+        return jsonify({"error": "Entry orders already exist for this tracked position; duplicate submission blocked.",
+                        "orders": existing_entries}), 409
     try:
-        quotes = kite_quote_bulk(inst_keys, force_refresh=True)
+        orders, live_blockers = _move_build_entry_orders(position)
     except Exception as e:
         return jsonify({"error": f"Could not fetch live Bid/Ask: {e}"}), 502
-    orders = []
-    for k in leg_keys:
-        leg = position["legs"][k]
-        q = quotes.get(f"NFO:{leg['tradingsymbol']}") or {}
-        ltp = q.get("last_price")
-        bid, ask = extract_bid_ask(q)
-        auto_price = recommended_limit_price("BUY", bid, ask, ltp)
-        orders.append({"leg": k, "tradingsymbol": leg["tradingsymbol"], "transaction_type": "BUY",
-                        "quantity": quantity, "ltp": ltp, "bid": bid, "ask": ask,
-                        "recommended_limit_price": auto_price, "reference_price": auto_price,
-                        "price_source": "ASK" if ask is not None else "LTP_FALLBACK"})
+    if live_blockers:
+        return jsonify({"error": "Live liquidity gate failed; entry blocked.",
+                        "blockers": live_blockers, "orders": orders}), 409
     return jsonify({"position_id": pos_id, "symbol": position["symbol"], "orders": orders,
                      "default_product": "NRML", "default_order_type": "LIMIT",
                      "warning": "LIMIT prices use best Ask (you're BUYING both legs). Quotes can "
@@ -10894,20 +11539,48 @@ def move_execute_confirm(pos_id):
     position = find_move_position(pos_id)
     if not position:
         return jsonify({"error": "Position not found"}), 404
+    gate = position.get("entry_gate") or {}
+    if gate and not gate.get("trade_ready"):
+        return jsonify({"error": "Entry gate is not READY; live execution is blocked.", "entry_gate": gate}), 409
+    existing_entries = [o for o in position.get("broker_orders", [])
+                        if o.get("transaction_type") == "BUY" and o.get("status") in ("placed", "pending", "filled")]
+    if existing_entries:
+        return jsonify({"error": "Duplicate entry blocked; this position already has submitted BUY orders.",
+                        "orders": existing_entries}), 409
     product = body.get("product", "NRML")
-    order_type = body.get("order_type", "MARKET")
+    if product != "NRML":
+        return jsonify({"error": "Long-vol carry positions require NRML product."}), 400
+    order_type = body.get("order_type", "LIMIT")
+    if order_type != "LIMIT":
+        return jsonify({"error": "Long-vol option baskets require LIMIT orders to cap slippage."}), 400
+    try:
+        live_orders, live_blockers = _move_build_entry_orders(position)
+    except Exception as e:
+        return jsonify({"error": f"Could not revalidate live Bid/Ask: {e}"}), 502
+    if live_blockers:
+        return jsonify({"error": "Live liquidity gate failed at confirmation; no orders placed.",
+                        "blockers": live_blockers}), 409
     custom_orders = body.get("orders")
     if custom_orders:
-        legs_to_place = custom_orders
+        legs_to_place, order_error = _move_validate_custom_orders(position, custom_orders, closing=False)
+        if order_error:
+            return jsonify({"error": order_error}), 400
     else:
         quantity = position.get("quantity", position["lot_size"])
         legs_to_place = [{"leg": k, "tradingsymbol": position["legs"][k]["tradingsymbol"],
-                           "transaction_type": "BUY", "quantity": quantity, "price": position["legs"][k]["ltp"]}
+                           "transaction_type": "BUY", "quantity": quantity,
+                           "price": position["legs"][k].get("entry_price") or
+                                    position["legs"][k].get("ask") or position["legs"][k]["ltp"]}
                           for k in ("buy_call", "buy_put")]
     if not legs_to_place:
         return jsonify({"error": "No legs left to place — every leg was removed in the review screen."}), 400
+    live_limit_by_leg = {o["leg"]: _move_positive(o.get("recommended_limit_price")) for o in live_orders}
+    for order in legs_to_place:
+        live_limit = live_limit_by_leg.get(order["leg"])
+        if live_limit is None or float(order["price"]) > live_limit * (1 + MOVE_MAX_ENTRY_SLIPPAGE_PCT / 100):
+            return jsonify({"error": f"{order['leg']} limit exceeds the refreshed Ask/slippage cap; preview again."}), 409
 
-    results = place_basket_orders(legs_to_place, product, order_type)
+    results = _move_finalize_order_results(place_basket_orders(legs_to_place, product, order_type))
     positions = load_move_positions()
     for p in positions:
         if p["id"] == pos_id:
@@ -10915,17 +11588,18 @@ def move_execute_confirm(pos_id):
     save_move_positions(positions)
 
     any_failed = any(r["status"] == "failed" for r in results)
-    placed_count = sum(1 for r in results if r["status"] == "placed")
+    filled_count = sum(1 for r in results if r["status"] == "filled")
+    pending_count = sum(1 for r in results if r["status"] == "pending")
     total_legs = len(legs_to_place)
-    partial = any_failed and placed_count > 0
+    partial = any_failed and (filled_count + pending_count) > 0
     return jsonify({
         "results": results, "partial_failure": partial,
         "note": ("PARTIAL EXECUTION: one leg placed, one failed — you may now hold an unhedged single "
                  "long option. Open your Zerodha app / Kite web IMMEDIATELY to check and manually "
                  "complete or exit as needed."
                  if partial else
-                 "All legs failed — nothing was placed." if any_failed and placed_count == 0 else
-                 f"All {placed_count}/{total_legs} legs placed successfully. Verify fills in your Zerodha app.")
+                 "All legs failed — nothing was placed." if any_failed and filled_count + pending_count == 0 else
+                 f"Filled {filled_count}/{total_legs}; {pending_count} still pending. Verify broker fills before treating the basket as live.")
     })
 
 
@@ -10936,11 +11610,21 @@ def move_close_preview(pos_id):
     position = find_move_position(pos_id)
     if not position:
         return jsonify({"error": "Position not found"}), 404
+    if _move_filled_entry_legs(position) != {"buy_call", "buy_put"}:
+        return jsonify({"error": "Close blocked: both BUY entry legs are not recorded as filled. "
+                                         "Use the broker terminal to reconcile any manual or partial position."}), 409
+    active_closes = _move_active_close_orders(position)
+    if active_closes:
+        return jsonify({"error": "Close orders already exist; duplicate SELL submission blocked. "
+                                         "Reconcile these orders in the broker terminal.",
+                        "orders": active_closes}), 409
     orders = build_move_close_orders(position)
+    if any(o.get("price") is None for o in orders):
+        return jsonify({"error": "No executable sell price for one or both legs; close preview blocked."}), 409
     return jsonify({"position_id": pos_id, "symbol": position["symbol"], "orders": orders,
-                     "default_product": "NRML", "default_order_type": "MARKET",
+                     "default_product": "NRML", "default_order_type": "LIMIT",
                      "warning": "This will CLOSE/SQUARE OFF this position — SELLING both legs at "
-                                "current market prices. Review carefully, then confirm to send these "
+                                "the displayed best-Bid limit prices. Review carefully, then confirm to send these "
                                 "real orders to your Zerodha account."})
 
 
@@ -10954,18 +11638,44 @@ def move_close_confirm(pos_id):
     position = find_move_position(pos_id)
     if not position:
         return jsonify({"error": "Position not found"}), 404
+    if _move_filled_entry_legs(position) != {"buy_call", "buy_put"}:
+        return jsonify({"error": "Close blocked because both entry legs are not confirmed filled."}), 409
+    active_closes = _move_active_close_orders(position)
+    if active_closes:
+        return jsonify({"error": "Duplicate close blocked; existing SELL orders require broker reconciliation.",
+                        "orders": active_closes}), 409
     product = body.get("product", "NRML")
-    order_type = body.get("order_type", "MARKET")
+    if product != "NRML":
+        return jsonify({"error": "Long-vol carry positions require NRML product."}), 400
+    order_type = body.get("order_type", "LIMIT")
+    if order_type != "LIMIT":
+        return jsonify({"error": "Option closes require LIMIT orders to cap slippage."}), 400
+    try:
+        live_close_orders = build_move_close_orders(position)
+    except Exception as e:
+        return jsonify({"error": f"Could not revalidate live close prices: {e}"}), 502
+    if any(o.get("price") is None for o in live_close_orders):
+        return jsonify({"error": "No executable best Bid for one or both close legs."}), 409
     custom_orders = body.get("orders")
-    legs_to_place = custom_orders if custom_orders else build_move_close_orders(position)
+    if custom_orders:
+        legs_to_place, order_error = _move_validate_custom_orders(position, custom_orders, closing=True)
+        if order_error:
+            return jsonify({"error": order_error}), 400
+    else:
+        legs_to_place = live_close_orders
     if not legs_to_place:
         return jsonify({"error": "No legs left to place — every leg was removed in the review screen."}), 400
+    live_bid_by_leg = {o["leg"]: _move_positive(o.get("price")) for o in live_close_orders}
+    for order in legs_to_place:
+        live_bid = live_bid_by_leg.get(order["leg"])
+        if live_bid is None or float(order["price"]) < live_bid * (1 - MOVE_MAX_ENTRY_SLIPPAGE_PCT / 100):
+            return jsonify({"error": f"{order['leg']} close limit is below the refreshed Bid/slippage cap; preview again."}), 409
 
-    results = place_basket_orders(legs_to_place, product, order_type)
+    results = _move_finalize_order_results(place_basket_orders(legs_to_place, product, order_type))
 
     entry_by_leg = {o["leg"]: o.get("entry_price") for o in legs_to_place}
     for r in results:
-        if r["status"] != "placed":
+        if r["status"] != "filled":
             continue
         entry_price = entry_by_leg.get(r["leg"])
         close_price = next((o.get("reference_price") for o in legs_to_place if o["leg"] == r["leg"]), None)
@@ -10980,9 +11690,10 @@ def move_close_confirm(pos_id):
             still_present = p
 
     any_failed = any(r["status"] == "failed" for r in results)
-    placed_count = sum(1 for r in results if r["status"] == "placed")
+    filled_count = sum(1 for r in results if r["status"] == "filled")
+    pending_count = sum(1 for r in results if r["status"] == "pending")
     total_legs = len(legs_to_place)
-    fully_closed = placed_count == total_legs and not any_failed
+    fully_closed = filled_count == total_legs and not any_failed
 
     if fully_closed and still_present:
         archive_closed_position(still_present, results)
@@ -10990,13 +11701,13 @@ def move_close_confirm(pos_id):
         note = (f"Position fully closed and archived to trade_history.json. Estimated realized P&L: "
                 f"₹{round(sum(r.get('estimated_realized_pnl', 0) for r in results), 2)} (based on quoted "
                 f"prices at close, not confirmed fills — check your contract note).")
-    elif any_failed and placed_count > 0:
+    elif any_failed and (filled_count + pending_count) > 0:
         note = ("PARTIAL CLOSE: one leg closed, one failed. You may now hold a mismatched position. "
                 "Open your Zerodha app / Kite web IMMEDIATELY to check and manually complete the close.")
     elif any_failed:
         note = "All legs failed — nothing was closed."
     else:
-        note = f"All {placed_count}/{total_legs} legs placed to close this position. Verify fills in your Zerodha app."
+        note = f"Filled {filled_count}/{total_legs}; {pending_count} close order(s) still pending. Position remains tracked until both fills are confirmed."
 
     save_move_positions(positions)
     return jsonify({"results": results, "fully_closed": fully_closed, "note": note})
