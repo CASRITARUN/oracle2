@@ -761,8 +761,8 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
     </div>
     <table id="mvScreenerTable" style="display:none;">
       <thead><tr>
-        <th>Rank</th><th>Symbol</th><th>Move Score</th><th>Squeeze</th><th>ADX (base/rising)</th>
-        <th>Volume</th><th>Near Trigger</th><th>ATM IV</th><th>IV/HV</th><th>Suggested</th><th>Event</th><th></th>
+        <th>Rank</th><th>Symbol</th><th>Entry Gate</th><th>Move Score</th><th>Squeeze</th><th>ADX (base/rising)</th>
+        <th>Volume</th><th>Near Trigger</th><th>ATM IV</th><th>Buyer IV Value</th><th>Spread / OI</th><th>Suggested</th><th>Event</th><th></th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -772,7 +772,8 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
       (Bollinger squeeze), an unusually narrow recent day (NR7), volume drying up (or already
       picking up), ADX still low or just turning up off a low base, and spot sitting close to a
       recent range edge — the classic pre-breakout "coiled spring" setup — combined with options
-      that are still relatively CHEAP to buy (low IV vs historical vol). Weights: squeeze 25%, IV
+      that are still relatively CHEAP to buy (low IV vs historical vol). The shortlist is now
+      liquidity-first instead of simply choosing the highest-ATR names. Weights: squeeze 25%, IV
       cheapness 25%, momentum building 20%, volume setup 15%, proximity to trigger 10%, scheduled
       event 5%. This is a fully independent module — it does not require the Option-Selling
       screener above to have been run, and does not predict direction, only that a move is more
@@ -796,16 +797,22 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
       <button class="secondary small-btn" id="mvLoadExpiriesBtn">Load Expiries</button>
       <label class="inline">Lots
         <input type="number" id="mvLotsInput" value="1" step="1" min="1" max="50" /></label>
-      <label class="inline" id="mvOtmWidthLabel" style="display:none;">Strangle width %
+      <label class="inline" id="mvSelectionLabel" style="display:none;">Strike selection
+        <select id="mvSelectionMode"><option value="smart_delta">Smart delta (recommended)</option><option value="fixed_otm">Fixed OTM width</option></select></label>
+      <label class="inline" id="mvTargetDeltaLabel" style="display:none;">Target |delta|
+        <input type="number" id="mvTargetDeltaInput" value="0.30" step="0.01" min="0.18" max="0.40" /></label>
+      <label class="inline" id="mvOtmWidthLabel" style="display:none;">Fixed strangle width %
         <input type="number" id="mvOtmPctInput" value="3" step="0.5" min="0.5" max="15" /></label>
+      <label class="inline">Max debit risk ₹
+        <input type="number" id="mvMaxRiskInput" value="25000" step="1000" min="1000" /></label>
       <button id="mvBuildBtn">Calculate</button>
       <span id="mvStrategyStatus" class="loading"></span>
     </div>
     <div class="legend">
       Straddle buys the same ATM strike on both call and put (simplest, closest breakevens).
-      Strangle buys an OTM call and OTM put at your chosen width (cheaper debit, but needs a
-      bigger move to reach breakeven). "Load Expiries" lets you pick a specific expiry — otherwise
-      the nearest valid one is used. Nothing is saved until you click "Track This Position".
+      Strangle defaults to balanced ~30-delta legs; fixed-width remains available for manual use.
+      The debit, loss and breakevens are calculated at best Ask, not an optimistic midpoint.
+      "Load Expiries" lets you pick a specific expiry. Nothing is saved until you click "Track This Position".
     </div>
 
     <div id="mvStrategyBox" style="display:none;">
@@ -825,8 +832,13 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
         <div class="metric"><div class="k">Breakevens</div><div class="v" id="mv_be"></div></div>
         <div class="metric"><div class="k">Move Needed (Up / Down)</div><div class="v" id="mv_move_needed"></div></div>
         <div class="metric"><div class="k">Est. Entry Charges</div><div class="v" id="mv_charges"></div></div>
+        <div class="metric"><div class="k">Ask Debit vs Mid</div><div class="v" id="mv_pricing"></div></div>
+        <div class="metric"><div class="k">Breakeven / Expected Move</div><div class="v" id="mv_be_ratio"></div></div>
+        <div class="metric"><div class="k">Risk Budget / Suggested Lots</div><div class="v" id="mv_risk_budget"></div></div>
+        <div class="metric"><div class="k">Exit Plan</div><div class="v" id="mv_exit_plan"></div></div>
       </div>
 
+      <div id="mvEntryGate" style="margin-top:12px;"></div>
       <div id="mv_warnings"></div>
 
       <h3 style="font-size:12px; color:var(--muted); text-transform:uppercase; margin-top:18px;">Payoff Chart (P&amp;L)</h3>
@@ -844,7 +856,8 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
       <h3 style="font-size:12px; color:var(--muted); text-transform:uppercase; margin-top:18px;">Why this setup / what's needed</h3>
       <div class="insight-grid">
         <div class="insight-card"><div class="k">Move Score</div><div class="v" id="mv_ins_score">—</div></div>
-        <div class="insight-card"><div class="k">IV / HV Ratio</div><div class="v" id="mv_ins_ivhv">—</div></div>
+        <div class="insight-card"><div class="k">Buyer IV Value</div><div class="v" id="mv_ins_ivhv">—</div></div>
+        <div class="insight-card"><div class="k">Leg Liquidity / Pricing</div><div class="v" id="mv_ins_liquidity">—</div></div>
         <div class="insight-card"><div class="k">Expected Move vs Breakeven</div><div class="v" id="mv_ins_em">—</div></div>
         <div class="insight-card"><div class="k">Squeeze / NR7</div><div class="v" id="mv_ins_squeeze">—</div></div>
         <div class="insight-card"><div class="k">Trend / ADX</div><div class="v" id="mv_ins_trend">—</div></div>
@@ -871,7 +884,7 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
       <thead><tr>
         <th>Symbol</th><th>Type</th><th>Qty</th><th>Entry Spot</th><th>Spot Now</th><th>Days Left</th>
         <th>Position Value</th><th>P&amp;L</th><th>Net P&amp;L (after charges)</th><th>% of Debit</th>
-        <th>Debit Paid (Max Loss)</th><th>Zone / Action</th><th></th>
+        <th>Peak / Giveback</th><th>Debit Paid (Max Loss)</th><th>Zone / Action</th><th></th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -879,9 +892,9 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
     <div class="legend">
       "Zone" shows whether spot is between the strikes (theta-bleed danger zone), moving toward a
       breakeven, already past a breakeven (in-the-money on a net basis), or near expiry. "Action"
-      is a rule-based suggestion only — book profit at {{100% of debit gained}}, cut loss at
-      {{45%+ of debit lost}}, or close before expiry if nothing has moved — it never places an
-      order automatically. Click "Prices" for a live per-leg breakdown, "Live Chart" for an updated
+      is a rule-based suggestion only: book/trim at +40%, cut premium loss at -30%, activate a
+      peak-P&amp;L trail after +25%, and use a time stop when theta is outrunning the move. It never
+      places an order automatically. P&amp;L is marked at executable Bid. Click "Prices" for a live per-leg breakdown, "Live Chart" for an updated
       payoff curve, "Execute" to actually BUY both legs at your broker, or "Close" to SELL both legs
       and square off.
     </div>
@@ -1098,7 +1111,7 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
         <button id="atRetrainBtn" type="button" onclick="atStartHistoricalRetrain()" style="padding:9px 13px;border:1px solid #2a7183;border-radius:9px;background:#0b2935;color:#8feafb;font-weight:800;cursor:pointer">▶ RETRAIN HISTORICAL GRU</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;margin-top:10px"><div style="height:8px;background:#07131d;border:1px solid #163247;border-radius:99px;overflow:hidden"><i id="atRetrainProgress" style="display:block;height:100%;width:0%;background:linear-gradient(90deg,#2bc9ef,#55e0ad);transition:width .35s"></i></div><b id="atRetrainPct" style="font:800 10px ui-monospace,monospace;color:#8feafb">0.0%</b></div>
-      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px"><div class="ai-metric"><small>PHASE</small><b id="atRetrainPhase" style="font-size:12px">—</b></div><div class="ai-metric"><small>EPOCH</small><b id="atRetrainEpoch" style="font-size:12px">—</b></div><div class="ai-metric"><small>ELAPSED</small><b id="atRetrainElapsed" style="font-size:12px">00:00</b></div><div class="ai-metric"><small>SAMPLES</small><b id="atRetrainSamples" style="font-size:12px">—</b></div><div class="ai-metric"><small>NEW ACC / AUC</small><b id="atRetrainQuality" style="font-size:12px">—</b></div></div>
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px"><div class="ai-metric"><small>PHASE</small><b id="atRetrainPhase" style="font-size:12px">—</b></div><div class="ai-metric"><small>EPOCH</small><b id="atRetrainEpoch" style="font-size:12px">—</b></div><div class="ai-metric"><small>ELAPSED</small><b id="atRetrainElapsed" style="font-size:12px">00:00</b></div><div class="ai-metric"><small>SAMPLES</small><b id="atRetrainSamples" style="font-size:12px">—</b></div><div class="ai-metric"><small id="atRetrainQualityLabel">NEW ACC / AUC</small><b id="atRetrainQuality" style="font-size:12px">—</b></div></div>
     </div>
     <div class="ai-note" id="atLearningDetail" style="margin-top:10px">Checking historical training and live learning status…</div>
   </section>
@@ -3008,9 +3021,50 @@ function atRenderVisualDashboard(state, prog, st) {
 }
 
 function atFmtElapsed(sec){sec=Math.max(0,Math.floor(Number(sec)||0));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return (h?String(h).padStart(2,"0")+":" : "")+String(m).padStart(2,"0")+":"+String(s).padStart(2,"0");}
-async function atReadHistoricalTraining(){try{const d=await aiGet("/api/ai-evolution/historical");const active=String(d.training_active||"0")==="1";const pct=Math.max(0,Math.min(100,Number(d.training_progress||0)));const phase=String(d.training_phase||d.model_status||d.status||"IDLE");const btn=document.getElementById("atRetrainBtn");if(btn){btn.disabled=active;btn.textContent=active?"⏳ TRAINING IN PROGRESS":"▶ RETRAIN HISTORICAL GRU";}const st=document.getElementById("atRetrainStatus");if(st)st.textContent=active?(phase+" · live backend status"):(phase==="COMPLETE"?"Training complete — model statistics updated.":phase);const pb=document.getElementById("atRetrainProgress");if(pb)pb.style.width=pct+"%";const pp=document.getElementById("atRetrainPct");if(pp)pp.textContent=pct.toFixed(1)+"%";setN("atRetrainPhase",phase.replace(/_/g," "));setN("atRetrainEpoch",d.training_epochs?((d.training_epoch||0)+" / "+d.training_epochs):"—");setN("atRetrainElapsed",atFmtElapsed(d.training_elapsed_sec));const ms=d.model||{};setN("atRetrainSamples",ms.samples?Number(ms.samples).toLocaleString("en-IN"):"—");setN("atRetrainQuality",ms.accuracy!=null?(Number(ms.accuracy).toFixed(1)+"% / "+(ms.auc==null?"—":Number(ms.auc).toFixed(3))):"—");const ql=document.getElementById("atRetrainQualityLabel");if(ql)ql.textContent=active?"CURRENT MODEL ACC / AUC":"NEW ACC / AUC";return active}catch(e){const st=document.getElementById("atRetrainStatus");if(st)st.textContent="Backend status unavailable: "+(e.message||e);return false;}}
+let atHistoricalTrainingPollBusy=false;
+let atHistoricalTrainingTimer=null;
+async function atReadHistoricalTraining(){
+  if(atHistoricalTrainingPollBusy)return null;
+  atHistoricalTrainingPollBusy=true;
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),8000);
+  try{
+    const r=await fetch("/api/ai-evolution/historical",{signal:controller.signal,cache:"no-store"});
+    const raw=await r.text();let d;
+    try{d=JSON.parse(raw)}catch(e){throw Error("Backend returned non-JSON (HTTP "+r.status+")")}
+    if(!r.ok)throw Error(d.error||d.message||"Request failed");
+    const active=String(d.training_active||"0")==="1";
+    const stalled=!!d.training_stalled;
+    const pct=Math.max(0,Math.min(100,Number(d.training_progress||0)));
+    const phase=String(d.training_phase||d.model_status||d.status||"IDLE");
+    const btn=document.getElementById("atRetrainBtn");
+    if(btn){btn.disabled=active;btn.textContent=active?(stalled?"⚠ TRAINING STALLED":"⏳ TRAINING IN PROGRESS"):"▶ RETRAIN HISTORICAL GRU";}
+    const st=document.getElementById("atRetrainStatus");
+    if(st){
+      if(stalled){const age=d.training_heartbeat_age_sec==null?"missing":Math.round(Number(d.training_heartbeat_age_sec||0))+"s old";st.textContent="Worker heartbeat is "+age+" — restart the backend, then retry.";}
+      else if(active)st.textContent=phase+" · worker heartbeat healthy";
+      else if(phase==="COMPLETE")st.textContent="Training complete — model statistics updated.";
+      else st.textContent=(d.training_error?phase+" · "+d.training_error:phase);
+    }
+    const pb=document.getElementById("atRetrainProgress");if(pb)pb.style.width=pct+"%";
+    const pp=document.getElementById("atRetrainPct");if(pp)pp.textContent=pct.toFixed(1)+"%";
+    setN("atRetrainPhase",phase.replace(/_/g," "));
+    setN("atRetrainEpoch",d.training_epochs?((d.training_epoch||0)+" / "+d.training_epochs):"—");
+    let elapsed=Number(d.training_elapsed_sec||0);
+    if(active&&d.training_started_at){const live=(Date.now()-new Date(d.training_started_at).getTime())/1000;if(Number.isFinite(live))elapsed=Math.max(elapsed,live);}
+    setN("atRetrainElapsed",atFmtElapsed(elapsed));
+    const ms=d.model||{};
+    const shownSamples=active?Number(d.training_samples||0):Number(ms.samples||d.training_samples||0);
+    setN("atRetrainSamples",shownSamples?shownSamples.toLocaleString("en-IN"):"—");
+    setN("atRetrainQuality",ms.accuracy!=null?(Number(ms.accuracy).toFixed(1)+"% / "+(ms.auc==null?"—":Number(ms.auc).toFixed(3))):"—");
+    const ql=document.getElementById("atRetrainQualityLabel");if(ql)ql.textContent=active?"CURRENT MODEL ACC / AUC":"NEW ACC / AUC";
+    return active;
+  }catch(e){
+    const st=document.getElementById("atRetrainStatus");if(st)st.textContent=(e.name==="AbortError"?"Backend status timed out — retrying…":"Backend status unavailable: "+(e.message||e));return false;
+  }finally{clearTimeout(timeout);atHistoricalTrainingPollBusy=false;}
+}
 async function atStartHistoricalRetrain(){const btn=document.getElementById("atRetrainBtn"),st=document.getElementById("atRetrainStatus");if(btn)btn.disabled=true;if(st)st.textContent="Starting historical GRU retraining…";try{const r=await fetch("/api/ai-evolution/historical/retrain",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});const raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw Error("Backend returned non-JSON (HTTP "+r.status+")")};if(!r.ok||d.ok===false)throw Error(d.message||d.error||"Retraining could not be started");await atReadHistoricalTraining();}catch(e){if(st)st.textContent="ERROR · "+e.message;if(btn)btn.disabled=false;}}
-function atStartTrainingHeartbeat(){atReadHistoricalTraining();setInterval(atReadHistoricalTraining,1000);}
+function atStartTrainingHeartbeat(){atReadHistoricalTraining();if(!atHistoricalTrainingTimer)atHistoricalTrainingTimer=setInterval(atReadHistoricalTraining,2000);}
 
 async function refreshAutoTradeAI() {
   try {
@@ -3076,6 +3130,9 @@ let mvCurrentMode = "straddle";
 let mvBuiltResult = null;
 let mvPayoffChartInstance = null;
 let mvSimBasis = null;  // {callStrike, putStrike, callIv, putIv, debit, quantity, spots, daysToExpiry}
+function mvEsc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
 
 // ---------- Minimal client-side Black-Scholes (mirrors backend bs_price) so the DTE slider can
 // re-simulate the curve instantly, with no extra server round-trip per drag. ----------
@@ -3107,17 +3164,26 @@ function mvSimulatedCurve(daysToExpiry) {
   });
 }
 
+function mvUpdateStrikeControls() {
+  const isStrangle = mvCurrentMode === "strangle";
+  const smart = document.getElementById("mvSelectionMode").value === "smart_delta";
+  document.getElementById("mvSelectionLabel").style.display = isStrangle ? "flex" : "none";
+  document.getElementById("mvTargetDeltaLabel").style.display = isStrangle && smart ? "flex" : "none";
+  document.getElementById("mvOtmWidthLabel").style.display = isStrangle && !smart ? "flex" : "none";
+}
+document.getElementById("mvSelectionMode").onchange = mvUpdateStrikeControls;
+
 document.getElementById("mvTypeStraddle").onclick = () => {
   mvCurrentMode = "straddle";
   document.getElementById("mvTypeStraddle").classList.add("active");
   document.getElementById("mvTypeStrangle").classList.remove("active");
-  document.getElementById("mvOtmWidthLabel").style.display = "none";
+  mvUpdateStrikeControls();
 };
 document.getElementById("mvTypeStrangle").onclick = () => {
   mvCurrentMode = "strangle";
   document.getElementById("mvTypeStrangle").classList.add("active");
   document.getElementById("mvTypeStraddle").classList.remove("active");
-  document.getElementById("mvOtmWidthLabel").style.display = "flex";
+  mvUpdateStrikeControls();
 };
 
 function mvQuickSymbol(sym) { document.getElementById("mvSymbolInput").value = sym; }
@@ -3150,13 +3216,17 @@ async function mvRunScreener(force = false) {
       const volTxt = sq.volume_dry_up ? "Dry-up" : sq.volume_pickup_today ? "Pickup" : (sq.volume_ratio_5v20 != null ? `${sq.volume_ratio_5v20}x` : "—");
       const nearTxt = sq.near_breakout_trigger ? `<span class="pill warn">Near edge</span>` : "—";
       const ivHv = s.iv_hv ? `${s.iv_hv.ratio} ${s.iv_hv.label || ""}` : "—";
+      const buyerValue = s.long_vol_value ? `${s.long_vol_value.label} (${s.iv_hv?.ratio ?? "—"}x)` : ivHv;
+      const gateClass = s.entry_status === "READY" ? "ok" : s.entry_status === "AVOID" ? "bad" : "warn";
+      const liquidityTxt = `${s.atm_spread_pct != null ? s.atm_spread_pct + "%" : "—"} / ${(s.atm_oi_total || 0).toLocaleString()}`;
       const eventTxt = s.near_macro_event ? `<span class="pill warn">Macro event soon</span>` : "—";
       const tr = document.createElement("tr");
       tr.innerHTML = `<td>${s.rank || i + 1}/${s.total || d.eligible_count || 0}</td>
         <td><b>${s.symbol}</b>${s.fo_banned_today ? " 🚫" : ""}</td>
+        <td><span class="pill ${gateClass}">${s.entry_status || "WAIT"}</span></td>
         <td><b>${s.move_score}</b> ${s.move_score_label || ""}</td>
         <td>${squeezeTxt}${nr7Txt}</td><td>${adxTxt}</td><td>${volTxt}</td><td>${nearTxt}</td>
-        <td>${s.atm_iv_pct != null ? s.atm_iv_pct + "%" : "—"}</td><td>${ivHv}</td>
+        <td>${s.atm_iv_pct != null ? s.atm_iv_pct + "%" : "—"}</td><td>${buyerValue}</td><td>${liquidityTxt}</td>
         <td>${s.suggested_mode}</td><td>${eventTxt}</td>
         <td><button class="secondary small-btn" onclick="mvUseSymbol('${s.symbol}')">Use</button></td>`;
       tbody.appendChild(tr);
@@ -3195,7 +3265,7 @@ document.getElementById("mvLoadExpiriesBtn").onclick = async () => {
 };
 
 // ---------- Build / Calculate ----------
-function mvFmtMoney(v) { return v == null ? "—" : "₹" + v; }
+function mvFmtMoney(v) { return v == null ? "—" : "₹" + Number(v).toLocaleString("en-IN", {maximumFractionDigits: 2}); }
 
 document.getElementById("mvBuildBtn").onclick = async () => {
   const sym = document.getElementById("mvSymbolInput").value.trim().toUpperCase();
@@ -3208,9 +3278,13 @@ document.getElementById("mvBuildBtn").onclick = async () => {
   const otmPct = (document.getElementById("mvOtmPctInput").value || 3) / 100;
   const lots = document.getElementById("mvLotsInput").value || 1;
   const expiry = document.getElementById("mvExpirySelect").value;
+  const selectionMode = document.getElementById("mvSelectionMode").value;
+  const targetDelta = document.getElementById("mvTargetDeltaInput").value || 0.30;
+  const maxRisk = document.getElementById("mvMaxRiskInput").value || 25000;
 
   try {
-    const params = new URLSearchParams({mode: mvCurrentMode, otm_pct: otmPct, lots});
+    const params = new URLSearchParams({mode: mvCurrentMode, otm_pct: otmPct, lots,
+      selection_mode: selectionMode, target_delta: targetDelta, max_risk_rupees: maxRisk});
     if (expiry) params.append("expiry", expiry);
     const r = await apiFetch(`/api/move-strategy/${sym}?${params}`);
     const d = await r.json();
@@ -3233,7 +3307,9 @@ document.getElementById("mvBuildBtn").onclick = async () => {
       const div = document.createElement("div");
       div.className = "leg-card";
       div.innerHTML = `<div class="k">${label}</div><div style="font-size:14px;">Strike ${lg.strike}</div>
-        <div>LTP ₹${lg.ltp} (mid ₹${lg.mid})</div><div style="color:var(--muted); font-size:12px;">Δ ${lg.delta} · IV ${lg.iv}% · OI ${lg.oi}</div>`;
+        <div>Buy mark ₹${lg.entry_price} (${lg.pricing_source}) · Mid ₹${lg.mid}</div>
+        <div style="color:var(--muted); font-size:12px;">Bid/Ask ₹${lg.bid ?? "—"} / ₹${lg.ask ?? "—"} · Spread ${lg.spread_pct ?? "—"}%</div>
+        <div style="color:var(--muted); font-size:12px;">Δ ${lg.delta} · IV ${lg.iv}% · OI ${(lg.oi || 0).toLocaleString()} · Vol ${(lg.volume || 0).toLocaleString()}</div>`;
       legGrid.appendChild(div);
     });
 
@@ -3242,14 +3318,29 @@ document.getElementById("mvBuildBtn").onclick = async () => {
     document.getElementById("mv_be").textContent = `${d.breakeven_lower} — ${d.breakeven_upper}`;
     document.getElementById("mv_move_needed").textContent = `+${d.move_required_up_pct}% / -${d.move_required_down_pct}%`;
     document.getElementById("mv_charges").textContent = mvFmtMoney(d.estimated_entry_charges?.total);
+    document.getElementById("mv_pricing").textContent = `Ask ₹${d.executable_debit_per_share} vs mid ₹${d.mid_debit_per_share} (+${d.entry_slippage_pct ?? "—"}%)`;
+    document.getElementById("mv_be_ratio").textContent = d.breakeven_expected_move_ratio != null ? `${d.breakeven_expected_move_ratio}×` : "—";
+    document.getElementById("mv_risk_budget").textContent = `${mvFmtMoney(d.max_risk_rupees)} · ${mvFmtMoney(d.risk_per_lot)}/lot · max ${d.recommended_lots} lot(s)`;
+    const rp = d.risk_plan || {};
+    document.getElementById("mv_exit_plan").textContent = `Target +${rp.profit_target_pct_of_debit ?? 40}% · Stop -${rp.stop_loss_pct_of_debit ?? 30}% · trail after +${rp.trail_activate_pct_of_debit ?? 25}% · time stop ${rp.time_stop_after_pct ?? 40}%/${rp.time_stop_if_move_below_pct ?? 35}%`;
+
+    const gate = d.entry_gate || {decision: "WAIT", blockers: [], warnings: []};
+    const gateColor = gate.decision === "ENTER" ? "#66d9a6" : gate.decision === "AVOID" ? "#ff7b89" : "#e0b25a";
+    const gateItems = [...(gate.blockers || []).map(x => `BLOCK: ${x}`), ...(gate.warnings || [])];
+    document.getElementById("mvEntryGate").innerHTML = `<div style="border:1px solid ${gateColor}; border-radius:8px; padding:10px 12px; color:${gateColor};">
+      <b>Entry Gate: ${gate.decision}</b> · ${gate.trade_ready ? "All execution checks passed." : "Tracking is allowed, but live entry is blocked until READY."}
+      ${gateItems.length ? `<ul style="margin:6px 0 0 18px; color:var(--muted);">${gateItems.map(x => `<li>${mvEsc(x)}</li>`).join("")}</ul>` : ""}</div>`;
+    const trackBtn = document.getElementById("mvTrackBtn");
+    trackBtn.textContent = gate.trade_ready ? "Track Ready Position" : "Track for Research (not executable)";
 
     const warnDiv = document.getElementById("mv_warnings");
     warnDiv.innerHTML = "";
-    if (d.entry_event_warning) warnDiv.innerHTML += `<div class="legend" style="color:#e0b25a;">⚠️ ${d.entry_event_warning}</div>`;
-    if (d.event_before_expiry) warnDiv.innerHTML += `<div class="legend" style="color:#e0b25a;">⚠️ ${d.event_before_expiry.label} on ${d.event_before_expiry.date} (${d.event_before_expiry.days_away}d away) falls before this expiry.</div>`;
+    if (d.entry_event_warning) warnDiv.innerHTML += `<div class="legend" style="color:#e0b25a;">⚠️ ${mvEsc(d.entry_event_warning)}</div>`;
+    if (d.event_before_expiry) warnDiv.innerHTML += `<div class="legend" style="color:#e0b25a;">⚠️ ${mvEsc(d.event_before_expiry.label)} on ${mvEsc(d.event_before_expiry.date)} (${d.event_before_expiry.days_away}d away) falls before this expiry.</div>`;
 
     document.getElementById("mv_ins_score").textContent = `${d.move_score} — ${d.move_score_label}`;
-    document.getElementById("mv_ins_ivhv").textContent = d.iv_hv ? `${d.iv_hv.ratio} (${d.iv_hv.label}) · ATM IV ${d.atm_iv_pct}% vs HV ${d.hv_annualized_pct}%` : "—";
+    document.getElementById("mv_ins_ivhv").textContent = d.iv_hv ? `${d.long_vol_value?.label || "—"} · ${d.iv_hv.ratio}x · ATM IV ${d.atm_iv_pct}% vs HV ${d.hv_annualized_pct}%` : "—";
+    document.getElementById("mv_ins_liquidity").textContent = `Call ${d.legs.buy_call.spread_pct ?? "—"}% / OI ${(d.legs.buy_call.oi || 0).toLocaleString()} · Put ${d.legs.buy_put.spread_pct ?? "—"}% / OI ${(d.legs.buy_put.oi || 0).toLocaleString()} · ${d.selection_used}`;
     document.getElementById("mv_ins_em").textContent = d.expected_move_vs_breakeven || "—";
     const sq = d.squeeze;
     document.getElementById("mv_ins_squeeze").textContent = sq ? `${sq.is_squeeze ? "Squeeze" : "No squeeze"}${sq.is_nr7 ? " + NR7" : ""} (width %ile ${sq.bb_width_percentile})` : (d.squeeze_note || "—");
@@ -3368,10 +3459,14 @@ document.getElementById("mvTrackBtn").onclick = async () => {
   const otmPct = (document.getElementById("mvOtmPctInput").value || 3) / 100;
   const lots = document.getElementById("mvLotsInput").value || 1;
   const expiry = document.getElementById("mvExpirySelect").value || null;
+  const selectionMode = document.getElementById("mvSelectionMode").value;
+  const targetDelta = document.getElementById("mvTargetDeltaInput").value || 0.30;
+  const maxRisk = document.getElementById("mvMaxRiskInput").value || 25000;
   try {
     const r = await apiFetch("/api/move-watchlist/add", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({symbol: sym, mode: mvCurrentMode, otm_pct: otmPct, lots, expiry})
+      body: JSON.stringify({symbol: sym, mode: mvCurrentMode, otm_pct: otmPct, lots, expiry,
+        selection_mode: selectionMode, target_delta: targetDelta, max_risk_rupees: maxRisk})
     });
     const d = await r.json();
     if (d.error) { status.textContent = "Error: " + d.error; return; }
@@ -3413,7 +3508,7 @@ async function mvLoadWatchlist() {
       const tr = document.createElement("tr");
       if (p.mtm_error) {
         tr.innerHTML = `<td>${p.symbol}</td><td>${typeLabel}</td><td>${qty}</td><td>${p.entry_spot ?? "-"}</td>
-                        <td colspan="7" style="color:var(--red);">${p.mtm_error}</td>
+                        <td colspan="9" style="color:var(--red);">${p.mtm_error}</td>
                         <td><button class="secondary small-btn" onclick="mvRemovePosition('${p.id}')">Remove</button></td>`;
         tbody.appendChild(tr);
         return;
@@ -3436,20 +3531,31 @@ async function mvLoadWatchlist() {
         zoneCell += ` <span class="pill ${digestPillClass}" title="${(digest.headline || "").replace(/"/g, "&quot;")}">${digest.action.replace(/_/g, " ")}</span>`;
       }
       const detailId = `mv_legdetail_${p.id}`;
+      const brokerOrders = p.broker_orders || [];
+      const activeEntryLegs = new Set(brokerOrders.filter(o => o.transaction_type === "BUY" && ["placed", "pending", "filled"].includes(o.status)).map(o => o.leg));
+      const filledEntryLegs = new Set(brokerOrders.filter(o => o.transaction_type === "BUY" && o.status === "filled").map(o => o.leg));
+      const activeClose = brokerOrders.some(o => o.transaction_type === "SELL" && ["placed", "pending", "filled"].includes(o.status));
+      const entryReady = (p.entry_gate ? !!p.entry_gate.trade_ready : true) && activeEntryLegs.size === 0;
+      const canClose = filledEntryLegs.has("buy_call") && filledEntryLegs.has("buy_put") && !activeClose;
+      if (filledEntryLegs.has("buy_call") && filledEntryLegs.has("buy_put")) zoneCell += ` <span class="pill ok">Broker filled</span>`;
+      else if (activeEntryLegs.size) zoneCell += ` <span class="pill warn">Entry pending/partial</span>`;
+      else zoneCell += ` <span class="pill warn">Research only</span>`;
+      const peakTxt = `${mvFmtMoney(p.current.peak_pnl)} / ${mvFmtMoney(p.current.giveback_from_peak)} back`;
       tr.innerHTML = `<td>${p.symbol}</td><td>${typeLabel}</td><td>${qty}</td><td>${p.entry_spot}</td><td>${p.current.spot}</td>
                       <td>${p.current.days_left}</td>
                       <td>₹${p.current.current_position_value}</td>
                       <td class="${pnlClass}">₹${p.current.pnl}</td>
                       <td class="${netPnlClass}" title="After estimated round-trip charges: ₹${p.current.estimated_round_trip_charges}">₹${p.current.net_pnl_after_charges}</td>
                       <td>${p.current.pct_of_debit ?? "-"}%</td>
+                      <td title="Peak P&amp;L / giveback from peak">${peakTxt}</td>
                       <td>₹${p.entry_max_loss}</td>
                       <td>${zoneCell}</td>
                       <td>
                         <div class="action-cell">
                           <button class="secondary small-btn" onclick="mvToggleLegDetail('${detailId}')">Prices</button>
                           <button class="secondary small-btn" onclick="mvShowLiveCurve('${p.id}')">Live Chart</button>
-                          <button class="small-btn" onclick="mvExecutePosition('${p.id}')">Execute</button>
-                          <button class="danger small-btn" onclick="mvClosePosition('${p.id}')">Close</button>
+                          <button class="small-btn" onclick="mvExecutePosition('${p.id}')" ${entryReady ? "" : "disabled"} title="${entryReady ? "Entry gate READY" : "Live entry blocked: tracked for research only"}">Execute</button>
+                          <button class="danger small-btn" onclick="mvClosePosition('${p.id}')" ${canClose ? "" : "disabled"} title="${canClose ? "Both entry legs filled" : "Close enabled only after both recorded BUY fills; reconcile manual/partial trades at broker"}">Close</button>
                           <button class="secondary small-btn" onclick="mvRemovePosition('${p.id}')">Remove</button>
                         </div>
                       </td>`;
@@ -3459,7 +3565,7 @@ async function mvLoadWatchlist() {
       detailTr.id = detailId;
       detailTr.style.display = "none";
       const legLabels = {buy_call: "Buy Call", buy_put: "Buy Put"};
-      let legHtml = `<td colspan="13"><div style="display:flex; gap:20px; padding:10px 0; flex-wrap:wrap;">`;
+      let legHtml = `<td colspan="14"><div style="display:flex; gap:20px; padding:10px 0; flex-wrap:wrap;">`;
       Object.keys(legLabels).forEach(k => {
         const lg = p.current.legs_current && p.current.legs_current[k];
         if (!lg) return;
@@ -3467,7 +3573,8 @@ async function mvLoadWatchlist() {
         const deltaLine = lg.current_delta !== undefined ? `<div style="color:var(--muted); font-size:11px;">Current delta: ${lg.current_delta}</div>` : "";
         legHtml += `<div style="background:#0f1115; border-radius:6px; padding:8px 12px; min-width:190px;">
                       <div style="color:var(--muted); font-size:11px;">${legLabels[k]} (strike ${lg.strike})</div>
-                      <div style="font-size:13px;">Entry ₹${lg.entry_price} → LTP ₹${lg.current_price}</div>
+                      <div style="font-size:13px;">Entry Ask ₹${lg.entry_price} → executable ${lg.price_source} ₹${lg.current_price}</div>
+                      <div style="color:var(--muted); font-size:11px;">Bid/Ask ₹${lg.bid ?? "—"} / ₹${lg.ask ?? "—"} · spread ${lg.spread_pct ?? "—"}%</div>
                       <div class="${legPnlClass}" style="font-size:13px;">P&amp;L ₹${lg.pnl}</div>
                       ${deltaLine}
                     </div>`;
@@ -3483,6 +3590,7 @@ async function mvLoadWatchlist() {
                         Move realized ${digest.realized_move_pct ?? "-"}%${digest.move_progress_pct != null ? ` (${digest.move_progress_pct}% of entry-expected move)` : ""} ·
                         Time elapsed ${digest.time_progress_pct ?? "-"}% of window ·
                         IV ${digest.entry_atm_iv_pct ?? "-"} → ${digest.atm_iv_now ?? "-"}${digest.iv_change_pct != null ? ` (${digest.iv_change_pct > 0 ? "+" : ""}${digest.iv_change_pct}%)` : ""} ·
+                        Peak ${mvFmtMoney(digest.peak_pnl)} · Giveback ${mvFmtMoney(digest.giveback_from_peak)}${digest.trail_active ? " · Trail active" : ""} ·
                         Momentum: ${digest.momentum} · Event: ${digest.event_status.replace(/_/g, " ")}
                       </div>
                     </div>`;
@@ -3530,7 +3638,7 @@ async function mvExecutePosition(id) {
   try {
     const r = await apiFetch(`/api/move-execute/${id}/preview`);
     const d = await r.json();
-    if (d.error) { alert(d.error); return; }
+    if (d.error) { alert(d.error + (d.blockers?.length ? "\n\n" + d.blockers.join("\n") : "")); return; }
     const lines = d.orders.map(o => `${o.transaction_type} ${o.tradingsymbol} x${o.quantity} @ ~₹${o.recommended_limit_price ?? o.ltp ?? "MARKET"} (${o.price_source})`).join("\n");
     const ok = confirm(`This will place REAL orders on your Zerodha account:\n\n${lines}\n\n${d.warning}\n\nProceed with LIMIT orders at the prices shown?`);
     if (!ok) return;
@@ -3551,13 +3659,16 @@ async function mvClosePosition(id) {
   try {
     const r = await apiFetch(`/api/move-execute/${id}/close/preview`);
     const d = await r.json();
-    if (d.error) { alert(d.error); return; }
-    const lines = d.orders.map(o => `${o.transaction_type} ${o.tradingsymbol} x${o.quantity} @ ~₹${o.reference_price ?? "MARKET"}`).join("\n");
-    const ok = confirm(`This will CLOSE the position (real orders):\n\n${lines}\n\n${d.warning}\n\nProceed at MARKET?`);
+    if (d.error) { alert(d.error + (d.blockers?.length ? "\n\n" + d.blockers.join("\n") : "")); return; }
+    const lines = d.orders.map(o => `${o.transaction_type} ${o.tradingsymbol} x${o.quantity} @ ₹${o.reference_price ?? "—"} LIMIT (${o.price_source || "BID"})`).join("\n");
+    const ok = confirm(`This will CLOSE the position (real orders):\n\n${lines}\n\n${d.warning}\n\nProceed with the displayed marketable LIMIT orders?`);
     if (!ok) return;
+    const orders = d.orders.map(o => ({leg: o.leg, tradingsymbol: o.tradingsymbol,
+      transaction_type: o.transaction_type, quantity: o.quantity, price: o.reference_price,
+      reference_price: o.reference_price, entry_price: o.entry_price}));
     const cr = await apiFetch(`/api/move-execute/${id}/close/confirm`, {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({confirmed: true, product: "NRML", order_type: "MARKET"})
+      body: JSON.stringify({confirmed: true, product: "NRML", order_type: "LIMIT", orders})
     });
     const cd = await cr.json();
     alert(cd.note || JSON.stringify(cd));
