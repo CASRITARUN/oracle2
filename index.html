@@ -953,187 +953,37 @@ body.ai-evolution-mode .top-tab-btn.active { color:#20252b; border-bottom-color:
 #atAI .cfg-grid input{background:#0a1520;border:1px solid #1d3548;color:#eef6fc;border-radius:8px;padding:7px 8px;font-size:12px}
 @media(max-width:1000px){#atAI .cfg-grid{grid-template-columns:repeat(2,1fr)}}
 </style>
-<div id="atAI"><div class="ai-wrap">
+<!-- AI_DESK_V2_START -->
+<style>
+/* AI Desk v2: restrained midnight/ivory workspace, electric chart accents. */
+#atAI #desk{--dk-bg:#0c1017;--dk-panel:#131a24;--dk-line:#27303c;--dk-muted:#94a2b5;--dk-text:#f0f3f7;--dk-green:#b1ef65;--dk-blue:#8bb6ff;background:var(--dk-bg);color:var(--dk-text);font:14px/1.55 Inter,system-ui,-apple-system,sans-serif;padding:28px;max-width:1680px;margin:auto;border:1px solid var(--dk-line);border-radius:16px;color-scheme:dark}
+#desk *{box-sizing:border-box}#desk h1,#desk h2,#desk h3,#desk p{margin:0}#desk h1{font-size:25px;letter-spacing:-.7px;line-height:1.3}#desk h1>span{font:12px ui-monospace,monospace;color:var(--dk-green);vertical-align:top;margin-left:8px}#desk h2{font-size:19px;letter-spacing:-.35px;font-weight:620;color:var(--dk-text);margin-bottom:6px}#desk h3{font-size:14px;margin:24px 0 10px}#desk p{font-size:14px}#desk small{font-size:12px}#desk button,#desk select,#desk input{font:inherit;border:1px solid #364150;border-radius:7px;padding:9px 13px;background:#1b2430;color:var(--dk-text);min-height:40px;box-shadow:none;cursor:pointer}#desk button:hover{background:#2a3746;border-color:#627080}#desk button:disabled{opacity:.45;cursor:not-allowed}#desk button:focus-visible,#desk select:focus-visible,#desk input:focus-visible{outline:2px solid var(--dk-blue);outline-offset:3px}#desk .dk-primary{background:var(--dk-green);border-color:var(--dk-green);color:#162205;font-weight:700}#desk .dk-primary:hover{background:#c9fc8f}#desk .dk-danger{color:#ffa5a2;background:#331d26;border-color:#6c3841}#desk .dk-text-btn{border:0;background:none;color:var(--dk-blue);padding:4px 0}#desk .dk-head,#desk .dk-brand,#desk .dk-head-right,#desk .dk-toolbar,#desk .dk-actions,#desk .dk-title,#desk .dk-section-intro{display:flex;align-items:center;justify-content:space-between;gap:16px}#desk .dk-brand{justify-content:flex-start}#desk .dk-brand p{color:var(--dk-muted);font-size:12px;margin-top:3px}#desk .dk-mark{display:grid;place-items:center;width:44px;height:44px;background:var(--dk-green);color:#13230a;font-size:27px;font-weight:750;border-radius:9px;position:relative}#desk .dk-mark span{position:absolute;right:4px;top:-2px;font-size:17px}#desk .dk-head-right{font:12px ui-monospace,monospace}#desk .dk-badge{display:inline-flex;align-items:center;border:1px solid #3a4555;color:#c9d2e0;background:#1b2532;border-radius:5px;padding:3px 8px;font-size:12px;white-space:nowrap}#desk .dk-badge.good{color:var(--dk-green);border-color:#546a36}#desk .dk-toolbar{padding:22px 0 18px;margin-top:10px;border-bottom:1px solid var(--dk-line);flex-wrap:wrap}#desk nav{display:flex;gap:6px;flex-wrap:wrap}#desk nav button{background:transparent;color:var(--dk-muted);border-color:transparent}#desk nav .selected{background:#202b39;color:white;border-color:#394553}#desk #dkNotice{border-left:3px solid var(--dk-blue);background:#162232;color:#c6d7f5;margin:20px 0;padding:12px 16px;min-height:46px}#desk #dkNotice.error{border-color:#f89994;background:#301c24;color:#ffb7b3}#desk .dk-view[hidden]{display:none!important}#desk .dk-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--dk-line);border:1px solid var(--dk-line);border-radius:10px;overflow:hidden;margin-bottom:20px}#desk .dk-metrics article{background:#111822;padding:20px 22px;display:flex;flex-direction:column;gap:6px}#desk .dk-metrics article>span{color:#aab7c8;font-size:12px}#desk .dk-metrics strong{font:500 29px/1.2 ui-monospace,SFMono-Regular,monospace;letter-spacing:-1px}#desk .dk-metrics small{color:var(--dk-muted)}#desk .dk-workspace{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px}#desk main,#desk aside{min-width:0}#desk .dk-panel{padding:22px;background:var(--dk-panel);border:1px solid var(--dk-line);border-radius:10px;margin-bottom:20px;min-width:0}#desk .dk-eyebrow{font:11px/1.5 ui-monospace,monospace!important;letter-spacing:1.5px;color:var(--dk-muted);margin-bottom:8px}#desk .dk-title{margin-bottom:18px;flex-wrap:wrap}#desk .dk-symbols{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:20px 0}#desk .dk-symbols button{text-align:left;padding:12px;background:#101720;border-color:#2b3745}#desk .dk-symbols button.selected{border-color:var(--dk-blue);background:#1a293e}#desk .dk-symbols b{display:block;font-size:13px}#desk .dk-symbols span{display:block;color:var(--dk-muted);font:12px ui-monospace,monospace;margin-top:4px}#desk .dk-chart-head{display:flex;align-items:end;justify-content:space-between;gap:12px}#desk .dk-chart-head strong{font:34px ui-monospace,monospace;display:block;margin-top:3px;letter-spacing:-1px}#desk .dk-chart-head>span{font-size:12px;color:var(--dk-muted)}#desk .dk-chart{height:260px;margin-top:16px;width:100%}#desk .dk-chart svg{width:100%;height:100%;display:block;overflow:visible}#desk .dk-chart-caption{display:flex;justify-content:space-between;color:var(--dk-muted);font:10px ui-monospace,monospace;margin-top:12px;gap:10px}#desk .dk-empty{padding:38px 16px;text-align:center;color:var(--dk-muted);font-size:14px;display:grid;align-content:center;min-height:100px;border:1px dashed #364150;border-radius:6px}#desk .dk-chart .dk-empty{height:100%}#desk .dk-signal{border-top:3px solid var(--dk-green)}#desk .dk-signal-title{display:flex;justify-content:space-between;align-items:center;gap:5px}#desk .dk-prob{display:flex;gap:12px;align-items:center;margin:22px 0 14px}#desk .dk-prob strong{font:44px/1 ui-monospace,monospace;letter-spacing:-2px;color:var(--dk-green)}#desk .dk-prob span{font-size:12px;color:var(--dk-muted)}#desk .dk-prob-track{height:8px;border-radius:2px;background:#344354;position:relative}#desk .dk-prob-track i{display:block;height:100%;background:var(--dk-green);width:0;transition:width .4s}#desk .dk-prob-track b{position:absolute;left:50%;top:-3px;width:1px;height:14px;background:#8a9bb0}#desk .dk-prob-labels{display:flex;justify-content:space-between;margin-top:7px;font:10px ui-monospace,monospace;color:var(--dk-muted)}#desk .dk-reason{background:#1d2938;border:1px solid #354357;padding:13px;margin:20px 0;color:#d5dfef;font-size:14px;border-radius:6px}#desk .dk-kv{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--dk-line);font-size:13px}#desk .dk-kv span{color:var(--dk-muted)}#desk .dk-kv b{font:13px ui-monospace,monospace;text-align:right}#desk .dk-factor{display:grid;grid-template-columns:1fr 75px 42px;gap:9px;align-items:center;margin:10px 0;font-size:12px;color:#bcc8d8}#desk .dk-factor-track{height:4px;background:#303c4b}#desk .dk-factor-track i{display:block;height:100%;background:var(--dk-blue)}#desk .dk-factor b{font:11px ui-monospace,monospace;text-align:right}#desk .dk-footnote{font-size:12px!important;line-height:1.7;color:var(--dk-muted);margin-top:16px!important}#desk .dk-muted{color:var(--dk-muted);font-size:13px}#desk .dk-gate{display:grid;grid-template-columns:20px 1fr auto;gap:9px;align-items:center;margin:14px 0;font-size:12px}#desk .dk-gate i{font-style:normal;color:#77899f}#desk .dk-gate.pass i{color:var(--dk-green)}#desk .dk-gate b{font:12px ui-monospace,monospace;color:#b2c2d8}#desk .dk-table-wrap{overflow-x:auto;margin-top:16px}#desk table{width:100%;border-collapse:collapse;text-align:left;font-size:12px;white-space:nowrap}#desk th{font:11px ui-monospace,monospace;color:var(--dk-muted);padding:10px 12px;border-bottom:1px solid #3b4655;background:transparent;text-transform:uppercase}#desk td{padding:14px 12px;border-bottom:1px solid var(--dk-line);background:transparent;color:#d5deea;font:12px ui-monospace,monospace}#desk td:first-child,#desk th:first-child{padding-left:0}#desk .positive{color:var(--dk-green)!important}#desk .negative{color:#ffa19a!important}#desk .dk-event{display:grid;grid-template-columns:55px 70px 1fr;gap:12px;padding:13px 0;border-bottom:1px solid var(--dk-line);font-size:12px}#desk .dk-event time{font:11px ui-monospace,monospace;color:var(--dk-muted)}#desk .dk-event b{font:11px ui-monospace,monospace;color:var(--dk-blue)}#desk .dk-section-intro{margin:28px 0;align-items:flex-start;flex-wrap:wrap}#desk .dk-section-intro h2{font-size:25px}#desk .dk-section-intro p:not(.dk-eyebrow){color:var(--dk-muted);margin-top:8px}#desk .dk-learning-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}#desk .dk-step{display:block;font:11px ui-monospace,monospace;color:var(--dk-green);margin:4px 0 20px}#desk .dk-progress{height:7px;background:#303c49;border-radius:3px;overflow:hidden}#desk .dk-progress i{height:100%;display:block;background:var(--dk-green);width:0;transition:width .4s}#desk .dk-settings{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-bottom:25px}#desk .dk-settings label{display:flex;flex-direction:column;gap:8px;color:#b8c5d6;font-size:13px}#desk .dk-settings input{width:100%;cursor:text;background:#0e151f}#desk .dk-rules{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:20px}#desk .dk-rules p{color:var(--dk-muted);line-height:1.8}#desk .dk-rules strong{color:var(--dk-text)}#desk .dk-footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;color:#7f91a6;font:10px ui-monospace,monospace;border-top:1px solid var(--dk-line);padding-top:22px;margin-top:15px}#desk dialog{color:var(--dk-text);background:#17202c;border:1px solid #53647a;border-radius:12px;padding:30px;max-width:470px;width:90vw}#desk dialog::backdrop{background:#000a;backdrop-filter:blur(4px)}#desk dialog p{color:#b8c7da;margin:15px 0 24px}#desk dialog .dk-actions{justify-content:flex-end}
+@media(max-width:1100px){#atAI #desk{padding:20px}#desk .dk-workspace{grid-template-columns:minmax(0,1fr) 300px}#desk .dk-metrics strong{font-size:23px}#desk .dk-panel{padding:17px}#desk .dk-learning-grid{grid-template-columns:1fr}}
+@media(max-width:820px){#desk .dk-workspace{grid-template-columns:1fr}#desk aside{display:grid;grid-template-columns:1fr 1fr;gap:16px}#desk .dk-signal{grid-column:1/-1}#desk .dk-metrics{grid-template-columns:1fr 1fr}#desk .dk-settings{grid-template-columns:1fr 1fr}#desk .dk-head{align-items:flex-start}#desk .dk-head-right{flex-direction:column;align-items:flex-end}#desk .dk-toolbar>.dk-actions{width:100%}#desk .dk-prob{justify-content:flex-start}}
+@media(max-width:520px){#atAI #desk{padding:14px;border-radius:0}#desk h1{font-size:20px}#desk .dk-head-right{font-size:10px}#desk .dk-mark{display:none}#desk nav{gap:0}#desk nav button{font-size:12px;padding:8px 9px}#desk .dk-toolbar>.dk-actions{gap:7px;flex-wrap:wrap}#desk .dk-actions button,#desk .dk-actions select{font-size:12px;padding:8px 10px}#desk .dk-metrics article{padding:15px}#desk .dk-metrics strong{font-size:22px}#desk aside,#desk .dk-settings,#desk .dk-rules{display:block}#desk .dk-settings label{margin-bottom:18px}#desk .dk-chart{height:210px}#desk .dk-chart-head{align-items:start;flex-direction:column}#desk .dk-chart-head strong{font-size:28px}#desk .dk-symbols button{padding:9px 6px}#desk .dk-symbols b{font-size:11px}#desk .dk-symbols span{font-size:10px}#desk .dk-footer span:nth-child(2){display:none}}
 
-  <section class="atv-dashboard">
-    <div class="atv-head">
-      <div class="atv-brand">
-        <div class="atv-logo">🤖</div>
-        <div><div class="atv-title">AI AUTO BUY/SELL INDEX</div><div class="atv-subtitle">LEARN → PREDICT → SELECT → BUY → REASSESS → HOLD / REDUCE / SELL</div></div>
-      </div>
-      <div class="atv-status">
-        <div class="atv-status-box"><small>ENGINE STATUS</small><b id="atvEngineStatus">● DISARMED · PAPER</b><span id="atvNextScan">Waiting for live scan</span></div>
-        <div class="atv-clock"><b id="atvClock">--:--:--</b><span id="atvDate">--</span></div>
-      </div>
-    </div>
-
-    <div class="atv-kpis">
-      <div class="atv-kpi cyan"><small>Execution Mode</small><b id="atvMode">PAPER / TRACK</b><em>No real orders</em></div>
-      <div class="atv-kpi"><small>Positions</small><b id="atvPositions">0 / 3</b><em>Concurrent</em></div>
-      <div class="atv-kpi green"><small>Today P&amp;L · Paper</small><b id="atvPnl">₹0</b><em id="atvPnlPct">—</em></div>
-      <div class="atv-kpi"><small>Win Rate</small><b id="atvWin">—</b><em id="atvWinDetail">Paper track</em></div>
-      <div class="atv-kpi"><small>Avg R / Profit Factor</small><b id="atvRpf">—</b><em>Out-of-sample</em></div>
-      <div class="atv-kpi red"><small>Daily Loss Limit</small><b id="atvLoss">₹0 / ₹—</b><em>Risk guard</em></div>
-    </div>
-
-    <div class="atv-main">
-      <div class="atv-panel atv-decision">
-        <div class="atv-panel-title">LIVE AI EXECUTION DECISION</div>
-        <div class="atv-ring" id="atvRing" style="--ring:0deg"><div class="atv-ring-inner"><div class="decision" id="atvDecision">WAIT</div><div class="prob" id="atvProb">P(UP) —</div><div class="note" id="atvDecisionNote">NO LIVE DATA</div></div></div>
-        <div class="atv-decision-meta"><div><small>INDEX</small><b id="atvIndex">—</b></div><div><small>EDGE</small><b id="atvEdge">—</b></div><div><small>REGIME</small><b id="atvRegime">—</b></div></div>
-      </div>
-
-      <div class="atv-panel atv-bars">
-        <div class="atv-panel-title">LIVE MODEL CONSENSUS</div>
-        <div class="atv-bar-row"><label>GRU P(UP)</label><div class="atv-bar"><i id="atvGruBar"></i></div><b id="atvGruVal">—</b></div>
-        <div class="atv-bar-row"><label>ML READY</label><div class="atv-bar"><i id="atvMlBar"></i></div><b id="atvMlVal">—</b></div>
-        <div class="atv-bar-row"><label>ENSEMBLE</label><div class="atv-bar"><i id="atvEnsBar"></i></div><b id="atvEnsVal">—</b></div>
-        <div class="atv-bar-row"><label>WARM-UP</label><div class="atv-bar"><i id="atvWarmBar"></i></div><b id="atvWarmVal">—</b></div>
-        <div class="atv-signal-box"><small>CURRENT AI ACTION</small><b id="atvAction">WAIT</b><span id="atvActionReason">Waiting for executable index data</span></div>
-      </div>
-
-      <div class="atv-panel">
-        <div class="atv-panel-title">LIVE MARKET / OPTION STATE</div>
-        <div class="atv-radar"><div class="cross"></div><div class="cross2"></div><div class="dot" id="atvRadarDot"></div><div class="center"><b id="atvRadarCenter">—</b><span id="atvRadarNote">NO LIVE DATA</span></div></div>
-        <div class="atv-state-grid">
-          <div class="atv-state"><small>SPOT</small><b id="atvSpot">—</b></div><div class="atv-state"><small>VOLATILITY</small><b id="atvVol">—</b></div>
-          <div class="atv-state"><small>PCR</small><b id="atvPcr">—</b></div><div class="atv-state"><small>OPTION</small><b id="atvOption">—</b></div>
-          <div class="atv-state"><small>CE BIAS</small><b id="atvCeBias">—</b></div><div class="atv-state"><small>PE BIAS</small><b id="atvPeBias">—</b></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="atv-learning">
-      <div class="atv-learning-head"><h3>🧠 AI LEARNING &amp; MODEL STATUS</h3><span id="atvLearningBadge">● CHECKING MODEL</span></div>
-      <div class="atv-learning-grid">
-        <div class="atv-train-card atv-train-main"><small>Historical GRU Pre-training</small><b id="atvHistPct">0%</b><span id="atvHistStatus">Waiting for historical model</span><div class="atv-progress"><i id="atvHistBar"></i></div></div>
-        <div class="atv-train-card"><small>GRU Samples</small><b id="atvHistSamples">—</b><span>Historical sequences</span></div>
-        <div class="atv-train-card"><small>GRU Accuracy</small><b id="atvHistAcc">—</b><span>Validation</span></div>
-        <div class="atv-train-card"><small>GRU AUC</small><b id="atvHistAuc">—</b><span>ROC score</span></div>
-        <div class="atv-train-card"><small>Live ML / DL</small><b id="atvLiveEvidence">—</b><span id="atvLiveEvidenceSub">Evidence samples</span></div>
-        <div class="atv-train-card"><small>Model Warm-up</small><b id="atvLearnWarm">—</b><span>Adaptive score</span></div>
-      </div>
-      <div class="atv-progress" style="margin-top:10px"><i id="atvLiveBar"></i></div>
-      <div style="display:flex;justify-content:space-between;gap:8px;margin-top:5px;font-size:7px;color:#607f93"><span>LIVE LEARNING PROGRESS</span><span id="atvLivePct">0%</span></div>
-    </div>
+</style>
+<div id="atAI"><div id="desk">
+  <header class="dk-head"><div class="dk-brand"><span class="dk-mark">A<span>↗</span></span><div><h1>AI Trading Desk <span>02</span></h1><p>Index intelligence & execution</p></div></div><div class="dk-head-right"><span id="dkMarket" class="dk-badge">Connecting</span><span id="dkClock">— IST</span></div></header>
+  <div class="dk-toolbar"><nav aria-label="Trading desk views"><button class="selected" data-view="overview">Overview</button><button data-view="learning">Learning lab</button><button data-view="journal">Trade journal</button><button data-view="risk">Risk & controls</button></nav><div class="dk-actions"><select id="dkMode" aria-label="Execution mode"><option value="paper">Paper trading</option><option value="live">Live trading</option></select><button id="dkArm" class="dk-primary">Arm entries</button><button id="dkDisarm">Disarm</button></div></div>
+  <div id="dkNotice" role="status" aria-live="polite">Connecting to your trading engine…</div>
+  <section class="dk-view" data-pane="overview">
+    <div class="dk-metrics"><article><span>Today's net P&amp;L · estimated costs</span><strong id="dkPnl">—</strong><small id="dkPnlMode">Paper account</small></article><article><span>Open exposure</span><strong id="dkExposure">—</strong><small id="dkPositionCount">No data yet</small></article><article><span>Forward paper evidence</span><strong id="dkEvidence">—</strong><small>Completed trades · separate from training</small></article><article><span>Engine pulse</span><strong id="dkPulse">—</strong><small id="dkCycle">Awaiting first scan</small></article></div>
+    <div class="dk-workspace"><main><section class="dk-panel"><div class="dk-title"><div><p class="dk-eyebrow">MARKET OBSERVATORY</p><h2>Read the market. See the reason.</h2></div><button id="dkScan" class="dk-text-btn">Refresh scan ↻</button></div><div id="dkSymbols" class="dk-symbols"></div><div class="dk-chart-head"><div><span id="dkChartName">NIFTY</span><strong id="dkSpot">—</strong></div><span id="dkChartMeta">Completed 5-minute candles</span></div><div id="dkPriceChart" class="dk-chart"><div class="dk-empty">Current-market history will appear after connection.</div></div><div class="dk-chart-caption"><span>INDEX CLOSE · LAST 60 BARS</span><span id="dkBarTime">No candle received</span></div></section>
+    <section class="dk-panel dk-positions"><div class="dk-title"><div><p class="dk-eyebrow">POSITION MONITOR</p><h2>Capital at work</h2></div><button id="dkClose" class="dk-danger">Close all & disarm</button></div><div id="dkPositions" class="dk-table-wrap"><div class="dk-empty">No position data yet.</div></div></section>
+    <section class="dk-panel"><div class="dk-title"><div><p class="dk-eyebrow">LIVE DECISION LOG</p><h2>What the engine is doing</h2></div><span class="dk-muted">Latest activity</span></div><div id="dkEvents"></div></section></main>
+    <aside><section class="dk-panel dk-signal"><p class="dk-eyebrow">DIRECTIONAL READ</p><div class="dk-signal-title"><h2 id="dkDirection">Awaiting data</h2><span id="dkRegime" class="dk-badge">—</span></div><div class="dk-prob"><strong id="dkProbability">—</strong><span>probability of an upward move<br>over the next 15 minutes</span></div><div class="dk-prob-track"><i id="dkProbFill"></i><b></b></div><div class="dk-prob-labels"><span>DOWN</span><span>UP</span></div><div id="dkReason" class="dk-reason">A completed model, fresh data and executable quotes are needed.</div><div id="dkModels" class="dk-models"></div><h3>Drivers of this prediction</h3><div id="dkFactors" class="dk-muted">Feature contributions appear with a prediction.</div></section>
+    <section class="dk-panel dk-order-plan"><p class="dk-eyebrow">PROPOSED TRADE</p><h2 id="dkContract">No qualified contract</h2><div id="dkPlan"></div><p class="dk-footnote">A qualified signal is not a fill. Execution must pass the account, risk and order checks.</p></section>
+    <section class="dk-panel"><div class="dk-title"><h2>Live readiness</h2><span id="dkLiveLock" class="dk-badge">Locked</span></div><div id="dkGates"></div><p class="dk-footnote">Only forward paper trades count. Historical accuracy cannot unlock live execution.</p></section></aside></div>
   </section>
-
-
-
-  <section class="ai-card">
-    <div class="ai-top">
-      <div>
-        <div class="ai-title">🤖 Automatic AI Buy/Sell Engine</div>
-        <div class="ai-sub" style="margin-top:6px">GRU + ML ensemble reads index direction &rarr; auto-BUYs the best-EV CE/PE &rarr; continuously reassesses &rarr; auto HOLD / REDUCE / SELL</div>
-      </div>
-      <div style="text-align:right">
-        <span class="ai-pill" id="atModePill">PAPER</span>
-        <span class="ai-pill" id="atArmedPill" style="margin-left:6px">DISARMED</span>
-      </div>
-    </div>
-    <div class="ai-flow">
-      <div><b>1. LEARN</b><small>12yr GRU + live ML</small></div>
-      <div><b>2. PREDICT</b><small>direction + confidence</small></div>
-      <div><b>3. SELECT</b><small>best-EV CE / PE</small></div>
-      <div><b>4. AUTO-BUY</b><small>strong signal only</small></div>
-      <div><b>5. REASSESS</b><small>every cycle, live</small></div>
-      <div><b>6. HOLD/REDUCE/SELL</b><small>edge-driven exit</small></div>
-    </div>
-    <div id="atModeBanner" class="warn-box-paper" style="margin-top:14px">PAPER MODE — no broker orders are sent. Every completed paper trade is fed back into the shared GRU/ML models as new learning data.</div>
-    <div class="btn-row">
-      <button class="mode-btn" id="atPaperBtn">📝 PAPER MODE</button>
-      <button class="mode-btn" id="atLiveBtn">🔴 LIVE MODE</button>
-      <button id="atArmBtn">▶ ARM (start automatic entries)</button>
-      <button class="secondary" id="atDisarmBtn">■ DISARM (stop new entries)</button>
-      <button class="secondary" id="atCloseAllBtn" style="border-color:#6b2b2b;color:#ffb4b4">⛔ CLOSE ALL NOW (kill switch)</button>
-      <span id="atStatus" class="loading"></span>
-    </div>
-    <div class="ai-metric-grid" style="margin-top:16px">
-      <div class="ai-metric"><small>Market</small><b id="atMarketOpen">—</b></div>
-      <div class="ai-metric"><small>Open Positions</small><b id="atOpenCount">0</b></div>
-      <div class="ai-metric"><small>Today P&amp;L (Paper)</small><b id="atPaperPnl">₹0</b></div>
-      <div class="ai-metric"><small>Today P&amp;L (Live)</small><b id="atLivePnl">₹0</b></div>
-    </div>
-  </section>
-
-  <section class="ai-card">
-    <div class="ai-sub">🔒 OUT-OF-SAMPLE EDGE VALIDATION — required before LIVE mode unlocks</div>
-    <div class="ai-note" style="margin-top:6px">This engine must prove a genuine edge on its own paper trades before it is ever allowed to place a real order. All five checks below must pass.</div>
-    <div class="ai-metric-grid" style="margin-top:12px">
-      <div class="ai-metric"><small>Closed Paper Trades</small><b id="atEdgeTrades">0</b></div>
-      <div class="ai-metric"><small>Track Record Span</small><b id="atEdgeSpan">0 days</b></div>
-      <div class="ai-metric"><small>Win Rate</small><b id="atEdgeWin">—</b></div>
-      <div class="ai-metric"><small>Avg R / Profit Factor</small><b id="atEdgeRPF">—</b></div>
-    </div>
-    <div style="margin-top:12px" id="atEdgeChecklist"></div>
-    <div id="atEdgeVerdict" class="warn-box-paper" style="margin-top:10px">Keep paper trading to build an out-of-sample track record.</div>
-  </section>
-
-  <section class="ai-card">
-    <div class="ai-sub">⚙️ ENGINE SETTINGS</div>
-    <div class="cfg-grid">
-      <label>Capital / trade — Paper (₹)<input type="number" id="atCapPaper" value="25000" step="1000"></label>
-      <label>Capital / trade — Live (₹)<input type="number" id="atCapLive" value="25000" step="1000"></label>
-      <label>Max concurrent positions<input type="number" id="atMaxPos" value="3" min="1" max="3"></label>
-      <label>Square-off time<input type="text" id="atSquareOff" value="15:15"></label>
-      <label>Max daily loss — Paper (₹)<input type="number" id="atMaxLossPaper" value="15000" step="500"></label>
-      <label>Max daily loss — Live (₹)<input type="number" id="atMaxLossLive" value="7500" step="500"></label>
-      <label>Max hold time (minutes)<input type="number" id="atMaxHold" value="180" step="15"></label>
-      <label>Confidence drop → REDUCE<input type="number" id="atConfReduce" value="0.12" step="0.01"></label>
-      <label>Confidence drop → SELL<input type="number" id="atConfExit" value="0.22" step="0.01"></label>
-      <label>Edge: min trades<input type="number" id="atEdgeMinTrades" value="60" step="5"></label>
-      <label>Edge: min days<input type="number" id="atEdgeMinDays" value="10" step="1"></label>
-      <label>Edge: min win rate %<input type="number" id="atEdgeMinWin" value="42" step="1"></label>
-    </div>
-    <div class="btn-row"><button class="secondary" id="atSaveCfgBtn">💾 Save Settings</button></div>
-  </section>
-
-  <section class="ai-card">
-    <div class="ai-sub">📡 LIVE SIGNAL BOARD</div>
-    <div class="ai-grid" id="atSignalBoard" style="margin-top:12px"></div>
-  </section>
-
-  <section class="ai-card" id="atLearningCard">
-    <div class="ai-sub">🧠 AI LEARNING STATUS <span style="font-weight:400;color:#8ca4b8">(historical GRU + live ML/DL evidence)</span></div>
-    <div class="ai-metric-grid" style="margin-top:12px">
-      <div class="ai-metric"><small>AI STATUS</small><b id="atTrainStatus">CHECKING…</b></div>
-      <div class="ai-metric"><small>HISTORICAL GRU</small><b id="atGRU">—</b></div>
-      <div class="ai-metric"><small>GRU ACCURACY</small><b id="atGRUAccuracy">—</b></div>
-      <div class="ai-metric"><small>GRU AUC</small><b id="atGRUAUC">—</b></div>
-      <div class="ai-metric"><small>LIVE ML EVIDENCE</small><b id="atLiveML">0</b></div>
-      <div class="ai-metric"><small>LIVE DL EVIDENCE</small><b id="atLiveDL">0</b></div>
-      <div class="ai-metric"><small>MODEL WARM-UP</small><b id="atWarmup">—</b></div>
-      <div class="ai-metric"><small>LAST HIST. TRAINING</small><b id="atHistLastTrain">—</b></div>
-    </div>
-    <div id="atLearningStages" style="margin-top:12px"></div><div id="atRetrainPanel" style="margin-top:14px;padding:14px;border:1px solid #24465a;border-radius:12px;background:linear-gradient(145deg,#0a1b28,#07131d)">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
-        <div><div style="font-size:10px;font-weight:800;letter-spacing:.08em;color:#cfe7ef">HISTORICAL GRU TRAINING MONITOR</div><div id="atRetrainStatus" style="font-size:9px;color:#7894a8;margin-top:4px">Checking backend training state…</div></div>
-        <button id="atRetrainBtn" type="button" onclick="atStartHistoricalRetrain()" style="padding:9px 13px;border:1px solid #2a7183;border-radius:9px;background:#0b2935;color:#8feafb;font-weight:800;cursor:pointer">▶ RETRAIN HISTORICAL GRU</button>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;margin-top:10px"><div style="height:8px;background:#07131d;border:1px solid #163247;border-radius:99px;overflow:hidden"><i id="atRetrainProgress" style="display:block;height:100%;width:0%;background:linear-gradient(90deg,#2bc9ef,#55e0ad);transition:width .35s"></i></div><b id="atRetrainPct" style="font:800 10px ui-monospace,monospace;color:#8feafb">0.0%</b></div>
-      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px"><div class="ai-metric"><small>PHASE</small><b id="atRetrainPhase" style="font-size:12px">—</b></div><div class="ai-metric"><small>EPOCH</small><b id="atRetrainEpoch" style="font-size:12px">—</b></div><div class="ai-metric"><small>ELAPSED</small><b id="atRetrainElapsed" style="font-size:12px">00:00</b></div><div class="ai-metric"><small>SAMPLES</small><b id="atRetrainSamples" style="font-size:12px">—</b></div><div class="ai-metric"><small id="atRetrainQualityLabel">NEW ACC / AUC</small><b id="atRetrainQuality" style="font-size:12px">—</b></div></div>
-    </div>
-    <div class="ai-note" id="atLearningDetail" style="margin-top:10px">Checking historical training and live learning status…</div>
-  </section>
-
-  <section class="ai-card">
-    <div class="ai-sub">OPEN AUTOMATIC POSITIONS</div>
-    <div class="ai-table-wrap" style="margin-top:10px"><table class="ai-table"><thead><tr><th>Time</th><th>Index</th><th>Mode</th><th>Option</th><th>Qty</th><th>Entry</th><th>LTP</th><th>Stop</th><th>Target</th><th>P&amp;L</th><th>Last Action</th></tr></thead><tbody id="atOpenTable"><tr><td colspan="11">No open automatic positions.</td></tr></tbody></table></div>
-  </section>
-
-  <section class="ai-card">
-    <div class="ai-sub">RECENT AUTOMATIC TRADES (PAPER + LIVE)</div>
-    <div class="ai-table-wrap" style="margin-top:10px"><table class="ai-table"><thead><tr><th>Time</th><th>Index</th><th>Mode</th><th>Option</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>R</th><th>Status</th><th>Exit Reason</th></tr></thead><tbody id="atTradesTable"><tr><td colspan="11">No automatic trades yet.</td></tr></tbody></table></div>
-  </section>
-
-  <section class="ai-card">
-    <div class="ai-sub">🧭 REASONING FEED — every HOLD / REDUCE / SELL / BUY decision</div>
-    <div class="ai-table-wrap" style="margin-top:10px"><table class="ai-table"><thead><tr><th>Time</th><th>Index</th><th>Action</th><th>Reason</th><th>LTP</th><th>Unrl. P&amp;L</th><th>p(UP)</th><th>Confidence</th></tr></thead><tbody id="atActionsTable"><tr><td colspan="8">No decisions logged yet.</td></tr></tbody></table></div>
-  </section>
-
-  <div class="disclaimer" style="margin-top:4px">Not investment advice. Paper mode simulates fills against the same live bid/ask this engine would trade on; Live mode sends real Zerodha MIS market orders only after Paper mode clears the edge thresholds above AND you explicitly arm Live with confirmation. The engine never forces a trade — an uncertain read is always WAIT.</div>
-
+  <section class="dk-view" data-pane="learning" hidden><div class="dk-section-intro"><div><p class="dk-eyebrow">LEARNING LAB</p><h2>Three kinds of evidence. One clear record.</h2><p>Learn from the archive, measure unseen predictions, then validate trading outcomes.</p></div><div class="dk-actions"><button id="dkSync">Sync recent history</button><button id="dkTrain" class="dk-primary">Train historical model</button></div></div><section class="dk-panel"><div class="dk-title"><h2 id="dkTrainingState">Learning job · idle</h2><span id="dkTrainingPct">0%</span></div><div class="dk-progress"><i id="dkTrainingFill"></i></div><p id="dkTrainingError" class="dk-footnote"></p></section><div class="dk-learning-grid"><section class="dk-panel"><span class="dk-step">01 / HISTORICAL</span><h2>Learn the patterns</h2><p class="dk-muted">Regularized direction model · shared historical and current-market features.</p><div id="dkHistorical"></div></section><section class="dk-panel"><span class="dk-step">02 / FORWARD PREDICTIONS</span><h2>Learn as the market moves</h2><p class="dk-muted">Each new candle creates a prediction. Its actual outcome is checked later, even without a trade.</p><div id="dkOnline"></div></section><section class="dk-panel"><span class="dk-step">03 / PAPER EXECUTION</span><h2>Prove the trading result</h2><p class="dk-muted">Simulated fills use current bid/ask, visible depth, adverse slippage and estimated order costs.</p><div id="dkPaperLearning"></div></section></div><section class="dk-panel"><div class="dk-title"><h2>Historical coverage</h2><span class="dk-muted">Actual stored data · no synthetic history</span></div><div id="dkCoverage" class="dk-table-wrap"></div><p class="dk-footnote">Training uses up to 20,000 recent stored candles per index. The final 20% by time is reserved for validation, with overlapping label horizons removed from training. Validation results are predictive diagnostics, not a historical options-profit backtest.</p></section></section>
+  <section class="dk-view" data-pane="journal" hidden><div class="dk-section-intro"><div><p class="dk-eyebrow">TRADE JOURNAL</p><h2>The execution record</h2><p>Paper and live trades retain their mode, fills, fees and exit reasons.</p></div><button id="dkExport">Export trade CSV</button></div><section class="dk-panel"><div class="dk-title"><h2>Forward paper equity</h2><span class="dk-muted">After estimated costs</span></div><div id="dkEquity" class="dk-chart"></div></section><section class="dk-panel"><h2>Trades</h2><div id="dkTrades" class="dk-table-wrap"></div></section><section class="dk-panel"><h2>Order reconciliation</h2><p class="dk-muted">Submitted, partially filled, completed and rejected are distinct states. Uncertain submissions block new entries.</p><div id="dkOrders" class="dk-table-wrap"></div></section></section>
+  <section class="dk-view" data-pane="risk" hidden><div class="dk-section-intro"><div><p class="dk-eyebrow">RISK & CONTROLS</p><h2>Define the boundaries before entry.</h2><p>Saving settings does not arm the engine or change execution mode.</p></div></div><form id="dkSettings" class="dk-panel"><div class="dk-settings" id="dkSettingsFields"></div><div class="dk-title"><p class="dk-footnote">Risk is estimated from the planned stop. Gaps, costs and unfilled exits can produce larger losses.</p><button type="submit" class="dk-primary">Save risk settings</button></div></form><section class="dk-panel"><h2>Execution recovery</h2><p id="dkHalt" class="dk-muted">No unresolved order reported.</p><button id="dkClear">Clear resolved halt</button><p class="dk-footnote">Orders must reconcile before a halt can clear. Entries stay disarmed until you explicitly re-arm them.</p><div id="dkLegacy"></div></section><section class="dk-panel"><h2>How this desk operates</h2><div class="dk-rules"><p><strong>Paper first.</strong> The live gate requires 60 closed paper trades, a 10-day record, at least 42% wins, 0.05R net expectancy and a 1.2 profit factor.</p><p><strong>Confirmed fills.</strong> Live orders are price-bounded limits. Only broker-confirmed filled quantities change positions. Unfilled orders are cancelled after 45 seconds and rechecked.</p><p><strong>Continuous supervision.</strong> Stops, partial profit-taking, targets, time exits and reversal checks run in the backend. A profitable trim moves the remaining stop to entry. Keep the process and connection running; these are not exchange-hosted protective stops.</p><p><strong>Honest learning.</strong> Direction predicts index movement, not profit certainty. The online model joins at 20% weight only after its own forward validation passes the minimum AUC.</p></div></section></section>
+  <footer class="dk-footer"><span>AI DESK / V2</span><span>Market timestamps in IST · 15-second engine cycle</span><span id="dkUpdated">Not yet connected</span></footer>
+  <dialog id="dkDialog"><form method="dialog"><p class="dk-eyebrow">EXECUTION CONTROL</p><h2 id="dkDialogTitle"></h2><p id="dkDialogText"></p><div class="dk-actions"><button value="cancel">Cancel</button><button id="dkDialogConfirm" value="confirm" class="dk-primary">Confirm</button></div></form></dialog>
 </div></div>
+
+<!-- AI_DESK_V2_END -->
 </div><!-- /tabPageAutoTradeAI -->
 
 
@@ -2666,460 +2516,88 @@ loadExistingPositionIntel();
 async function aiGet(url,opt){const r=await fetch(url,opt);const raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw Error('Backend returned non-JSON ('+r.status+')')};if(!r.ok)throw Error(d.error||d.message||'Request failed');return d;}
 function setN(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
 </script>
+<!-- AI_DESK_V2_SCRIPT_START -->
 <script>
-// =====================================================================
-// AUTOMATIC AI BUY/SELL ENGINE — tab controller (Paper + Live)
-// =====================================================================
-let atTimer = null;
-let atLastConfig = null;
-
-function atEsc(s) {
-  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[c]));
+// AI Desk v2. All displayed trading values come from /api/ai-desk/state.
+let deskState=null,deskSymbol='NIFTY',deskBusy=false,deskTimer=null,deskInitialized=false,deskDirty=false;
+const dkEsc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const dkEl=id=>document.getElementById(id);
+const dkText=(id,v)=>{const e=dkEl(id);if(e)e.textContent=v??'—'};
+const dkHTML=(id,v)=>{const e=dkEl(id);if(e)e.innerHTML=v};
+const dkNum=(v,n=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toLocaleString('en-IN',{maximumFractionDigits:n,minimumFractionDigits:n});
+const dkMoney=v=>v==null?'—':'₹'+dkNum(v,0);
+const dkTime=t=>t?new Date(t).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false}):'—';
+const dkDate=t=>t?new Date(t).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false}):'—';
+const dkKV=(a,b)=>`<div class="dk-kv"><span>${dkEsc(a)}</span><b>${dkEsc(b)}</b></div>`;
+function dkTable(head,rows){return rows.length?`<table><thead><tr>${head.map(h=>`<th>${dkEsc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(x=>`<td>${dkEsc(x)}</td>`).join('')}</tr>`).join('')}</tbody></table>`:'<div class="dk-empty">No records yet. New activity will appear here.</div>'}
+function dkLineChart(points,key,empty){
+  const data=(points||[]).filter(r=>Number.isFinite(Number(r[key]))&&r[key]!=null);
+  if(data.length<2)return `<div class="dk-empty">${dkEsc(empty)}</div>`;
+  const W=900,H=260,L=8,R=88,T=18,B=26,values=data.map(r=>Number(r[key]));let min=Math.min(...values),max=Math.max(...values);const pad=Math.max((max-min)*.12,Math.abs(max)*.00005,.01);min-=pad;max+=pad;
+  const x=i=>L+i/(data.length-1)*(W-L-R),y=v=>T+(max-v)/(max-min)*(H-T-B);
+  const line=values.map((v,i)=>`${i?'L':'M'}${x(i).toFixed(2)},${y(v).toFixed(2)}`).join(' ');
+  const grid=[0,.25,.5,.75,1].map(t=>{const v=min+(max-min)*t;return `<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="#293443" stroke-dasharray="3 5"/><text x="${W-R+13}" y="${y(v)+4}" fill="#95a4b9" font-size="12" font-family="monospace">${dkEsc(dkNum(v,1))}</text>`}).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${dkEsc(key==='pnl'?'Cumulative net paper trading result':'Recent index closing prices')}"><title>${dkEsc(data.length+' observations; latest '+dkNum(values.at(-1)))}</title>${grid}<path d="${line} L${x(data.length-1)},${H-B} L${L},${H-B} Z" fill="#b1ef65" opacity=".04"/><path d="${line}" fill="none" stroke="#b1ef65" stroke-width="2.5" vector-effect="non-scaling-stroke"/><circle cx="${x(data.length-1)}" cy="${y(values.at(-1))}" r="4" fill="#b1ef65"/><text x="${L}" y="${H-4}" fill="#879ab3" font-size="11" font-family="monospace">${dkEsc(dkTime(data[0].ts))}</text><text text-anchor="end" x="${W-R}" y="${H-4}" fill="#879ab3" font-size="11" font-family="monospace">${dkEsc(dkTime(data.at(-1).ts))} IST</text></svg>`;
 }
-
-function atFmtR(v) { return v == null ? "—" : (Number(v) >= 0 ? "+" : "") + Number(v).toFixed(2) + "R"; }
-
-function initAutoTradeAIUI() {
-  if (window.__atInit) { refreshAutoTradeAI(); return; }
-  window.__atInit = true;
-  window.addEventListener("error", ev => {
-    console.error("[AUTOTRADE-AI] uncaught error:", ev.message, ev.filename, ev.lineno);
-    setN("atStatus", "JS error: " + ev.message);
-  });
-
-  document.getElementById("atPaperBtn").onclick = () => atSetMode("paper");
-  document.getElementById("atLiveBtn").onclick = () => atSetMode("live");
-  document.getElementById("atArmBtn").onclick = atArm;
-  document.getElementById("atDisarmBtn").onclick = atDisarm;
-  document.getElementById("atCloseAllBtn").onclick = atCloseAll;
-  document.getElementById("atSaveCfgBtn").onclick = atSaveConfig;
-
-  refreshAutoTradeAI();
-  if (!atTimer) atTimer = setInterval(refreshAutoTradeAI, 8000);
-  console.info("[AUTOTRADE-AI] init complete");
-}
-
-async function atSetMode(mode) {
-  const status = document.getElementById("atStatus");
-  if (mode === "live") {
-    const ok = confirm(
-      "Switch the Automatic AI engine to LIVE mode?\n\n" +
-      "Once armed, LIVE mode places REAL Zerodha orders with REAL money — automatic BUY on entry " +
-      "and automatic SELL/REDUCE on exit, with no manual confirmation per trade.\n\n" +
-      "This is only allowed once the engine's own paper track record clears the edge-validation " +
-      "checks shown above. Continue?"
-    );
-    if (!ok) return;
-  }
-  status.textContent = "Switching mode…";
-  try {
-    const r = await apiFetch("/api/ai-autotrade/set-execution-mode", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode, ack: true })
-    });
-    const d = await r.json();
-    if (d.error) { alert(d.error); status.textContent = ""; return; }
-    status.textContent = "Mode set to " + mode.toUpperCase();
-    await refreshAutoTradeAI();
-  } catch (e) { alert(e.message); }
-  status.textContent = "";
-}
-
-async function atArm() {
-  const status = document.getElementById("atStatus");
-  const isLive = atLastConfig && atLastConfig.execution_mode === "live";
-  if (isLive) {
-    const ok = confirm(
-      "ARM the engine in LIVE mode?\n\n" +
-      "From this point on it will automatically place REAL BUY orders when a strong signal appears, " +
-      "and REAL SELL/REDUCE orders as it manages the position — with no per-trade confirmation.\n\n" +
-      "You can DISARM or use CLOSE ALL at any time. Continue?"
-    );
-    if (!ok) return;
-  }
-  status.textContent = "Arming…";
-  try {
-    const r = await apiFetch("/api/ai-autotrade/arm", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ack: true })
-    });
-    const d = await r.json();
-    if (d.error) { alert(d.error); status.textContent = ""; return; }
-    status.textContent = "Armed.";
-    await refreshAutoTradeAI();
-  } catch (e) { alert(e.message); }
-  status.textContent = "";
-}
-
-async function atDisarm() {
-  try {
-    await apiFetch("/api/ai-autotrade/disarm", { method: "POST" });
-    await refreshAutoTradeAI();
-  } catch (e) { alert(e.message); }
-}
-
-async function atCloseAll() {
-  const ok = confirm("Close ALL open automatic positions (paper and live) right now at the best executable price? This cannot be undone.");
-  if (!ok) return;
-  try {
-    const r = await apiFetch("/api/ai-autotrade/close-all", { method: "POST" });
-    const d = await r.json();
-    if (d.error) { alert(d.error); return; }
-    alert("Closed " + (d.closed_trade_ids || []).length + " position(s).");
-    await refreshAutoTradeAI();
-  } catch (e) { alert(e.message); }
-}
-
-async function atSaveConfig() {
-  const body = {
-    capital_per_trade_paper: Number(document.getElementById("atCapPaper").value),
-    capital_per_trade_live: Number(document.getElementById("atCapLive").value),
-    max_concurrent_positions: Number(document.getElementById("atMaxPos").value),
-    square_off_time: document.getElementById("atSquareOff").value,
-    max_daily_loss_paper: Number(document.getElementById("atMaxLossPaper").value),
-    max_daily_loss_live: Number(document.getElementById("atMaxLossLive").value),
-    max_hold_minutes: Number(document.getElementById("atMaxHold").value),
-    confidence_drop_reduce: Number(document.getElementById("atConfReduce").value),
-    confidence_drop_exit: Number(document.getElementById("atConfExit").value),
-    edge_min_trades: Number(document.getElementById("atEdgeMinTrades").value),
-    edge_min_days: Number(document.getElementById("atEdgeMinDays").value),
-    edge_min_win_rate: Number(document.getElementById("atEdgeMinWin").value),
-  };
-  try {
-    const r = await apiFetch("/api/ai-autotrade/config", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
-    });
-    const d = await r.json();
-    if (d.error) { alert(d.error); return; }
-    setN("atStatus", "Settings saved.");
-    setTimeout(() => setN("atStatus", ""), 1500);
-  } catch (e) { alert(e.message); }
-}
-
-function atFillConfigInputs(cfg) {
-  if (document.activeElement && document.activeElement.closest("#atAI .cfg-grid")) return; // don't clobber while typing
-  const map = {
-    atCapPaper: "capital_per_trade_paper", atCapLive: "capital_per_trade_live",
-    atMaxPos: "max_concurrent_positions", atSquareOff: "square_off_time",
-    atMaxLossPaper: "max_daily_loss_paper", atMaxLossLive: "max_daily_loss_live",
-    atMaxHold: "max_hold_minutes", atConfReduce: "confidence_drop_reduce",
-    atConfExit: "confidence_drop_exit", atEdgeMinTrades: "edge_min_trades",
-    atEdgeMinDays: "edge_min_days", atEdgeMinWin: "edge_min_win_rate",
-  };
-  for (const [id, key] of Object.entries(map)) {
-    const el = document.getElementById(id);
-    if (el && cfg[key] != null) el.value = cfg[key];
-  }
-}
-
-function atRenderEdge(edge) {
-  setN("atEdgeTrades", edge.trades + " / " + (edge.required ? edge.required.edge_min_trades : "—"));
-  setN("atEdgeSpan", (edge.span_days || 0) + " / " + (edge.required ? edge.required.edge_min_days : "—") + " days");
-  setN("atEdgeWin", (edge.win_rate || 0) + "% (need " + (edge.required ? edge.required.edge_min_win_rate : "—") + "%)");
-  setN("atEdgeRPF", atFmtR(edge.avg_r) + " / PF " + (edge.profit_factor ?? "—"));
-
-  const labels = {
-    trades_ok: "Enough completed paper trades", span_ok: "Track record spans enough calendar days",
-    win_rate_ok: "Win rate at/above threshold", avg_r_ok: "Average R-multiple positive enough",
-    profit_factor_ok: "Profit factor at/above threshold"
-  };
-  const checks = edge.checks || {};
-  let html = "";
-  for (const [k, label] of Object.entries(labels)) {
-    const pass = checks[k];
-    html += `<div class="edge-check"><span>${label}</span><span class="${pass ? "ok" : "no"}">${pass ? "✓ PASS" : "— not yet"}</span></div>`;
-  }
-  document.getElementById("atEdgeChecklist").innerHTML = html || "<div class='ai-sub'>No data yet.</div>";
-
-  const verdictEl = document.getElementById("atEdgeVerdict");
-  if (edge.edge_confirmed) {
-    verdictEl.className = "warn-box-paper";
-    verdictEl.textContent = "✅ Edge confirmed — LIVE mode is unlocked. It still won't run until you switch to LIVE and explicitly ARM it.";
-  } else {
-    verdictEl.className = "warn-box-paper";
-    verdictEl.textContent = "🔒 LIVE mode is locked — " + (edge.reason || "keep paper trading to build an out-of-sample track record.");
-  }
-}
-
-function atRenderSignals(symbols, openPositions) {
-  const openBySymbol = {};
-  (openPositions || []).forEach(p => { openBySymbol[p.symbol] = p; });
-  let html = "";
-  (symbols || []).forEach(sym => {
-    const pos = openBySymbol[sym];
-    if (pos) {
-      const pnl = pos.unrealized_pnl;
-      html += `<div class="ai-card" style="margin-bottom:0">
-        <div class="ai-sub">${atEsc(sym)}</div>
-        <div style="font-size:15px;font-weight:800;margin-top:4px">IN POSITION — ${atEsc(pos.option_symbol)}</div>
-        <div class="ai-sub" style="margin-top:4px">Mode: ${atEsc((pos.execution_mode||"paper").toUpperCase())} · Entry ${fmtMoney(pos.entry)} · LTP ${fmtMoney(pos.last_ltp)}</div>
-        <div style="margin-top:6px;font-weight:800;color:${pnl >= 0 ? "#72e0ad" : "#ff8e9c"}">${fmtMoney(pnl)}</div>
-      </div>`;
-    } else {
-      html += `<div class="ai-card" style="margin-bottom:0">
-        <div class="ai-sub">${atEsc(sym)}</div>
-        <div style="font-size:15px;font-weight:800;margin-top:4px">Scanning…</div>
-        <div class="ai-sub" style="margin-top:4px">No open automatic position. Waiting for a strong, executable directional signal.</div>
-      </div>`;
-    }
-  });
-  document.getElementById("atSignalBoard").innerHTML = html;
-}
-
-function atRenderOpenTable(rows) {
-  const tbody = document.getElementById("atOpenTable");
-  if (!rows || !rows.length) { tbody.innerHTML = '<tr><td colspan="11">No open automatic positions.</td></tr>'; return; }
-  tbody.innerHTML = rows.map(t => `<tr>
-    <td>${fmtTime(t.ts)}</td>
-    <td>${atEsc(t.symbol)}</td>
-    <td>${atEsc((t.execution_mode||"").toUpperCase())}</td>
-    <td>${atEsc(t.option_symbol)}</td>
-    <td>${t.qty}</td>
-    <td>${fmtMoney(t.entry)}</td>
-    <td>${fmtMoney(t.last_ltp)}</td>
-    <td>${fmtMoney(t.stop)}</td>
-    <td>${fmtMoney(t.target)}</td>
-    <td style="color:${(t.unrealized_pnl||0) >= 0 ? "#72e0ad" : "#ff8e9c"}">${fmtMoney(t.unrealized_pnl)}</td>
-    <td>${atEsc(t.exit_reason || "—")}</td>
-  </tr>`).join("");
-}
-
-function atRenderTradesTable(rows) {
-  const tbody = document.getElementById("atTradesTable");
-  if (!rows || !rows.length) { tbody.innerHTML = '<tr><td colspan="11">No automatic trades yet.</td></tr>'; return; }
-  tbody.innerHTML = rows.map(t => `<tr>
-    <td>${fmtTime(t.ts)}</td>
-    <td>${atEsc(t.symbol)}</td>
-    <td>${atEsc((t.execution_mode||"").toUpperCase())}</td>
-    <td>${atEsc(t.option_symbol)}</td>
-    <td>${t.qty}</td>
-    <td>${fmtMoney(t.entry)}</td>
-    <td>${t.exit != null ? fmtMoney(t.exit) : "—"}</td>
-    <td style="color:${(t.pnl||0) >= 0 ? "#72e0ad" : "#ff8e9c"}">${fmtMoney(t.pnl)}</td>
-    <td>${atFmtR(t.r_multiple)}</td>
-    <td>${atEsc(t.status)}</td>
-    <td>${atEsc(t.exit_reason || "—")}</td>
-  </tr>`).join("");
-}
-
-function atRenderActionsTable(rows) {
-  const tbody = document.getElementById("atActionsTable");
-  if (!rows || !rows.length) { tbody.innerHTML = '<tr><td colspan="8">No decisions logged yet.</td></tr>'; return; }
-  tbody.innerHTML = rows.map(a => `<tr>
-    <td>${fmtTime(a.ts)}</td>
-    <td>${atEsc(a.symbol)}</td>
-    <td><b>${atEsc(a.action)}</b></td>
-    <td>${atEsc(a.reason || "—")}</td>
-    <td>${fmtMoney(a.ltp)}</td>
-    <td style="color:${(a.unrealized_pnl||0) >= 0 ? "#72e0ad" : "#ff8e9c"}">${a.unrealized_pnl != null ? fmtMoney(a.unrealized_pnl) : "—"}</td>
-    <td>${a.p_up != null ? Number(a.p_up).toFixed(3) : "—"}</td>
-    <td>${a.ensemble_conf != null ? Number(a.ensemble_conf).toFixed(3) : "—"}</td>
-  </tr>`).join("");
-}
-
-function atRenderLearningStatus(prog, st) {
-  prog = prog || {}; st = st || {};
-  const hp = prog.historical || {};
-  const dp = prog.dl || {};
-  const lp = prog.live || {};
-  const hg = st.historical_gru || {};
-  const model = hp.model || {};
-
-  const gruSamples = Number(dp.samples || hg.samples || model.samples || 0);
-  const gruAcc = dp.accuracy ?? hg.accuracy ?? model.accuracy;
-  const gruAuc = dp.auc ?? hg.auc ?? model.auc;
-  const histStatus = String(dp.status || hg.status || hp.status || st.historical_status || "WAITING");
-  const histProgress = Math.max(0, Math.min(100, Number(dp.progress ?? hp.progress ?? 0)));
-  const mlSamples = Number(lp.ml_samples ?? st.ml_samples ?? 0);
-  const dlSamples = Number(lp.dl_samples ?? st.dl_samples ?? 0);
-  const warmup = st.adaptive_min_score ?? prog.adaptive_min_score;
-  const lastTrain = st.hist_last_train_at || hp.last_train_at || model.updated_at || null;
-
-  let status = "WAITING FOR DATA";
-  if (/ERROR|FAILED/i.test(histStatus)) status = "⚠ TRAINING ERROR";
-  else if (/TRAINING|BUILDING|COLLECTING/i.test(histStatus)) status = "🟡 TRAINING";
-  else if (/PRETRAINED|TRAINED/i.test(histStatus) || gruSamples > 0) status = "🟢 TRAINED & LEARNING";
-  else if (histProgress > 0) status = "🟡 LEARNING";
-  setN("atTrainStatus", status);
-
-  setN("atGRU", gruSamples ? gruSamples.toLocaleString("en-IN") + " samples" : "0 · NOT TRAINED");
-  setN("atGRUAccuracy", gruAcc == null ? "—" : Number(gruAcc).toFixed(1) + "%");
-  setN("atGRUAUC", gruAuc == null || !isFinite(Number(gruAuc)) ? "—" : Number(gruAuc).toFixed(3));
-  setN("atLiveML", mlSamples.toLocaleString("en-IN"));
-  setN("atLiveDL", dlSamples.toLocaleString("en-IN"));
-  setN("atWarmup", warmup != null ? Number(warmup).toFixed(1) + "/100" : "—");
-  setN("atHistLastTrain", lastTrain ? atFormatLearningTime(lastTrain) : "Not trained yet");
-
-  const liveProgress = Math.min(100, Number(lp.progress || 0));
-  const stages = [
-    ["Historical GRU pre-training", histProgress, `${histStatus} · ${gruSamples.toLocaleString("en-IN")} sequences`],
-    ["Live paper + live evidence", liveProgress, `${mlSamples.toLocaleString("en-IN")} ML / ${dlSamples.toLocaleString("en-IN")} DL samples (includes this engine's trades)`],
-  ];
-  const box = document.getElementById("atLearningStages");
-  if (box) {
-    box.innerHTML = stages.map(x => `<div style="margin-bottom:11px"><div class="stage"><b>${atEsc(x[0])}</b><span>${Number(x[1]).toFixed(1)}% · ${atEsc(x[2])}</span></div><div class="bar"><i style="width:${Math.max(0, Math.min(100, Number(x[1]) || 0))}%"></i></div></div>`).join("");
-  }
-
-  const detail = document.getElementById("atLearningDetail");
-  if (detail) {
-    const histText = hp.status || st.hist_status || histStatus;
-    detail.textContent = `Historical: ${histText}. The Auto Buy/Sell engine uses the shared GRU/ML pipeline; completed paper and live trades are added as new evidence. Detailed per-model validation remains on the AI Evolution Engine tab.`;
-  }
-}
-
-function atFormatLearningTime(v) {
-  try {
-    const d = new Date(v);
-    if (isNaN(d.getTime())) return String(v);
-    return d.toLocaleString("en-IN", {day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit"});
-  } catch(e) { return String(v); }
-}
-
-
-function atRenderVisualDashboard(state, prog, st) {
-  state = state || {}; prog = prog || {}; st = st || {};
-  const cfg = state.config || {};
-  const edge = state.edge_status || {};
-  const hp = prog.historical || {}; const dp = prog.dl || {}; const lp = prog.live || {};
-  const hg = st.historical_gru || {};
-  const symbol = (state.symbols && state.symbols[0]) || (state.open_positions && state.open_positions[0] && state.open_positions[0].symbol) || "INDEX";
-  const pUp = Number(st.up_probability);
-  const hasP = Number.isFinite(pUp) && pUp >= 0 && pUp <= 1;
-  const upGate = Number(st.up_probability); const downGate = Number(st.down_probability);
-  let decision = "WAIT", note = state.market_open ? "NO EXECUTABLE SIGNAL" : "NO LIVE DATA";
-  if (state.market_open && hasP) {
-    if (pUp >= upGate && pUp > 0.5) { decision = "BUY CE"; note = "INDEX BIAS UP"; }
-    else if (pUp <= downGate && pUp < 0.5) { decision = "BUY PE"; note = "INDEX BIAS DOWN"; }
-    else { decision = "WAIT"; note = "MODEL UNCERTAIN"; }
-  }
-  const pct = hasP ? pUp * 100 : 0;
-  const ring = hasP ? Math.max(0,Math.min(360,pct/100*360)) : 0;
-  const ringEl=document.getElementById("atvRing"); if(ringEl) ringEl.style.setProperty("--ring",ring+"deg");
-  setN("atvDecision",decision); setN("atvProb",hasP?`P(UP) ${pct.toFixed(1)}%`:"P(UP) —"); setN("atvDecisionNote",note); setN("atvIndex",symbol);
-  const regime = (st.research_ensemble && st.research_ensemble.regime) || "—";
-  setN("atvRegime",String(regime).replace(/_/g," ").toUpperCase());
-  const edgeText=edge.edge_confirmed?"CONFIRMED":((edge.win_rate!=null)?`${Number(edge.win_rate).toFixed(1)}% WIN`:"—"); setN("atvEdge",edgeText);
-  const live=cfg.execution_mode === "live"; const armed=!!cfg.armed;
-  setN("atvEngineStatus",`● ${armed?"ARMED":"DISARMED"} · ${live?"LIVE":"PAPER"}`); setN("atvMode",live?"LIVE":"PAPER / TRACK");
-  setN("atvPositions",`${(state.open_positions||[]).length} / ${cfg.max_concurrent_positions || 3}`);
-  const pnl=Number(state.today_pnl && state.today_pnl.paper || 0); setN("atvPnl",fmtMoney(pnl)); setN("atvPnlPct",pnl>=0?"Paper track positive":"Paper track negative");
-  setN("atvWin",edge.win_rate!=null?Number(edge.win_rate).toFixed(1)+"%":"—"); setN("atvWinDetail",`${edge.trades||0} closed paper trades`); setN("atvRpf",`${edge.avg_r!=null?atFmtR(edge.avg_r):"—"} / ${edge.profit_factor!=null?"PF "+edge.profit_factor:"PF —"}`);
-  const lossLimit=live?(cfg.max_daily_loss_live||0):(cfg.max_daily_loss_paper||0); setN("atvLoss",`${fmtMoney(Math.max(0,-pnl))} / ${fmtMoney(lossLimit)}`);
-  const ml=st.live_ml_model_a||{}; const ens=st.research_ensemble||{}; const mlReady=Math.min(100,Number(ml.samples||0)/Math.max(1,Number((cfg.ml_min_samples||40)))*100); const warm=Number(st.adaptive_min_score); const warmPct=Number.isFinite(warm)?Math.max(0,Math.min(100,(warm-55)/17*100)):0;
-  const vals=[hasP?pct:null,ml.samples?mlReady:null,ens.probability!=null?Number(ens.probability)*100:null,warmPct];
-  [["atvGruBar","atvGruVal",vals[0]],["atvMlBar","atvMlVal",vals[1]],["atvEnsBar","atvEnsVal",vals[2]],["atvWarmBar","atvWarmVal",vals[3]]].forEach(([b,v,x])=>{const be=document.getElementById(b),ve=document.getElementById(v);if(be)be.style.width=(x==null?0:x)+"%";if(ve)ve.textContent=x==null?"—":x.toFixed(0)+"%";});
-  setN("atvAction",decision); setN("atvActionReason",decision==="WAIT"?note:"Directional AI signal ready for option selection");
-  const histSamples=Number(dp.samples||hg.samples||hp.model&&hp.model.samples||0); const acc=dp.accuracy ?? hg.accuracy ?? (hp.model && hp.model.accuracy); const auc=dp.auc ?? hg.auc ?? (hp.model && hp.model.auc); const histPct=Math.max(0,Math.min(100,Number(dp.progress??hp.progress??0))); const livePct=Math.max(0,Math.min(100,Number(lp.progress||0)));
-  setN("atvHistPct",histPct.toFixed(0)+"%"); setN("atvHistStatus",String(dp.status||hg.status||hp.status||"WAITING").replace(/_/g," ")); setN("atvHistSamples",histSamples?histSamples.toLocaleString("en-IN"):"—"); setN("atvHistAcc",acc==null?"—":Number(acc).toFixed(1)+"%"); setN("atvHistAuc",auc==null?"—":Number(auc).toFixed(3)); setN("atvLiveEvidence",`${Number(lp.ml_samples||0).toLocaleString("en-IN")} / ${Number(lp.dl_samples||0).toLocaleString("en-IN")}`); setN("atvLiveEvidenceSub","ML / DL samples"); setN("atvLearnWarm",Number.isFinite(warm)?warm.toFixed(1)+"/100":"—");
-  const hb=document.getElementById("atvHistBar"),lb=document.getElementById("atvLiveBar");if(hb)hb.style.width=histPct+"%";if(lb)lb.style.width=livePct+"%";setN("atvLivePct",livePct.toFixed(0)+"%");
-  const trained=/TRAINED|PRETRAINED/i.test(String(dp.status||hg.status||hp.status||""))||histSamples>0; setN("atvLearningBadge",trained?"● TRAINED & LEARNING":"● WAITING / TRAINING");
-  const now=new Date();setN("atvClock",now.toLocaleTimeString("en-IN",{hour12:false}));setN("atvDate",now.toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"}));setN("atvNextScan",state.market_open?"Live AI cycle active":"Market closed");
-  const open=state.open_positions&&state.open_positions[0]; const setup=open&&open.setup_json; let snap={}; try{snap=typeof setup==='string'?JSON.parse(setup||"{}"):setup||{}}catch(e){}
-  setN("atvSpot",snap.spot!=null?fmtMoney(snap.spot):"—");setN("atvVol",snap.volatility!=null?Number(snap.volatility).toFixed(2):"—");setN("atvPcr",snap.pcr!=null?Number(snap.pcr).toFixed(2):"—");setN("atvOption",open&&open.option_symbol?open.option_symbol:"—");setN("atvCeBias",decision==="BUY CE"?"BULLISH":"—");setN("atvPeBias",decision==="BUY PE"?"BEARISH":"—");setN("atvRadarCenter",state.market_open?symbol:"—");setN("atvRadarNote",state.market_open?(decision+" · AI"):"NO LIVE DATA");
-}
-
-function atFmtElapsed(sec){sec=Math.max(0,Math.floor(Number(sec)||0));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return (h?String(h).padStart(2,"0")+":" : "")+String(m).padStart(2,"0")+":"+String(s).padStart(2,"0");}
-let atHistoricalTrainingPollBusy=false;
-let atHistoricalTrainingTimer=null;
-async function atReadHistoricalTraining(){
-  if(atHistoricalTrainingPollBusy)return null;
-  atHistoricalTrainingPollBusy=true;
-  const controller=new AbortController();
-  const timeout=setTimeout(()=>controller.abort(),8000);
+async function dkRequest(path,body){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);try{const r=await fetch('/api/ai-desk/'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal,cache:'no-store'});let data;try{data=await r.json()}catch{throw Error('Backend response is not JSON. Check the updated server files.')}if(!r.ok)throw Error(data.error||'Request failed');return data}finally{clearTimeout(timer)}}
+function dkNotice(message,error=false){dkText('dkNotice',message);dkEl('dkNotice')?.classList.toggle('error',error)}
+async function dkConfirm(title,text){const d=dkEl('dkDialog');dkText('dkDialogTitle',title);dkText('dkDialogText',text);return new Promise(resolve=>{d.addEventListener('close',()=>resolve(d.returnValue==='confirm'),{once:true});d.showModal()})}
+async function dkAction(action,body={}){
   try{
-    const r=await fetch("/api/ai-evolution/historical",{signal:controller.signal,cache:"no-store"});
-    const raw=await r.text();let d;
-    try{d=JSON.parse(raw)}catch(e){throw Error("Backend returned non-JSON (HTTP "+r.status+")")}
-    if(!r.ok)throw Error(d.error||d.message||"Request failed");
-    const active=String(d.training_active||"0")==="1";
-    const stalled=!!d.training_stalled;
-    const pct=Math.max(0,Math.min(100,Number(d.training_progress||0)));
-    const phase=String(d.training_phase||d.model_status||d.status||"IDLE");
-    const btn=document.getElementById("atRetrainBtn");
-    if(btn){btn.disabled=active;btn.textContent=active?(stalled?"⚠ TRAINING STALLED":"⏳ TRAINING IN PROGRESS"):"▶ RETRAIN HISTORICAL GRU";}
-    const st=document.getElementById("atRetrainStatus");
-    if(st){
-      if(stalled){const age=d.training_heartbeat_age_sec==null?"missing":Math.round(Number(d.training_heartbeat_age_sec||0))+"s old";st.textContent="Worker heartbeat is "+age+" — restart the backend, then retry.";}
-      else if(active)st.textContent=phase+" · worker heartbeat healthy";
-      else if(phase==="COMPLETE")st.textContent="Training complete — model statistics updated.";
-      else st.textContent=(d.training_error?phase+" · "+d.training_error:phase);
-    }
-    const pb=document.getElementById("atRetrainProgress");if(pb)pb.style.width=pct+"%";
-    const pp=document.getElementById("atRetrainPct");if(pp)pp.textContent=pct.toFixed(1)+"%";
-    setN("atRetrainPhase",phase.replace(/_/g," "));
-    setN("atRetrainEpoch",d.training_epochs?((d.training_epoch||0)+" / "+d.training_epochs):"—");
-    let elapsed=Number(d.training_elapsed_sec||0);
-    if(active&&d.training_started_at){const live=(Date.now()-new Date(d.training_started_at).getTime())/1000;if(Number.isFinite(live))elapsed=Math.max(elapsed,live);}
-    setN("atRetrainElapsed",atFmtElapsed(elapsed));
-    const ms=d.model||{};
-    const shownSamples=active?Number(d.training_samples||0):Number(ms.samples||d.training_samples||0);
-    setN("atRetrainSamples",shownSamples?shownSamples.toLocaleString("en-IN"):"—");
-    setN("atRetrainQuality",ms.accuracy!=null?(Number(ms.accuracy).toFixed(1)+"% / "+(ms.auc==null?"—":Number(ms.auc).toFixed(3))):"—");
-    const ql=document.getElementById("atRetrainQualityLabel");if(ql)ql.textContent=active?"CURRENT MODEL ACC / AUC":"NEW ACC / AUC";
-    return active;
-  }catch(e){
-    const st=document.getElementById("atRetrainStatus");if(st)st.textContent=(e.name==="AbortError"?"Backend status timed out — retrying…":"Backend status unavailable: "+(e.message||e));return false;
-  }finally{clearTimeout(timeout);atHistoricalTrainingPollBusy=false;}
+    if(action==='arm'&&deskState?.config.mode==='live'){if(!await dkConfirm('Arm live execution?','The engine will automatically submit real index-option BUY and SELL orders to your connected Kite account until you disarm it.'))return;body.ack=true}
+    if(action==='close'&&!await dkConfirm('Close all desk positions?','Disarm new entries and request exits for all v2 positions. Pending orders must reconcile; market closure or missing quotes can delay completion.'))return;
+    await dkRequest('control/'+action,body);dkNotice(action==='train'?'Training started. Follow progress in Learning lab.':action==='sync'?'Recent-history sync started.':'Control accepted; refreshing state.');await refreshAutoTradeAI();
+  }catch(e){dkNotice(e.message,true)}
 }
-async function atStartHistoricalRetrain(){const btn=document.getElementById("atRetrainBtn"),st=document.getElementById("atRetrainStatus");if(btn)btn.disabled=true;if(st)st.textContent="Starting historical GRU retraining…";try{const r=await fetch("/api/ai-evolution/historical/retrain",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});const raw=await r.text();let d;try{d=JSON.parse(raw)}catch(e){throw Error("Backend returned non-JSON (HTTP "+r.status+")")};if(!r.ok||d.ok===false)throw Error(d.message||d.error||"Retraining could not be started");await atReadHistoricalTraining();}catch(e){if(st)st.textContent="ERROR · "+e.message;if(btn)btn.disabled=false;}}
-function atStartTrainingHeartbeat(){atReadHistoricalTraining();if(!atHistoricalTrainingTimer)atHistoricalTrainingTimer=setInterval(atReadHistoricalTraining,2000);}
-
-async function refreshAutoTradeAI() {
-  try {
-    const state = await aiGet("/api/ai-autotrade/state");
-    atLastConfig = state.config;
-    const isLive = state.config.execution_mode === "live";
-    const armed = !!state.config.armed;
-
-    setN("atModePill", isLive ? "LIVE" : "PAPER");
-    document.getElementById("atModePill").style.color = isLive ? "#ff8e9c" : "#7ee2b1";
-    setN("atArmedPill", armed ? "ARMED" : "DISARMED");
-    document.getElementById("atArmedPill").style.color = armed ? "#7ee2b1" : "#ffc857";
-
-    document.getElementById("atPaperBtn").classList.toggle("active-mode", !isLive);
-    document.getElementById("atLiveBtn").classList.toggle("active-mode", isLive);
-
-    const banner = document.getElementById("atModeBanner");
-    if (isLive) {
-      banner.className = "warn-box-live";
-      banner.textContent = "🔴 LIVE MODE — armed = TRUE means real BUY/SELL orders are sent to Zerodha automatically, with no per-trade confirmation.";
-    } else {
-      banner.className = "warn-box-paper";
-      banner.textContent = "📝 PAPER MODE — no broker orders are sent. Every completed paper trade is fed back into the shared GRU/ML models as new learning data.";
-    }
-
-    setN("atMarketOpen", state.market_open ? "OPEN" : "CLOSED");
-    setN("atOpenCount", (state.open_positions || []).length);
-    setN("atPaperPnl", fmtMoney(state.today_pnl ? state.today_pnl.paper : 0));
-    setN("atLivePnl", fmtMoney(state.today_pnl ? state.today_pnl.live : 0));
-
-    atFillConfigInputs(state.config);
-    atRenderEdge(state.edge_status || {});
-    atRenderSignals(state.symbols, state.open_positions);
-    atRenderOpenTable(state.open_positions);
-
-    const [trades, actions, learnProg, evoStatus, histStatus] = await Promise.all([
-      aiGet("/api/ai-autotrade/trades?limit=50"),
-      aiGet("/api/ai-autotrade/actions?limit=80"),
-      aiGet("/api/ai-evolution/learning-progress"),
-      aiGet("/api/ai-evolution/directional-status"),
-      aiGet("/api/ai-evolution/historical")
-    ]);
-    atReadHistoricalTraining();
-    atRenderTradesTable(trades);
-    atRenderActionsTable(actions);
-    atRenderLearningStatus(learnProg, evoStatus);
-    atRenderVisualDashboard(state, learnProg, evoStatus);
-  } catch (e) {
-    console.error("[AUTOTRADE-AI] refresh failed:", e);
-    setN("atStatus", e.message || "Refresh failed");
-  }
+const dkFields=[['capital','Capital per trade · ₹',1000,10000000,1000],['risk','Planned risk per trade · ₹',100,100000,100],['daily_loss','Daily loss limit · ₹',100,1000000,100],['max_positions','Maximum open positions',1,5,1],['confidence','Minimum direction confidence',.55,.85,.01],['max_spread','Maximum option spread · %',.1,3,.1],['stop_pct','Option stop distance · %',3,40,1],['reward_r','Target / planned risk',1,4,.1],['partial_take_r','Trim half at profit · R',.5,3,.1],['max_hold','Maximum hold · minutes',5,360,5],['square_off','Square-off time · IST'],['cooldown','Re-entry cooldown · minutes',1,120,1],['slippage_bps','Adverse slippage · basis points',1,100,1],['fee_per_order','Estimated cost per order · ₹',1,500,1]];
+function initAutoTradeAIUI(){
+  if(deskInitialized){refreshAutoTradeAI();return}deskInitialized=true;
+  dkHTML('dkSettingsFields',dkFields.map(([k,label,min,max,step])=>`<label>${dkEsc(label)}<input name="${k}" type="${k==='square_off'?'time':'number'}" ${min!=null?`min="${min}" max="${max}" step="${step}"`:''} required></label>`).join(''));
+  document.querySelectorAll('#desk [data-view]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('#desk [data-view]').forEach(x=>{x.classList.toggle('selected',x===b);x.setAttribute('aria-current',x===b?'page':'false')});document.querySelectorAll('#desk [data-pane]').forEach(p=>p.hidden=p.dataset.pane!==b.dataset.view)}));
+  [['dkArm','arm'],['dkDisarm','disarm'],['dkClose','close'],['dkScan','scan'],['dkTrain','train'],['dkSync','sync'],['dkClear','clear-halt']].forEach(([id,a])=>dkEl(id).onclick=()=>dkAction(a));
+  dkEl('dkMode').onchange=async e=>{const mode=e.target.value;try{if(mode==='live'&&!await dkConfirm('Switch to live mode?','Live mode requires a qualifying forward paper record. Switching modes disarms entries; arming live requires a separate confirmation.')){e.target.value=deskState?.config.mode||'paper';return}await dkRequest('control/mode',{mode,ack:mode==='live'});await refreshAutoTradeAI()}catch(err){dkNotice(err.message,true);e.target.value=deskState?.config.mode||'paper'}};
+  dkEl('dkSettings').oninput=()=>deskDirty=true;
+  dkEl('dkSettings').onsubmit=async e=>{e.preventDefault();try{const body={};new FormData(e.target).forEach((v,k)=>body[k]=k==='square_off'?v:Number(v));await dkRequest('config',body);deskDirty=false;dkNotice('Risk settings saved.');await refreshAutoTradeAI()}catch(err){dkNotice(err.message,true)}};
+  dkEl('dkExport').onclick=()=>{if(!deskState)return;const keys=['ts','symbol','mode','contract','qty','entry','status','pnl','fees','exit_reason'];const csv=[keys.join(','),...deskState.trades.map(r=>keys.map(k=>'"'+String(r[k]??'').replace(/"/g,'""').replace(/^[=+@-]/,"'")+'"').join(','))].join('\r\n');const url=URL.createObjectURL(new Blob([csv],{type:'text/csv'})),a=document.createElement('a');a.href=url;a.download='ai-desk-trades.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+  refreshAutoTradeAI();deskTimer=setInterval(()=>{if(!document.hidden&&dkEl('desk')?.getClientRects().length)refreshAutoTradeAI()},8000);
 }
+async function refreshAutoTradeAI(){if(deskBusy)return;deskBusy=true;try{deskState=await dkRequest('state');dkRender(deskState)}catch(e){dkNotice(e.name==='AbortError'?'Backend request timed out; displayed values may be stale.':e.message,true);dkText('dkPulse','OFFLINE');['dkArm','dkMode'].forEach(id=>{if(dkEl(id))dkEl(id).disabled=true})}finally{deskBusy=false}}
+function dkRender(s){
+  const cfg=s.config||{},ev=s.evidence||{},model=s.model||{},obs=s.observations||{};
+  const age=s.last_cycle?(Date.now()-new Date(s.last_cycle).getTime())/1000:Infinity;
+  dkText('dkMarket',s.market_open?'MARKET OPEN':'MARKET CLOSED');dkEl('dkMarket').classList.toggle('good',s.market_open);
+  dkText('dkClock',dkTime(s.timestamp)+' IST');dkText('dkUpdated','Updated '+dkTime(s.timestamp));dkText('dkPnl',dkMoney(s.pnl?.[cfg.mode]));dkEl('dkPnl').className=(s.pnl?.[cfg.mode]||0)<0?'negative':'positive';dkText('dkPnlMode',cfg.mode==='live'?'Live account · estimated costs':'Paper account · estimated costs');
+  dkText('dkExposure',dkMoney((s.positions||[]).reduce((v,p)=>v+p.entry*p.qty,0)));dkText('dkPositionCount',`${s.positions.length} / ${cfg.max_positions} active positions`);dkText('dkEvidence',`${ev.trades||0} / 60`);dkText('dkPulse',age>60?'DELAYED':cfg.armed?'ARMED':'DISARMED');dkText('dkCycle',s.last_cycle?'Last engine cycle '+dkTime(s.last_cycle):'Awaiting engine heartbeat');
+  dkNotice(age>60&&s.market_open?'Engine heartbeat delayed. Check the backend before arming.':s.block||'Engine active · qualifying signals can enter '+cfg.mode+' trades.',!!s.halt);
+  dkEl('dkMode').value=cfg.mode;dkEl('dkMode').disabled=false;dkEl('dkMode').querySelector('option[value="live"]').disabled=!ev.ready;
+  dkEl('dkArm').disabled=!!cfg.armed||!s.connected||!s.model||!!s.halt||age>60;dkEl('dkDisarm').disabled=!cfg.armed;
+  dkHTML('dkSymbols',(s.signals||[]).map(x=>`<button data-symbol="${dkEsc(x.symbol)}" class="${deskSymbol===x.symbol?'selected':''}"><b>${dkEsc(x.symbol)}</b><span>${x.p_up==null?'NO PREDICTION':dkNum(x.p_up*100,1)+'% UP'} · ${dkEsc(x.decision)}</span></button>`).join(''));
+  document.querySelectorAll('#desk [data-symbol]').forEach(b=>b.onclick=()=>{deskSymbol=b.dataset.symbol;dkRender(deskState)});
+  const sig=(s.signals||[]).find(x=>x.symbol===deskSymbol)||{};
+  dkText('dkChartName',deskSymbol);dkText('dkSpot',dkNum(sig.spot));dkText('dkChartMeta',sig.bar_age!=null?(sig.bar_age>15?'Historical view · stale for execution':'Latest completed candle'):'Completed 5-minute candles');dkText('dkBarTime',sig.bar_ts?dkDate(sig.bar_ts)+' IST':'No candle received');dkHTML('dkPriceChart',dkLineChart(sig.chart,'close','Connect Kite and sync history to see market candles.'));
+  dkText('dkDirection',sig.direction==='UP'?'Upward bias':sig.direction==='DOWN'?'Downward bias':'Awaiting data');dkText('dkRegime',sig.regime||'—');dkText('dkProbability',sig.p_up==null?'—':dkNum(sig.p_up*100,1)+'%');dkEl('dkProbFill').style.width=sig.p_up==null?'0%':Math.max(0,Math.min(100,sig.p_up*100))+'%';dkText('dkReason',s.block||sig.reason||'Waiting for data');
+  dkHTML('dkModels',dkKV('Historical model',sig.historical_probability==null?'—':dkNum(sig.historical_probability*100,1)+'% UP')+dkKV('Forward model',sig.online_probability==null?'Collecting evidence':dkNum(sig.online_probability*100,1)+'% UP'));
+  const factors=sig.factors||[],max=Math.max(.01,...factors.map(f=>Math.abs(f.impact)));
+  dkHTML('dkFactors',factors.length?factors.map(f=>`<div class="dk-factor"><span>${dkEsc(f.name.replace(/_/g,' '))}</span><div class="dk-factor-track"><i style="width:${Math.abs(f.impact)/max*100}%;background:${f.impact>0?'#b1ef65':'#8bb6ff'}"></i></div><b>${f.impact>0?'+':''}${dkNum(f.impact)}</b></div>`).join(''):'<span class="dk-muted">Feature contributions appear with a prediction.</span>');
+  dkText('dkContract',sig.contract||'No qualified contract');dkHTML('dkPlan',dkKV('Status',sig.decision||'WAIT')+dkKV('Quantity',sig.qty??'—')+dkKV('Estimated entry',dkMoney(sig.entry))+dkKV('Stop / target',dkMoney(sig.stop)+' / '+dkMoney(sig.target))+dkKV('Spread',sig.spread==null?'—':dkNum(sig.spread)+'%'));
+  dkText('dkLiveLock',ev.ready?'Eligible':'Locked');dkHTML('dkGates',(ev.checks||[]).map(g=>`<div class="dk-gate ${g.ok?'pass':''}"><i>${g.ok?'✓':'○'}</i><span>${dkEsc(g.name)}</span><b>${dkEsc(g.value==null?(g.ok?'No losses':'—'):g.value)} / ${g.required}</b></div>`).join(''));
+  dkHTML('dkPositions',dkTable(['Index / option','Mode','Qty','Entry','Bid','Open P&L','Status / action'],(s.positions||[]).map(p=>[p.symbol+' / '+p.contract,p.mode,p.qty,dkNum(p.entry),dkNum(p.bid),dkMoney(p.unrealized),p.status+' · '+(p.reason||'Reconciling')])));
+  dkHTML('dkEvents',(s.events||[]).slice(0,8).map(e=>`<div class="dk-event"><time>${dkTime(e.ts)}</time><b>${dkEsc(e.kind)}</b><span>${dkEsc((e.symbol?e.symbol+' · ':'')+e.detail)}</span></div>`).join('')||'<div class="dk-empty">The next scan will add its decision and reason here.</div>');
+  const train=s.training||{};dkText('dkTrainingState',train.status||'IDLE');dkText('dkTrainingPct',(train.progress||0)+'%');dkEl('dkTrainingFill').style.width=(train.progress||0)+'%';dkText('dkTrainingError',train.error||'');const training=!['IDLE','COMPLETE','ERROR','HISTORY READY'].includes(train.status||'IDLE');dkEl('dkTrain').disabled=training;dkEl('dkSync').disabled=training;
+  dkHTML('dkHistorical',dkKV('Training observations',model.train_samples?.toLocaleString('en-IN')||'—')+dkKV('Unseen validation',model.validation_samples?.toLocaleString('en-IN')||'—')+dkKV('Validation accuracy',dkNum(model.accuracy,1)+'%')+dkKV('Majority baseline',dkNum(model.baseline,1)+'%')+dkKV('Validation AUC',dkNum(model.auc,3))+dkKV('Brier score',dkNum(model.brier,3))+dkKV('Model version',model.id||'Not trained'));
+  dkHTML('dkOnline',dkKV('Recorded predictions',obs.total||0)+dkKV('Observed outcomes',obs.settled||0)+dkKV('Pending outcomes',(obs.total||0)-(obs.settled||0))+dkKV('Online model observations',s.online?.samples||'Collecting · minimum 80')+dkKV('Forward validation AUC',dkNum(s.online?.auc,3))+dkKV('Ensemble contribution',(s.online?.auc||0)>=.52?'20%':'0% · awaiting validation'));
+  dkHTML('dkPaperLearning',dkKV('Closed paper trades',ev.trades||0)+dkKV('Net paper result',dkMoney(ev.net))+dkKV('Paper win rate',dkNum(ev.win_rate,1)+'%')+dkKV('Live eligibility',ev.ready?'Paper thresholds passed':'Evidence still building'));
+  dkHTML('dkCoverage',dkTable(['Index','Stored candles used','First candle','Last candle'],(model.coverage||[]).map(r=>[r.symbol,r.bars,dkDate(r.first),dkDate(r.last)])));
+  dkHTML('dkEquity',dkLineChart(ev.equity,'pnl','Close at least two paper trades to draw the equity curve.'));
+  dkHTML('dkTrades',dkTable(['Opened','Index','Mode','Contract','Entry','Status','Realized','Est. costs','Exit reason'],(s.trades||[]).map(p=>[dkDate(p.ts),p.symbol,p.mode,p.contract,dkNum(p.entry),p.status,dkMoney(p.pnl),dkMoney(p.fees),p.exit_reason||'—'])));
+  dkHTML('dkOrders',dkTable(['Time','Side','Mode','Requested / filled','Status','Broker ID','Reason'],(s.orders||[]).map(o=>[dkTime(o.ts),o.side,o.mode,o.qty+' / '+o.filled,o.status,o.broker_id||'Awaiting acknowledgement',o.error||o.reason])));
+  if(!deskDirty)dkFields.forEach(([k])=>{const input=dkEl('dkSettings')?.elements.namedItem(k);if(input)input.value=cfg[k]});
+  dkText('dkHalt',s.halt||'No unresolved order reported.');dkEl('dkClear').disabled=!s.halt;
+  dkHTML('dkLegacy',(s.legacy||[]).length?`<p class="dk-footnote negative">${s.legacy.length} legacy position(s) remain open. Reconcile and close those positions in the previous controls/broker before enabling new entries.</p>`:'');
+}
+
 </script>
-<script>document.addEventListener("DOMContentLoaded",atStartTrainingHeartbeat);</script>
-<script>setInterval(()=>{const b=document.getElementById("atRetrainBtn");if(b&&b.disabled)atReadHistoricalTraining();},1000);</script>
+<!-- AI_DESK_V2_SCRIPT_END -->
 
 <script>
 // ============================================================================
