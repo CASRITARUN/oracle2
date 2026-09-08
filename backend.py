@@ -12408,6 +12408,525 @@ def start_application_workers():
     threading.Thread(target=_breakout_monitor_loop,daemon=True).start()
     DESK.start()
 
+# === BEGIN INDEPENDENT COMMODITY DESK ===
+# MCX futures only. No index models, tables, controls or workers are modified.
+# API references: https://kite.trade/docs/connect/v3/{market-quotes,historical,orders,margins}/
+# Run one backend process (as already required by AI Desk v2).
+def _build_commodity_engine():
+    import copy
+    import json
+    import math
+    import os
+    import sqlite3
+    import threading
+    import time
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    tz = timezone(timedelta(hours=5, minutes=30))
+    def now(): return datetime.now(tz)
+    def stamp(): return now().isoformat()
+    def dt(value):
+        x = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        return x.replace(tzinfo=tz) if x.tzinfo is None else x.astimezone(tz)
+    def num(value, lo=0, hi=1e12):
+        if isinstance(value, bool): raise ValueError('Use a numeric value')
+        x = float(value)
+        if not math.isfinite(x) or not lo <= x <= hi: raise ValueError(f'Value must be between {lo} and {hi}')
+        return x
+    def round_tick(price, tick, up):
+        return round((math.ceil(price / tick - 1e-9) if up else math.floor(price / tick + 1e-9)) * tick, 8)
+    def ema(values, n):
+        v = values[0]
+        for x in values[1:]: v += 2 / (n + 1) * (x - v)
+        return v
+
+    class CommodityEngine:
+        defaults = dict(mode='paper', armed=False, contract='', multiplier=0., verified=False,
+            last_entry_date='', capital=100000., risk=1500., daily_loss=5000., max_notional=1000000.,
+            max_lots=1, atr_stop=1.8, reward_r=2., max_spread_bps=15., min_volume=100,
+            min_oi=100, max_hold=120, cooldown=15, fee_per_order=50., slippage_bps=3.,
+            session_start='09:15', last_entry='21:30', square_off='22:30')
+        bounds = dict(multiplier=(.000001,1e7),capital=(1000,1e9),risk=(100,1e7),
+            daily_loss=(100,1e8),max_notional=(1000,1e10),max_lots=(1,100),atr_stop=(1,5),
+            reward_r=(1,5),max_spread_bps=(1,100),min_volume=(1,1e8),min_oi=(1,1e9),
+            max_hold=(5,720),cooldown=(1,240),fee_per_order=(1,10000),slippage_bps=(1,50))
+        integers = {'max_lots','min_volume','min_oi','max_hold','cooldown'}
+        def __init__(self, broker, connected, path):
+            self.broker, self.connected, self.path = broker, connected, path
+            self.lock = threading.RLock()
+            self.instruments_cache, self.instrument_day = [], None
+            self.bars_cache = {}
+            self.worker = None
+            with self.db() as c:
+                c.execute('CREATE TABLE IF NOT EXISTS commodity_state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
+                row = c.execute('SELECT value FROM commodity_state WHERE id=1').fetchone()
+            self.s = json.loads(row[0]) if row else dict(config=copy.deepcopy(self.defaults),position=None,
+                pending=None,trades=[],events=[],signal=None,heartbeat=None,error=None,halt=None,
+                close_requested=False,last_entry_bar=None,last_exit=None,loss_day=None,quotes_stale=False)
+            self.s['config']['armed'] = False  # a process restart never resumes entries
+            self.save()
+        def db(self): return sqlite3.connect(self.path, timeout=20)
+        def save(self):
+            with self.db() as c:
+                c.execute('INSERT OR REPLACE INTO commodity_state(id,value) VALUES(1,?)',
+                          (json.dumps(self.s,allow_nan=False),))
+        def event(self, kind, message):
+            self.s['events'].insert(0,dict(ts=stamp(),kind=kind,message=str(message)))
+            self.s['events'] = self.s['events'][:300]
+        def instruments(self):
+            if self.instrument_day != now().date():
+                records = self.broker.instruments('MCX')
+                self.instruments_cache = [dict(symbol=r['tradingsymbol'],token=int(r['instrument_token']),
+                    expiry=str(r['expiry'])[:10],lot_size=int(r['lot_size']),tick_size=float(r['tick_size']))
+                    for r in records if r.get('exchange')=='MCX' and r.get('instrument_type')=='FUT'
+                    and str(r.get('expiry',''))[:10] >= now().date().isoformat()
+                    and int(r.get('lot_size',0)) > 0 and float(r.get('tick_size',0)) > 0]
+                self.instruments_cache.sort(key=lambda r:(r['symbol'],r['expiry']))
+                self.instrument_day = now().date()
+            return copy.deepcopy(self.instruments_cache)
+        def instrument(self, symbol):
+            found = next((r for r in self.instruments() if r['symbol']==symbol),None)
+            if not found: raise ValueError('Select an unexpired MCX futures contract from Refresh contracts')
+            return found
+        def configure(self, body):
+            with self.lock:
+                if self.s['config']['armed'] or self.s['position'] or self.s['pending']:
+                    raise ValueError('Disarm and flatten commodity exposure before changing settings')
+                if not isinstance(body,dict): raise ValueError('Expected a settings object')
+                allowed = set(self.bounds) | {'contract','verified','last_entry_date','session_start','last_entry','square_off'}
+                if set(body)-allowed: raise ValueError('Unknown or protected setting')
+                c = copy.deepcopy(self.s['config'])
+                for key,value in body.items():
+                    if key in self.bounds:
+                        x = num(value,*self.bounds[key])
+                        if key in self.integers and not x.is_integer(): raise ValueError(key+' must be a whole number')
+                        c[key] = int(x) if key in self.integers else x
+                    else: c[key] = value
+                if c['verified'] is not True: raise ValueError('Verify contract multiplier and last permitted entry date')
+                inst = self.instrument(c['contract'])
+                cutoff = datetime.strptime(c['last_entry_date'],'%Y-%m-%d').date()
+                if cutoff >= dt(inst['expiry']).date(): raise ValueError('Last entry date must be before expiry and before the applicable tender/delivery period')
+                if cutoff < now().date(): raise ValueError('Last entry date has already passed')
+                for key in ('session_start','last_entry','square_off'):
+                    datetime.strptime(c[key],'%H:%M')
+                    if len(c[key]) != 5: raise ValueError('Times must use HH:MM')
+                if not '09:00' <= c['session_start'] < c['last_entry'] < c['square_off'] <= '23:00':
+                    raise ValueError('Use ordered IST times from 09:00 through 23:00; shorten for contract-specific sessions')
+                if c['risk'] >= c['daily_loss'] or c['daily_loss'] > c['capital']:
+                    raise ValueError('Require risk per trade < daily loss limit <= allocated capital')
+                self.s['config'] = c
+                self.s['signal'] = None
+                self.event('SETTINGS','Commodity settings saved; entry controls remain disarmed')
+                self.save()
+                return c
+        def quote(self, symbol):
+            key = 'MCX:'+symbol
+            raw = self.broker.quote([key]).get(key)
+            if not raw: raise ValueError('No MCX quote for '+symbol)
+            age = (now()-dt(raw['timestamp'])).total_seconds()
+            if not -5 <= age <= 45: raise ValueError('Stale quote: '+symbol)
+            bids = raw.get('depth',{}).get('buy',[])
+            asks = raw.get('depth',{}).get('sell',[])
+            if not bids or not asks: raise ValueError('Missing two-sided market depth')
+            bid,ask = num(bids[0]['price'],.000001),num(asks[0]['price'],.000001)
+            if bid > ask or min(int(bids[0]['quantity']),int(asks[0]['quantity'])) <= 0:
+                raise ValueError('Crossed or empty market depth')
+            return dict(bid=bid,ask=ask,bid_qty=int(bids[0]['quantity']),ask_qty=int(asks[0]['quantity']),
+                volume=int(raw.get('volume',0)),oi=int(raw.get('oi',0)),
+                spread_bps=10000*(ask-bid)/((ask+bid)/2),ts=dt(raw['timestamp']).isoformat())
+        def signal(self, inst, quote):
+            # Completed 5-minute candles only; never interpret the forming candle as evidence.
+            key = inst['symbol']
+            cached = self.bars_cache.get(key)
+            if not cached or time.monotonic()-cached[0] > 60:
+                rows = self.broker.historical_data(inst['token'],now()-timedelta(days=6),now(),'5minute',oi=True)
+                rows = sorted([r for r in rows if dt(r['date'])+timedelta(minutes=5) <= now()],key=lambda r:dt(r['date']))
+                self.bars_cache[key] = (time.monotonic(),rows)
+            else: rows = cached[1]
+            if len(rows) < 60: raise ValueError('At least 60 completed 5-minute candles are required')
+            if (now()-(dt(rows[-1]['date'])+timedelta(minutes=5))).total_seconds() > 600:
+                raise ValueError('Historical candles are stale; entries blocked')
+            closes = [num(r['close'],.000001) for r in rows[-100:]]
+            highs = [num(r['high'],.000001) for r in rows[-100:]]
+            lows = [num(r['low'],.000001) for r in rows[-100:]]
+            tr = [max(highs[i]-lows[i],abs(highs[i]-closes[i-1]),abs(lows[i]-closes[i-1])) for i in range(1,len(closes))]
+            atr = sum(tr[-14:])/14
+            if atr <= 0: raise ValueError('Zero ATR; insufficient movement')
+            e20,e50 = ema(closes,20),ema(closes,50)
+            changes = [closes[i]-closes[i-1] for i in range(len(closes)-14,len(closes))]
+            gain,loss = sum(max(0,x) for x in changes),sum(max(0,-x) for x in changes)
+            rsi = 100 if loss == 0 and gain else (50 if loss == 0 else 100-100/(1+gain/loss))
+            today = [r for r in rows if dt(r['date']).date()==now().date()]
+            vol = sum(num(r.get('volume',0)) for r in today)
+            if not vol: raise ValueError('No current-session volume for VWAP')
+            vwap = sum((float(r['high'])+float(r['low'])+float(r['close']))/3*float(r.get('volume',0)) for r in today)/vol
+            avgvol = sum(float(r.get('volume',0)) for r in rows[-21:-1])/20
+            volume_ratio = float(rows[-1].get('volume',0))/avgvol if avgvol else 0
+            price = closes[-1]
+            long_checks = [e20>e50,price>vwap,55<=rsi<=72,price>max(highs[-21:-1]),volume_ratio>=1.1]
+            short_checks = [e20<e50,price<vwap,28<=rsi<=45,price<min(lows[-21:-1]),volume_ratio>=1.1]
+            side = 'BUY' if all(long_checks) else 'SELL' if all(short_checks) else 'WAIT'
+            return dict(contract=key,side=side,score=max(sum(long_checks),sum(short_checks)),
+                checks=5,atr=atr,ema20=e20,ema50=e50,rsi=rsi,vwap=vwap,volume_ratio=volume_ratio,
+                candle=dt(rows[-1]['date']).isoformat(),ts=stamp(),quote=quote,
+                rationale='Trend + session VWAP + RSI + 20-bar breakout + volume must all align',
+                conditions=[dict(name=name,buy=bool(buy),sell=bool(sell)) for name,buy,sell in zip(
+                    ['EMA trend','Session VWAP','RSI momentum','20-bar breakout','Volume confirmation'],long_checks,short_checks)],
+                series=[dict(ts=dt(r['date']).isoformat(),open=float(r.get('open',r['close'])),high=float(r['high']),
+                    low=float(r['low']),close=float(r['close']),volume=float(r.get('volume',0))) for r in rows[-120:]])
+        def pnl(self, p):
+            return (p.get('gross') or 0)-p.get('fees',0)
+        def daily(self):
+            today = now().date().isoformat()
+            mode = self.s['config']['mode']
+            realized = sum(t['net'] for t in self.s['trades'] if t['closed_at'][:10]==today and t['mode']==mode)
+            p = self.s['position']
+            return realized + (self.pnl(p) if p else 0.)
+        def edge(self):
+            ts = [t for t in self.s['trades'] if t['mode']=='paper']
+            days = len({t['closed_at'][:10] for t in ts})
+            net = sum(t['net'] for t in ts)
+            wins = sum(max(t['net'],0) for t in ts)
+            losses = -sum(min(t['net'],0) for t in ts)
+            factor = wins/losses if losses else None
+            # Forward evidence is descriptive, not proof of future profitability.
+            return dict(trades=len(ts),days=days,net=net,profit_factor=factor,
+                eligible=len(ts)>=30 and days>=5 and net>0 and (losses==0 or factor>=1.2))
+        def block(self):
+            c = self.s['config']; current=now()
+            if self.s['halt']: return self.s['halt']
+            if not c['verified'] or not c['contract']: return 'Configure and verify an MCX contract'
+            if self.s['loss_day']==current.date().isoformat(): return 'Daily loss circuit breaker latched until next IST day'
+            if not c['armed']: return 'New entries disarmed; existing positions continue to be managed'
+            if current.weekday()>=5 or not c['session_start'] <= current.strftime('%H:%M') < c['last_entry']:
+                return 'Outside configured entry window (IST)'
+            if current.date().isoformat()>c['last_entry_date']: return 'Contract entry cutoff reached; choose a later contract'
+            if self.s['position'] or self.s['pending']: return 'One commodity exposure/order at a time'
+            if self.s['last_exit'] and (current-dt(self.s['last_exit'])).total_seconds()<c['cooldown']*60: return 'Re-entry cooldown'
+            if self.daily() <= -c['daily_loss']: return 'Daily loss limit reached'
+            return None
+        def size(self, inst, signal, q):
+            c=self.s['config']; long=signal['side']=='BUY'
+            entry=round_tick((q['ask'] if long else q['bid'])*(1+(1 if long else -1)*c['slippage_bps']/10000),inst['tick_size'],long)
+            distance=round_tick(max(signal['atr']*c['atr_stop'],inst['tick_size']*3),inst['tick_size'],True)
+            # multiplier = rupees per one price-point per ONE broker quantity unit, not lot_size.
+            unit_risk=(distance+entry*2*c['slippage_bps']/10000)*c['multiplier']
+            qty=int(max(0,c['risk']-2*c['fee_per_order'])/unit_risk)//inst['lot_size']*inst['lot_size']
+            qty=min(qty,c['max_lots']*inst['lot_size'],int(c['max_notional']/(entry*c['multiplier']))//inst['lot_size']*inst['lot_size'])
+            depth=q['ask_qty'] if long else q['bid_qty']
+            qty=min(qty,depth//inst['lot_size']*inst['lot_size'])
+            if qty<=0: raise ValueError('No full lot fits risk, notional or displayed-depth limits')
+            return entry,distance,qty
+        def order_payload(self, symbol, side, qty, price, tag):
+            return dict(variety='regular',exchange='MCX',tradingsymbol=symbol,transaction_type=side,
+                quantity=qty,product='MIS',order_type='LIMIT',validity='DAY',price=price,tag=tag)
+        def submit(self, purpose, side, qty, price, context):
+            tag='cmd'+uuid.uuid4().hex[:16]
+            pending=dict(purpose=purpose,side=side,qty=qty,price=price,tag=tag,order_id=None,
+                         created=stamp(),context=context,filled=0,turnover=0.,cancel_requested=False)
+            self.s['pending']=pending
+            self.save() # durable intent BEFORE the broker call; never blindly retry a timeout
+            try:
+                pending['order_id']=str(self.broker.place_order(**self.order_payload(context['contract'],side,qty,price,tag)))
+                self.event('ORDER',purpose+' LIMIT order submitted: '+pending['order_id'])
+            except Exception as exc:
+                self.s['halt']='Order acknowledgement uncertain. Reconciliation required; no automatic resubmission.'
+                self.s['config']['armed']=False
+                self.event('ORDER_UNCERTAIN',str(exc))
+            self.save()
+        def reconcile(self):
+            pending=self.s['pending']
+            if not pending: return
+            orders=self.broker.orders()
+            matches=[o for o in orders if (str(o.get('order_id'))==pending['order_id'] if pending['order_id'] else o.get('tag')==pending['tag'])]
+            if len(matches)!=1:
+                if (now()-dt(pending['created'])).total_seconds()>30:
+                    self.s['halt']='Pending commodity order cannot be uniquely located. Check broker; do not resubmit.'
+                    self.s['config']['armed']=False
+                return
+            o=matches[0]; pending['order_id']=str(o['order_id'])
+            if o.get('exchange')!='MCX' or o.get('tradingsymbol')!=pending['context']['contract'] or o.get('transaction_type')!=pending['side']:
+                raise ValueError('Broker order identity mismatch')
+            filled=int(o.get('filled_quantity',0)); average=float(o.get('average_price',0) or 0)
+            if filled<pending['filled'] or filled>pending['qty']: raise ValueError('Inconsistent broker fill quantity')
+            delta=filled-pending['filled']; turnover=filled*average
+            if delta:
+                fill_price=num((turnover-pending['turnover'])/delta,.000001)
+                if pending['purpose']=='ENTRY':
+                    p=self.s['position']
+                    if not p:
+                        p=copy.deepcopy(pending['context']); p.update(qty=0,entry=0.,fees=p['fee_per_order'],gross=0.)
+                        self.s['position']=p
+                    p['entry']=(p['entry']*p['qty']+fill_price*delta)/(p['qty']+delta)
+                    p['qty']+=delta; p['initial_qty']=filled
+                    sign=1 if p['side']=='BUY' else -1
+                    p['stop']=round_tick(p['entry']-sign*p['distance'],p['tick_size'],sign<0)
+                    p['target']=round_tick(p['entry']+sign*p['distance']*p['reward_r'],p['tick_size'],sign>0)
+                else:
+                    p=self.s['position']
+                    if not p or delta>p['qty']: raise ValueError('Exit fill exceeds tracked commodity exposure')
+                    if pending['filled']==0: p['fees']+=p['fee_per_order']
+                    p['realized_gross']=p.get('realized_gross',0)+(fill_price-p['entry'])*(1 if p['side']=='BUY' else -1)*delta*p['multiplier']
+                    p['qty']-=delta
+                    if p['qty']==0: self.finish(fill_price,pending['context'].get('exit_reason','Exit'))
+                pending['filled']=filled; pending['turnover']=turnover
+                self.event('FILL',pending['purpose']+' cumulative broker fill '+str(filled))
+            terminal=o.get('status') in ('COMPLETE','CANCELLED','REJECTED')
+            if terminal:
+                self.event('ORDER_STATUS',str(o.get('status'))+' '+str(o.get('status_message') or ''))
+                self.s['pending']=None
+                if o.get('status')=='REJECTED':
+                    self.s['config']['armed']=False
+                    self.s['halt']='Broker rejected order. Resolve the broker reason and clear halt.'
+            elif not pending['cancel_requested'] and ((now()-dt(pending['created'])).total_seconds()>40 or self.s['close_requested']):
+                self.broker.cancel_order(variety='regular',order_id=pending['order_id'])
+                pending['cancel_requested']=True
+            self.save()
+        def finish(self, price, reason):
+            p=self.s['position']
+            t=copy.deepcopy(p)
+            t.update(exit=price,closed_at=stamp(),exit_reason=reason,net=p.get('realized_gross',0)-p['fees'])
+            self.s['trades'].insert(0,t)
+            self.s['position']=None; self.s['last_exit']=stamp()
+            self.s['close_requested']=False
+            self.event('CLOSED',reason+'; estimated net ₹'+str(round(t['net'],2)))
+        def close_position(self, q, reason):
+            p=self.s['position']
+            if not p: return
+            if self.s['pending']:
+                self.s['close_requested']=True
+                return
+            if p['mode']=='live':
+                actual=sum(int(r.get('quantity',0)) for r in self.broker.positions().get('net',[])
+                    if r.get('exchange')=='MCX' and r.get('tradingsymbol')==p['contract'] and r.get('product')=='MIS')
+                expected=p['qty']*(1 if p['side']=='BUY' else -1)
+                if actual!=expected:
+                    self.s['halt']='Broker position differs from commodity ledger; exit blocked to avoid an unintended position. Reconcile in broker terminal.'
+                    self.s['config']['armed']=False
+                    self.event('RECONCILIATION',self.s['halt'])
+                    return
+            side='SELL' if p['side']=='BUY' else 'BUY'; sign=1 if side=='BUY' else -1
+            price=round_tick((q['ask'] if side=='BUY' else q['bid'])*(1+sign*p['slippage_bps']/10000),p['tick_size'],side=='BUY')
+            if p['mode']=='paper':
+                p['realized_gross']=(price-p['entry'])*(1 if p['side']=='BUY' else -1)*p['qty']*p['multiplier']
+                p['fees']+=p['fee_per_order']; self.finish(price,reason)
+            else:
+                self.s['close_requested']=True
+                context=copy.deepcopy(p); context['exit_reason']=reason
+                self.submit('EXIT',side,p['qty'],price,context)
+        def cycle(self, allow_entries=True):
+            with self.lock:
+                try:
+                    if not self.connected(): raise ValueError('Connect Kite; position monitoring requires market data')
+                    self.reconcile()
+                    c=self.s['config']; p=self.s['position']
+                    if p:
+                        try: q=self.quote(p['contract'])
+                        except Exception:
+                            self.s['quotes_stale']=True
+                            p['gross']=None
+                            self.s['config']['armed']=False
+                            raise
+                        self.s['quotes_stale']=False
+                        mark=q['bid'] if p['side']=='BUY' else q['ask']; sign=1 if p['side']=='BUY' else -1
+                        p['mark']=mark; p['marked_at']=q['ts']
+                        p['gross']=p.get('realized_gross',0)+(mark-p['entry'])*sign*p['qty']*p['multiplier']
+                        reason=None
+                        if self.s['close_requested']: reason='Manual / pending exit'
+                        elif now().date()>dt(p['opened_at']).date() or now().strftime('%H:%M')>=p['square_off']: reason='Session square-off'
+                        elif (now()-dt(p['opened_at'])).total_seconds()>=p['max_hold']*60: reason='Maximum hold time'
+                        elif sign*(mark-p['stop'])<=0: reason='ATR / trailing stop'
+                        elif sign*(mark-p['target'])>=0: reason='Profit target'
+                        elif self.daily()<=-c['daily_loss']: reason='Daily loss limit'
+                        if reason: self.close_position(q,reason)
+                        elif sign*(mark-p['entry'])>=p['distance']:
+                            # Only tighten; active after one planned R. Includes an estimated fee buffer.
+                            breakeven=p['entry']+sign*2*p['fee_per_order']/(max(p['qty'],1)*p['multiplier'])
+                            trail=mark-sign*p['distance']
+                            p['stop']=round_tick(max(p['stop'],breakeven,trail) if sign>0 else min(p['stop'],breakeven,trail),p['tick_size'],sign<0)
+                    if self.daily()<=-c['daily_loss']:
+                        self.s['loss_day']=now().date().isoformat(); c['armed']=False
+                    if c['contract']:
+                        inst=self.instrument(c['contract']); q=self.quote(c['contract'])
+                        sig=self.signal(inst,q); self.s['signal']=sig
+                        self.s['error']=None
+                        if allow_entries and not self.block() and sig['side']!='WAIT' and sig['candle']!=self.s['last_entry_bar']:
+                            if q['spread_bps']>c['max_spread_bps'] or q['volume']<c['min_volume'] or q['oi']<c['min_oi']:
+                                raise ValueError('Liquidity filter: spread, volume or open interest outside limits')
+                            entry,distance,qty=self.size(inst,sig,q)
+                            if abs(entry-sig['series'][-1]['close'])>sig['atr']:
+                                raise ValueError('Price moved over one ATR beyond the signal candle; wait for a fresh signal')
+                            estimated_risk=(distance+entry*2*c['slippage_bps']/10000)*qty*c['multiplier']+2*c['fee_per_order']
+                            if estimated_risk>c['daily_loss']+min(0,self.daily()):
+                                raise ValueError('Planned trade exceeds remaining daily loss budget')
+                            context=dict(contract=inst['symbol'],expiry=inst['expiry'],side=sig['side'],qty=qty,initial_qty=qty,
+                                entry=entry,distance=distance,multiplier=c['multiplier'],tick_size=inst['tick_size'],
+                                mode=c['mode'],opened_at=stamp(),fee_per_order=c['fee_per_order'],fees=c['fee_per_order'],
+                                slippage_bps=c['slippage_bps'],reward_r=c['reward_r'],max_hold=c['max_hold'],square_off=c['square_off'],
+                                mark=entry,gross=0.,signal=sig['candle'])
+                            sign=1 if sig['side']=='BUY' else -1
+                            context['stop']=round_tick(entry-sign*distance,inst['tick_size'],sign<0)
+                            context['target']=round_tick(entry+sign*distance*c['reward_r'],inst['tick_size'],sign>0)
+                            if c['mode']=='live':
+                                # Refuse any existing same-contract broker exposure or open external order.
+                                if any(int(r.get('quantity',0)) for r in self.broker.positions().get('net',[]) if r.get('exchange')=='MCX' and r.get('tradingsymbol')==inst['symbol']):
+                                    raise ValueError('Existing broker exposure in this contract; commodity entry blocked')
+                                if any(r.get('exchange')=='MCX' and r.get('tradingsymbol')==inst['symbol'] and r.get('status') not in ('COMPLETE','CANCELLED','REJECTED') for r in self.broker.orders()):
+                                    raise ValueError('Existing broker order in this contract; commodity entry blocked')
+                                payload=self.order_payload(inst['symbol'],sig['side'],qty,entry,'marginpreview')
+                                margins=self.broker.order_margins([payload])
+                                required=num(margins[0]['total'],.000001)
+                                if required+2*c['fee_per_order']>c['capital']: raise ValueError('Broker margin exceeds allocated commodity capital')
+                                self.s['last_entry_bar']=sig['candle']
+                                self.submit('ENTRY',sig['side'],qty,entry,context)
+                            else:
+                                self.s['last_entry_bar']=sig['candle']; self.s['position']=context
+                                self.event('PAPER_ENTRY',sig['side']+' '+inst['symbol']+' × '+str(qty))
+                    self.s['heartbeat']=stamp()
+                except Exception as exc:
+                    self.s['error']=str(exc)
+                    self.event('DATA / CONTROL',str(exc))
+                    self.s['heartbeat']=stamp()
+                finally: self.save()
+        def control(self, action, body):
+            with self.lock:
+                c=self.s['config']
+                if action=='disarm':
+                    c['armed']=False
+                    if self.s['pending'] and self.s['pending']['purpose']=='ENTRY':
+                        self.s['close_requested']=True  # cancel unfilled remainder, flatten any fills
+                elif action=='arm':
+                    if not c['verified'] or not c['contract']: raise ValueError('Save verified contract settings first')
+                    if self.s['halt'] or self.s['pending']: raise ValueError('Resolve halt / pending order before arming')
+                    if c['mode']=='live' and (body.get('ack') is not True or not self.edge()['eligible']):
+                        raise ValueError('Live arming requires acknowledgement and qualifying forward paper results')
+                    if not self.worker or not self.worker.is_alive(): raise ValueError('Commodity worker is not running')
+                    self.cycle(False)
+                    if self.s['error']: raise ValueError(self.s['error'])
+                    if self.s['loss_day']==now().date().isoformat(): raise ValueError('Daily loss halt remains active until next IST day')
+                    c['armed']=True
+                elif action=='mode':
+                    if self.s['position'] or self.s['pending']: raise ValueError('Flatten exposure before changing mode')
+                    if body.get('mode') not in ('paper','live'): raise ValueError('Invalid mode')
+                    if body['mode']=='live' and (body.get('ack') is not True or not self.edge()['eligible']):
+                        raise ValueError('Live requires explicit acknowledgement and 30 forward paper trades over 5 trading dates, positive net P&L and profit factor ≥ 1.2')
+                    c['mode']=body['mode']; c['armed']=False
+                elif action=='close':
+                    if body.get('ack') is not True: raise ValueError('Confirm closing commodity exposure')
+                    c['armed']=False; self.s['close_requested']=True
+                    self.save(); self.cycle(False)
+                    if not self.s['position'] and not self.s['pending']: self.s['close_requested']=False
+                elif action=='clear-halt':
+                    if self.s['position'] or self.s['pending']: raise ValueError('Resolve orders and flatten exposure first; unresolved intents cannot be cleared automatically')
+                    self.s['halt']=None; c['armed']=False
+                elif action=='scan': self.cycle(False)
+                else: raise ValueError('Unknown commodity control')
+                self.event('CONTROL',action); self.save()
+                return self.state()
+        def analytics(self):
+            """Read-only diagnostics. Never refreshes a quote or places an order."""
+            c=self.s['config']; sig=self.s.get('signal') or {}; q=sig.get('quote') or {}
+            current=now()
+            def age(value):
+                try: return (current-dt(value)).total_seconds()
+                except (ValueError,TypeError): return None
+            quote_age=age(q.get('ts')); signal_age=age(sig.get('candle'))
+            fresh=quote_age is not None and -5<=quote_age<=45
+            candle_fresh=signal_age is not None and 300<=signal_age<=900
+            position=self.s.get('position')
+            mark_age=age((position or {}).get('marked_at') or (position or {}).get('opened_at'))
+            mark_fresh=not position or (mark_age is not None and -5<=mark_age<=45 and not self.s['quotes_stale'])
+            pnl=self.daily() if mark_fresh else None
+            available=None if pnl is None else max(0,c['daily_loss']+min(0,pnl))
+            checks=[
+                dict(label='Contract specification',passed=c.get('verified') is True and bool(c.get('contract')),detail='Multiplier and delivery cutoff verified'),
+                dict(label='Fresh quote',passed=fresh,detail='No quote' if quote_age is None else f'{quote_age:.0f}s old · limit 45s'),
+                dict(label='Completed candle',passed=candle_fresh,detail='No candle' if signal_age is None else f'{signal_age/60:.1f}m since candle start'),
+                dict(label='Spread',passed=fresh and q.get('spread_bps',1e9)<=c['max_spread_bps'],detail=f"Limit {c['max_spread_bps']:g} bps"),
+                dict(label='Volume / open interest',passed=fresh and q.get('volume',0)>=c['min_volume'] and q.get('oi',0)>=c['min_oi'],detail=f"Minimum {c['min_volume']} / {c['min_oi']}"),
+                dict(label='Entry window',passed=current.weekday()<5 and c['session_start']<=current.strftime('%H:%M')<c['last_entry'],detail=c['session_start']+'–'+c['last_entry']+' IST'),
+                dict(label='Delivery cutoff',passed=bool(c.get('last_entry_date')) and current.date().isoformat()<=c['last_entry_date'],detail=c.get('last_entry_date') or 'Not configured'),
+                dict(label='Daily risk allowance',passed=available is not None and available>=c['risk'] and self.s['loss_day']!=current.date().isoformat(),detail='Remaining budget excludes gains above the daily limit'),
+                dict(label='Exposure / order slot',passed=not self.s['position'] and not self.s['pending'],detail='One commodity exposure at a time')]
+            cutoff_days=None
+            if c.get('last_entry_date'):
+                cutoff_days=(dt(c['last_entry_date']).date()-current.date()).days
+            return dict(position_mark_fresh=mark_fresh,quote_age_seconds=quote_age,signal_age_seconds=signal_age,quote_fresh=fresh,
+                candle_fresh=candle_fresh,checks=checks,remaining_daily_risk=available,
+                used_daily_risk=None if available is None else c['daily_loss']-available,
+                cutoff_days=cutoff_days,session_label='Entry window' if checks[5]['passed'] else 'Outside entry window',
+                performance={mode:self.performance(mode) for mode in ('paper','live')})
+        def performance(self, mode):
+            rows=sorted([r for r in self.s['trades'] if r['mode']==mode],key=lambda r:r['closed_at'])
+            equity=peak=drawdown=0.;curve=[];contracts={}
+            for r in rows:
+                equity+=r['net'];peak=max(peak,equity);drawdown=max(drawdown,peak-equity)
+                curve.append(dict(ts=r['closed_at'],net=round(equity,2)))
+                group=contracts.setdefault(r['contract'],dict(contract=r['contract'],trades=0,net=0.,wins=0))
+                group['trades']+=1;group['net']+=r['net'];group['wins']+=r['net']>0
+            wins=[r['net'] for r in rows if r['net']>0];losses=[r['net'] for r in rows if r['net']<0]
+            return dict(trades=len(rows),wins=len(wins),losses=len(losses),breakeven=len(rows)-len(wins)-len(losses),
+                win_rate=100*len(wins)/len(rows) if rows else None,net=equity,
+                average=equity/len(rows) if rows else None,max_drawdown=drawdown,
+                profit_factor=sum(wins)/-sum(losses) if losses else None,
+                fees=sum(r.get('fees',0) for r in rows),equity_curve=curve[-200:],
+                contracts=sorted(contracts.values(),key=lambda r:r['net'],reverse=True))
+        def state(self):
+            with self.lock:
+                result=copy.deepcopy(self.s)
+                result['trades']=result['trades'][:200]
+                result['events']=result['events'][:80]
+                result['edge']=self.edge()
+                result['entry_block']=self.block()
+                result['daily_net']=None if self.s['quotes_stale'] else self.daily()
+                result['worker_running']=bool(self.worker and self.worker.is_alive())
+                result['analytics']=self.analytics()
+                if not result['analytics']['position_mark_fresh']:
+                    result['daily_net']=None
+                    result['quotes_stale']=True
+                return result
+        def start(self):
+            if self.worker and self.worker.is_alive(): return
+            def loop():
+                while True:
+                    if self.s['config']['armed'] or self.s['position'] or self.s['pending']:
+                        self.cycle()
+                    time.sleep(20)
+            self.worker=threading.Thread(target=loop,daemon=True,name='independent-commodity-desk')
+            self.worker.start()
+    return CommodityEngine
+
+CommodityEngine = _build_commodity_engine()
+COMMODITY = CommodityEngine(kite, require_session, os.path.join(os.path.dirname(__file__), 'commodity_desk.db'))
+
+@app.route('/api/commodity/state')
+def commodity_state_route():
+    if not require_session(): return jsonify({'error':'Connect Kite using the existing login button.'}),401
+    return jsonify(COMMODITY.state())
+
+@app.route('/api/commodity/contracts')
+def commodity_contracts_route():
+    if not require_session(): return jsonify({'error':'Connect Kite first.'}),401
+    try:
+        with COMMODITY.lock: return jsonify({'contracts':COMMODITY.instruments()})
+    except Exception as exc: return jsonify({'error':str(exc)}),400
+
+@app.route('/api/commodity/config',methods=['POST'])
+def commodity_config_route():
+    if not require_session(): return jsonify({'error':'Connect Kite first.'}),401
+    try: return jsonify({'config':COMMODITY.configure(request.get_json(silent=True) or {})})
+    except (ValueError,TypeError,KeyError) as exc: return jsonify({'error':str(exc)}),400
+
+@app.route('/api/commodity/control/<action>',methods=['POST'])
+def commodity_control_route(action):
+    if not require_session(): return jsonify({'error':'Connect Kite first.'}),401
+    try: return jsonify(COMMODITY.control(action,request.get_json(silent=True) or {}))
+    except (ValueError,TypeError,KeyError) as exc: return jsonify({'error':str(exc)}),400
+
+if os.environ.get('AI_START_WORKERS','1')=='1': COMMODITY.start()
+# === END INDEPENDENT COMMODITY DESK ===
+
 start_application_workers()
 
 if __name__ == "__main__":
