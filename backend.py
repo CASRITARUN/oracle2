@@ -12442,7 +12442,7 @@ def _build_commodity_engine():
         return v
 
     class CommodityEngine:
-        defaults = dict(mode='paper', armed=False, contract='', multiplier=0., verified=False,
+        defaults = dict(mode='paper', armed=False, paper_full_session=True, contract='', multiplier=0., verified=False,
             last_entry_date='', capital=100000., risk=1500., daily_loss=5000., max_notional=1000000.,
             max_lots=1, atr_stop=1.8, reward_r=2., max_spread_bps=15., min_volume=100,
             min_oi=100, max_hold=120, cooldown=15, fee_per_order=50., slippage_bps=3.,
@@ -12464,6 +12464,7 @@ def _build_commodity_engine():
             self.s = json.loads(row[0]) if row else dict(config=copy.deepcopy(self.defaults),position=None,
                 pending=None,trades=[],events=[],signal=None,heartbeat=None,error=None,halt=None,
                 close_requested=False,last_entry_bar=None,last_exit=None,loss_day=None,quotes_stale=False)
+            self.s['config'].setdefault('paper_full_session', True)  # migrate existing commodity settings
             self.s['config']['armed'] = False  # a process restart never resumes entries
             self.save()
         def db(self): return sqlite3.connect(self.path, timeout=20)
@@ -12494,10 +12495,12 @@ def _build_commodity_engine():
                 if self.s['config']['armed'] or self.s['position'] or self.s['pending']:
                     raise ValueError('Disarm and flatten commodity exposure before changing settings')
                 if not isinstance(body,dict): raise ValueError('Expected a settings object')
-                allowed = set(self.bounds) | {'contract','verified','last_entry_date','session_start','last_entry','square_off'}
+                allowed = set(self.bounds) | {'contract','verified','last_entry_date','session_start','last_entry','square_off','paper_full_session'}
                 if set(body)-allowed: raise ValueError('Unknown or protected setting')
                 c = copy.deepcopy(self.s['config'])
                 for key,value in body.items():
+                    if key=='paper_full_session' and not isinstance(value,bool):
+                        raise ValueError('paper_full_session must be true or false')
                     if key in self.bounds:
                         x = num(value,*self.bounds[key])
                         if key in self.integers and not x.is_integer(): raise ValueError(key+' must be a whole number')
@@ -12534,7 +12537,8 @@ def _build_commodity_engine():
                 raise ValueError('Crossed or empty market depth')
             return dict(bid=bid,ask=ask,bid_qty=int(bids[0]['quantity']),ask_qty=int(asks[0]['quantity']),
                 volume=int(raw.get('volume',0)),oi=int(raw.get('oi',0)),
-                spread_bps=10000*(ask-bid)/((ask+bid)/2),ts=dt(raw['timestamp']).isoformat())
+                spread_bps=10000*(ask-bid)/((ask+bid)/2),ts=dt(raw['timestamp']).isoformat(),
+                last_trade_ts=dt(raw['last_trade_time']).isoformat() if raw.get('last_trade_time') else None)
         def signal(self, inst, quote):
             # Completed 5-minute candles only; never interpret the forming candle as evidence.
             key = inst['symbol']
@@ -12593,13 +12597,15 @@ def _build_commodity_engine():
             # Forward evidence is descriptive, not proof of future profitability.
             return dict(trades=len(ts),days=days,net=net,profit_factor=factor,
                 eligible=len(ts)>=30 and days>=5 and net>0 and (losses==0 or factor>=1.2))
+        def full_session(self):
+            return self.s['config']['mode']=='paper' and self.s['config'].get('paper_full_session',True)
         def block(self):
             c = self.s['config']; current=now()
             if self.s['halt']: return self.s['halt']
             if not c['verified'] or not c['contract']: return 'Configure and verify an MCX contract'
             if self.s['loss_day']==current.date().isoformat(): return 'Daily loss circuit breaker latched until next IST day'
             if not c['armed']: return 'New entries disarmed; existing positions continue to be managed'
-            if current.weekday()>=5 or not c['session_start'] <= current.strftime('%H:%M') < c['last_entry']:
+            if not self.full_session() and (current.weekday()>=5 or not c['session_start'] <= current.strftime('%H:%M') < c['last_entry']):
                 return 'Outside configured entry window (IST)'
             if current.date().isoformat()>c['last_entry_date']: return 'Contract entry cutoff reached; choose a later contract'
             if self.s['position'] or self.s['pending']: return 'One commodity exposure/order at a time'
@@ -12726,7 +12732,7 @@ def _build_commodity_engine():
                         except Exception:
                             self.s['quotes_stale']=True
                             p['gross']=None
-                            self.s['config']['armed']=False
+                            if not self.full_session(): self.s['config']['armed']=False
                             raise
                         self.s['quotes_stale']=False
                         mark=q['bid'] if p['side']=='BUY' else q['ask']; sign=1 if p['side']=='BUY' else -1
@@ -12734,7 +12740,8 @@ def _build_commodity_engine():
                         p['gross']=p.get('realized_gross',0)+(mark-p['entry'])*sign*p['qty']*p['multiplier']
                         reason=None
                         if self.s['close_requested']: reason='Manual / pending exit'
-                        elif now().date()>dt(p['opened_at']).date() or now().strftime('%H:%M')>=p['square_off']: reason='Session square-off'
+                        elif now().date().isoformat()>p.get('last_entry_date',c['last_entry_date']): reason='Contract entry/delivery cutoff'
+                        elif not (p['mode']=='paper' and p.get('paper_full_session',c.get('paper_full_session',True))) and (now().date()>dt(p['opened_at']).date() or now().strftime('%H:%M')>=p['square_off']): reason='Session square-off'
                         elif (now()-dt(p['opened_at'])).total_seconds()>=p['max_hold']*60: reason='Maximum hold time'
                         elif sign*(mark-p['stop'])<=0: reason='ATR / trailing stop'
                         elif sign*(mark-p['target'])>=0: reason='Profit target'
@@ -12746,12 +12753,17 @@ def _build_commodity_engine():
                             trail=mark-sign*p['distance']
                             p['stop']=round_tick(max(p['stop'],breakeven,trail) if sign>0 else min(p['stop'],breakeven,trail),p['tick_size'],sign<0)
                     if self.daily()<=-c['daily_loss']:
-                        self.s['loss_day']=now().date().isoformat(); c['armed']=False
+                        self.s['loss_day']=now().date().isoformat()
+                        if not self.full_session(): c['armed']=False
                     if c['contract']:
                         inst=self.instrument(c['contract']); q=self.quote(c['contract'])
                         sig=self.signal(inst,q); self.s['signal']=sig
                         self.s['error']=None
                         if allow_entries and not self.block() and sig['side']!='WAIT' and sig['candle']!=self.s['last_entry_bar']:
+                            if self.full_session():
+                                last_trade=q.get('last_trade_ts')
+                                if not last_trade or not -5 <= (now()-dt(last_trade)).total_seconds() <= 120:
+                                    raise ValueError('Waiting for recent MCX trading activity; paper entries remain armed')
                             if q['spread_bps']>c['max_spread_bps'] or q['volume']<c['min_volume'] or q['oi']<c['min_oi']:
                                 raise ValueError('Liquidity filter: spread, volume or open interest outside limits')
                             entry,distance,qty=self.size(inst,sig,q)
@@ -12762,7 +12774,7 @@ def _build_commodity_engine():
                                 raise ValueError('Planned trade exceeds remaining daily loss budget')
                             context=dict(contract=inst['symbol'],expiry=inst['expiry'],side=sig['side'],qty=qty,initial_qty=qty,
                                 entry=entry,distance=distance,multiplier=c['multiplier'],tick_size=inst['tick_size'],
-                                mode=c['mode'],opened_at=stamp(),fee_per_order=c['fee_per_order'],fees=c['fee_per_order'],
+                                mode=c['mode'],paper_full_session=self.full_session(),last_entry_date=c['last_entry_date'],opened_at=stamp(),fee_per_order=c['fee_per_order'],fees=c['fee_per_order'],
                                 slippage_bps=c['slippage_bps'],reward_r=c['reward_r'],max_hold=c['max_hold'],square_off=c['square_off'],
                                 mark=entry,gross=0.,signal=sig['candle'])
                             sign=1 if sig['side']=='BUY' else -1
@@ -12803,7 +12815,7 @@ def _build_commodity_engine():
                         raise ValueError('Live arming requires acknowledgement and qualifying forward paper results')
                     if not self.worker or not self.worker.is_alive(): raise ValueError('Commodity worker is not running')
                     self.cycle(False)
-                    if self.s['error']: raise ValueError(self.s['error'])
+                    if self.s['error'] and not self.full_session(): raise ValueError(self.s['error'])
                     if self.s['loss_day']==now().date().isoformat(): raise ValueError('Daily loss halt remains active until next IST day')
                     c['armed']=True
                 elif action=='mode':
@@ -12845,17 +12857,20 @@ def _build_commodity_engine():
                 dict(label='Completed candle',passed=candle_fresh,detail='No candle' if signal_age is None else f'{signal_age/60:.1f}m since candle start'),
                 dict(label='Spread',passed=fresh and q.get('spread_bps',1e9)<=c['max_spread_bps'],detail=f"Limit {c['max_spread_bps']:g} bps"),
                 dict(label='Volume / open interest',passed=fresh and q.get('volume',0)>=c['min_volume'] and q.get('oi',0)>=c['min_oi'],detail=f"Minimum {c['min_volume']} / {c['min_oi']}"),
-                dict(label='Entry window',passed=current.weekday()<5 and c['session_start']<=current.strftime('%H:%M')<c['last_entry'],detail=c['session_start']+'–'+c['last_entry']+' IST'),
+                dict(label='Entry window',passed=self.full_session() or (current.weekday()<5 and c['session_start']<=current.strftime('%H:%M')<c['last_entry']),detail='No clock cutoff · paper monitoring stays enabled' if self.full_session() else c['session_start']+'–'+c['last_entry']+' IST'),
                 dict(label='Delivery cutoff',passed=bool(c.get('last_entry_date')) and current.date().isoformat()<=c['last_entry_date'],detail=c.get('last_entry_date') or 'Not configured'),
                 dict(label='Daily risk allowance',passed=available is not None and available>=c['risk'] and self.s['loss_day']!=current.date().isoformat(),detail='Remaining budget excludes gains above the daily limit'),
                 dict(label='Exposure / order slot',passed=not self.s['position'] and not self.s['pending'],detail='One commodity exposure at a time')]
             cutoff_days=None
             if c.get('last_entry_date'):
                 cutoff_days=(dt(c['last_entry_date']).date()-current.date()).days
-            return dict(position_mark_fresh=mark_fresh,quote_age_seconds=quote_age,signal_age_seconds=signal_age,quote_fresh=fresh,
+            last_trade_age=age(q.get('last_trade_ts'))
+            if self.full_session():
+                checks.append(dict(label='Recent MCX trading',passed=last_trade_age is not None and -5<=last_trade_age<=120,detail='Recent trade required · maximum age 120s'))
+            return dict(full_session=self.full_session(),position_mark_fresh=mark_fresh,quote_age_seconds=quote_age,signal_age_seconds=signal_age,quote_fresh=fresh,
                 candle_fresh=candle_fresh,checks=checks,remaining_daily_risk=available,
                 used_daily_risk=None if available is None else c['daily_loss']-available,
-                cutoff_days=cutoff_days,session_label='Entry window' if checks[5]['passed'] else 'Outside entry window',
+                cutoff_days=cutoff_days,session_label='Continuous paper monitoring' if self.full_session() else ('Entry window' if checks[5]['passed'] else 'Outside entry window'),
                 performance={mode:self.performance(mode) for mode in ('paper','live')})
         def performance(self, mode):
             rows=sorted([r for r in self.s['trades'] if r['mode']==mode],key=lambda r:r['closed_at'])
