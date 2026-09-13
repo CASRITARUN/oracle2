@@ -2,7 +2,7 @@
 Kite Option-Selling Dashboard — local backend
 ------------------------------------------------
 Run:  python backend.py
-Then open: https://algo2.wecon.in
+Then open: https://algo.wecon.in
 
 What this does
 - Logs you into Kite Connect (daily login, token expires every day - that's Kite's design, not a bug here)
@@ -40,7 +40,10 @@ import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
-from flask import Flask, request, jsonify, send_from_directory, redirect
+from flask import Flask, request, jsonify, send_from_directory, redirect, session, render_template_string
+import secrets
+import hmac
+import sqlite3
 
 try:
     from kiteconnect import KiteConnect
@@ -59,9 +62,9 @@ from typing import List, Optional, Callable, Dict, Any, Tuple
 # this process starts) — do NOT hardcode real keys/secrets directly in this file,
 # especially if this file is ever shared, committed to git, or pasted anywhere.
 # ---------------------------------------------------------------------------
-API_KEY = os.environ.get("KITE_API_KEY", "b4j9bna5hdew1hh4")
-API_SECRET = os.environ.get("KITE_API_SECRET", "mbrdjydzd9ckisvrp4tsqbtkkgojpzue")
-REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo2.wecon.in/api/callback")
+API_KEY = os.environ.get("KITE_API_KEY", "vecsucwn1tckme31")
+API_SECRET = os.environ.get("KITE_API_SECRET", "mehksxgc3gsbj3zz7kpacrb9ezrkvzro")
+REDIRECT_URL = os.environ.get("REDIRECT_URL", "https://algo.wecon.in/api/callback")
 
 # If your network does TLS interception (common on office/government networks — you'll see
 # "self-signed certificate in certificate chain" errors), set this env var to allow the news
@@ -305,51 +308,29 @@ def _quote_cache_get(keys):
 
 
 def kite_quote_bulk(keys, *, chunk_size=500, retries=1, force_refresh=False):
-    """Rate-limited, cached wrapper around Kite's /quote endpoint.
-
-    Kite supports up to 500 instruments per /quote call, but the endpoint is limited to
-    1 request/sec. A 429 is followed by a cooldown before retrying. This function is
-    intentionally used by the screeners so one scan cannot DOS its own API session.
-    """
-    global _QUOTE_LAST_AT, _QUOTE_COOLDOWN_UNTIL
-    keys = list(dict.fromkeys(k for k in keys if k))
-    if not keys:
-        return {}
-    result = {} if force_refresh else _quote_cache_get(keys)
-    missing = list(keys) if force_refresh else [k for k in keys if k not in result]
-    if not missing:
-        return result
-
-    for start in range(0, len(missing), max(1, min(int(chunk_size), 500))):
-        chunk = missing[start:start + max(1, min(int(chunk_size), 500))]
-        attempt = 0
-        while True:
-            with _QUOTE_LOCK:
-                now = time.monotonic()
-                wait_for = max(_QUOTE_LAST_AT + _QUOTE_MIN_INTERVAL - now,
-                               _QUOTE_COOLDOWN_UNTIL - now, 0.0)
-                if wait_for > 0:
-                    time.sleep(wait_for)
-                try:
-                    raw = kite.quote(chunk)
-                    _QUOTE_LAST_AT = time.monotonic()
-                    raw = raw or {}
-                    for k, q in raw.items():
-                        _QUOTE_CACHE[k] = {"quote": q, "ts": time.monotonic()}
-                        result[k] = q
-                    break
-                except Exception as e:
-                    msg = str(e).lower()
-                    is_429 = "too many requests" in msg or getattr(e, "code", None) == 429
-                    _QUOTE_LAST_AT = time.monotonic()
-                    if is_429 and attempt < retries:
-                        _QUOTE_COOLDOWN_UNTIL = time.monotonic() + _QUOTE_429_COOLDOWN
-                        attempt += 1
-                        logger.warning("Kite quote rate limit hit; cooling down %.1fs before retry", _QUOTE_429_COOLDOWN)
-                        time.sleep(_QUOTE_429_COOLDOWN)
-                        continue
-                    logger.warning("Kite quote batch failed (%d instruments): %s", len(chunk), e)
-                    break
+    """All HTTP calls pass the shared broker gate. Never sleep/retry a 429 here."""
+    keys=list(dict.fromkeys(k for k in keys if k))
+    if not keys:return {}
+    now=time.monotonic();ttl=min(_QUOTE_CACHE_TTL,.9 if force_refresh else _QUOTE_CACHE_TTL)
+    result={k:_QUOTE_CACHE[k]['quote'] for k in keys if k in _QUOTE_CACHE and now-_QUOTE_CACHE[k]['ts']<=ttl}
+    missing=[k for k in keys if k not in result]
+    # Include owned options in scanner batches so their supervision can reuse fresh books.
+    owned=[]
+    guard=globals().get('SHARED_RISK')
+    if guard:
+        for engine in guard.engines.values():
+            owned.extend(p['exchange']+':'+p['contract'] for p in engine.active() if p['qty']>0)
+    size=max(1,min(int(chunk_size),max(1,500-len(set(owned)))))
+    for start in range(0,len(missing),size):
+        chunk=list(dict.fromkeys(owned+missing[start:start+size]))[:500]
+        try:
+            raw=kite.quote(chunk) or {}
+            for k,q in raw.items():_QUOTE_CACHE[k]={'quote':q,'ts':time.monotonic()}
+            result.update({k:q for k,q in raw.items() if k in keys})
+        except BrokerDeferred:
+            break
+        except Exception as e:
+            logger.warning('Quote request failed: %s',e);break
     return result
 
 
@@ -485,12 +466,174 @@ OPTION_EXCHANGE_SEGMENT = {"NFO": "NFO-OPT", "BFO": "BFO-OPT"}
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
+# Website access: set WEBSITE_PASSWORD and WEBSITE_SECRET_KEY in the server environment.
+# Serve ALL dashboard paths through Flask (including / and /index.html).
+# WEBSITE_SECRET_KEY should be a long random value shared by all server workers.
+WEBSITE_PASSWORD = os.environ.get("WEBSITE_PASSWORD", "")
+app.secret_key = os.environ.get("WEBSITE_SECRET_KEY") or secrets.token_hex(32)
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("WEBSITE_COOKIE_SECURE", "0") == "1",
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8), MAX_CONTENT_LENGTH=2 * 1024 * 1024)
+_SITE_FAILURES = {}
+_SITE_LOGIN_LOCK = threading.Lock()
+# A durable, shared session generation revokes signed cookies on every device.
+# Keep this file across deployments; it contains no password or trading data.
+_SITE_AUTH_DB = os.environ.get('WEBSITE_AUTH_DB') or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'website_auth.sqlite3')
+
+def _site_generation(revoke=False):
+    from contextlib import closing
+    with closing(sqlite3.connect(_SITE_AUTH_DB, timeout=10)) as connection:
+        with connection:
+            connection.execute('CREATE TABLE IF NOT EXISTS website_auth (id INTEGER PRIMARY KEY CHECK(id=1), generation TEXT NOT NULL)')
+            connection.execute('INSERT OR IGNORE INTO website_auth VALUES(1, ?)', (secrets.token_hex(32),))
+            if revoke:
+                connection.execute('UPDATE website_auth SET generation=? WHERE id=1', (secrets.token_hex(32),))
+            return connection.execute('SELECT generation FROM website_auth WHERE id=1').fetchone()[0]
+
+_SITE_LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Website sign in</title>
+<style>body{margin:0;background:#0b1220;color:#edf3fa;font:16px system-ui;display:grid;place-items:center;min-height:100vh}
+main{width:min(360px,80vw);padding:32px;background:#162235;border:1px solid #334155;border-radius:18px}
+h1{margin-top:0}p{color:#abbad0}input,button{box-sizing:border-box;width:100%;padding:13px;margin-top:12px;border-radius:8px;border:1px solid #64748b;font:inherit}
+button{background:#b1ef65;color:#142009;cursor:pointer;font-weight:700}.error{color:#ffb4b4}</style></head>
+<body><main><h1>Website sign in</h1><p>Enter your password to open the dashboard.</p>
+<form method="post" action="/website-login"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label for="password">Password</label><input id="password" type="password" name="password" autocomplete="current-password" required autofocus>
+<button type="submit">Enter website</button></form><p class="error" role="alert">{{ error }}</p></main></body></html>"""
+
+def _site_authenticated():
+    return bool(WEBSITE_PASSWORD and session.get('website_authenticated') and
+                session.get('website_generation') == _site_generation())
+
+@app.before_request
+def require_website_password():
+    if request.endpoint == 'website_login':
+        return None
+    if not _site_authenticated():
+        if request.path.startswith('/api/'):
+            return jsonify(error='Website password required', website_login_required=True), 401
+        return redirect('/website-login')
+
+@app.after_request
+def protect_website_cache(response):
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    return response
+
+@app.route('/website-login', methods=['GET', 'POST'])
+def website_login():
+    if _site_authenticated():
+        return redirect('/')
+    error = ''; status = 200
+    session.setdefault('website_csrf', secrets.token_urlsafe(32))
+    if not WEBSITE_PASSWORD:
+        error = 'Website access is not configured. Set WEBSITE_PASSWORD on the server.'; status = 503
+    elif request.method == 'POST':
+        token = request.form.get('csrf', '')
+        if not hmac.compare_digest(token, session['website_csrf']):
+            error = 'Please refresh this page and try again.'; status = 400
+        else:
+            address = request.remote_addr or 'unknown'
+            with _SITE_LOGIN_LOCK:
+                now = time.monotonic()
+                for key in list(_SITE_FAILURES):
+                    if now - _SITE_FAILURES[key][1] >= 300: del _SITE_FAILURES[key]
+                count, started = _SITE_FAILURES.get(address, (0, now))
+                if count >= 5:
+                    error = 'Too many attempts. Please try again in five minutes.'; status = 429
+                elif hmac.compare_digest(request.form.get('password', '').encode(), WEBSITE_PASSWORD.encode()):
+                    _SITE_FAILURES.pop(address, None)
+                    session.clear(); session['website_authenticated'] = True; session.permanent = True
+                    session['website_generation'] = _site_generation()
+                    session['website_csrf'] = secrets.token_urlsafe(32)
+                    return redirect('/')
+                else:
+                    _SITE_FAILURES[address] = (count + 1, started)
+                    error = 'Incorrect password.'; status = 401
+    return render_template_string(_SITE_LOGIN_HTML, error=error, csrf=session['website_csrf']), status
+
+@app.route('/website-logout', methods=['POST'])
+def website_logout():
+    token = request.headers.get('X-Website-CSRF', '') or request.form.get('csrf', '')
+    if not token or not hmac.compare_digest(token, session.get('website_csrf', '')):
+        return jsonify(error='Refresh the website before locking all devices.'), 403
+    # Revoke first; never report a successful global lock unless it was committed.
+    _site_generation(revoke=True)
+    session.clear()
+    if request.headers.get('X-Website-CSRF'):
+        return jsonify(locked=True)
+    return redirect('/website-login')
+
+@app.route('/api/website-status')
+def website_status():
+    return jsonify(authenticated=True, csrf=session['website_csrf'])
+
+@app.route('/index.html')
+def website_index_html():
+    return send_from_directory(os.path.dirname(__file__), 'index.html')
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("kite_dashboard")
-kite = KiteConnect(api_key=API_KEY)
+class BrokerDeferred(RuntimeError):
+    """Local scheduling refused a call before any request was sent to Kite."""
+
+
+class BrokerRequestGate:
+    # Conservative spacing, below Kite's documented endpoint and mutation limits.
+    def __init__(self):
+        self.lock=threading.Lock();self.next_at={};self.cool_until=0.;self.failures=0;self.cache={};self.generation=0
+        self.intervals={'quote':1.05,'history':.36,'write':.20,'read':.13}
+    def status(self):
+        with self.lock:return dict(cooldown_seconds=round(max(0.,self.cool_until-time.monotonic()),1),rate_limit_hits=self.failures)
+    def call(self,fn,route,method,*args,**kwargs):
+        bucket='write' if method.upper() not in ('GET','HEAD') else 'quote' if route.startswith('market.quote') else 'history' if 'historical' in route else 'read'
+        # Only share short-lived read-only account snapshots; never share order mutations.
+        cacheable=method.upper()=='GET' and route in ('orders','trades','portfolio.positions')
+        key=(route,json.dumps([args,kwargs],sort_keys=True,default=str))
+        deadline=time.monotonic()+1.5
+        while True:
+            with self.lock:
+                now=time.monotonic()
+                cached=self.cache.get(key)
+                if cacheable and cached and now-cached[0]<.5:
+                    import copy
+                    return copy.deepcopy(cached[1])
+                delay=max(self.cool_until-now,self.next_at.get(bucket,0)-now,0.)
+                if delay<=0:
+                    self.next_at[bucket]=now+self.intervals[bucket]
+                    if bucket=='write':self.generation+=1;self.cache.clear()
+                    generation=self.generation;break
+                if self.cool_until>now or now+delay>deadline:raise BrokerDeferred('Broker request deferred locally; supervision will retry. No request was sent.')
+            time.sleep(min(delay,.05))
+        try:result=fn(route,method,*args,**kwargs)
+        except Exception as e:
+            if getattr(e,'code',None)==429 or 'too many requests' in str(e).lower():
+                with self.lock:
+                    self.failures+=1;self.cool_until=time.monotonic()+min(60.,10.*(2**min(self.failures-1,3)));self.cache.clear()
+            raise  # Never automatically repeat an order whose outcome may be uncertain.
+        with self.lock:
+            if bucket=='write':self.generation+=1;self.cache.clear()
+            elif cacheable and generation==self.generation:
+                import copy
+                self.cache[key]=(time.monotonic(),copy.deepcopy(result))
+        return result
+
+
+BROKER_GATE=BrokerRequestGate()
+
+
+class GovernedKiteConnect(KiteConnect):
+    def _request(self,route,method,*args,**kwargs):
+        return BROKER_GATE.call(super()._request,route,method,*args,**kwargs)
+
+
+kite = GovernedKiteConnect(api_key=API_KEY)
 
 # Zerodha Quote API protection. Quote is limited to 1 request/second and a maximum of
 # 500 instruments per request. Keep one process-wide gate so Screen 1, Screen 2 and
@@ -1772,6 +1915,11 @@ def callback():
     SESSION["access_token"] = data["access_token"]
     SESSION["logged_in_at"] = now_ist().isoformat()
     kite.set_access_token(SESSION["access_token"])
+    # Do not wait for the next 30-second scanner tick: wake Stock AI immediately so
+    # full-F&O discovery and resumable deep-history collection begin after login.
+    try:
+        if 'STOCK_DESK' in globals():threading.Thread(target=STOCK_DESK.cycle,daemon=True,name='stock-ai-login-wake').start()
+    except Exception:pass
     return redirect("/")
 
 
@@ -2456,12 +2604,12 @@ def get_chain_for_symbol(symbol, expiry_str=None):
     T = max((expiry - today).days, 0) / 365.0
     chain = [o for o in opts if o["expiry"] == expiry]
     lot_size = chain[0]["lot_size"]
-    inst_keys = [f"NFO:{o['tradingsymbol']}" for o in chain]
+    inst_keys = [f"{exchange}:{o['tradingsymbol']}" for o in chain]
     quotes = kite_quote_bulk(inst_keys)
 
     enriched = []
     for o in chain:
-        key = f"NFO:{o['tradingsymbol']}"
+        key = f"{exchange}:{o['tradingsymbol']}"
         q = quotes.get(key)
         st = quote_stats(q)
         ltp = st["mid"] if st["mid"] is not None else extract_price(q)
@@ -7233,7 +7381,7 @@ from statistics import mean
 # so the revised collector starts with a clean database and ignores the old archive.
 AI_DB_FILE = os.path.join(os.path.dirname(__file__), "ai_evolution_fresh.db")
 AI_POLL_SECONDS = int(os.environ.get("AI_POLL_SECONDS", "60"))
-AI_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+AI_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
 # Autonomous universe: indices + every currently listed NSE F&O stock.  The engine
 # rotates through this universe in small chunks so it can run continuously without
 # bursting Kite rate limits.  Set AI_UNIVERSE_MODE=INDEX_ONLY to restrict it.
@@ -7244,7 +7392,7 @@ AI_LOCK = threading.Lock()
 # Historical index pre-training: builds market-behaviour data before option-specific
 # paper trades have accumulated. This never places orders and is independent of the
 # existing Iron Condor / Calendar / Breakout engines.
-AI_HIST_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+AI_HIST_SYMBOLS = list(AI_SYMBOLS)
 AI_HIST_INTERVAL = os.environ.get("AI_HIST_INTERVAL", "5minute")
 # Research target is intentionally larger than the usual recent-history window.
 # Kite's actual earliest available 5-minute candle is the hard boundary; the collector
@@ -8480,7 +8628,8 @@ def ai_close_trades():
     if not require_session():return
     for t in ai_open_trades():
         try:
-            q=kite_quote_bulk([f'NFO:{t["option_symbol"]}']).get(f'NFO:{t["option_symbol"]}')
+            key = f'{option_exchange_for_symbol(t["symbol"])}:{t["option_symbol"]}'
+            q = kite_quote_bulk([key]).get(key)
             st=quote_stats(q)
             # Closing side must also be executable: LONG closes at bid, SHORT closes at ask.
             close_side="BID" if t["side"]=="LONG" else "ASK"
@@ -9339,10 +9488,10 @@ def ai_loop():
 @app.route('/api/ai-evolution/directional-latest')
 def ai_directional_latest():
     """Return the latest directional AI decision for each index.
-    The dashboard uses this endpoint for the three live decision cards.
+    The dashboard uses this endpoint for the live decision cards for every configured index.
     """
     ai_init_db()
-    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+    symbols = list(AI_SYMBOLS)
     latest = {}
     c = ai_db()
     rows = c.execute(
@@ -9389,7 +9538,7 @@ def ai_directional_latest():
             "paper_only": True
         }
 
-    # Always return all three cards, even before the first qualifying decision.
+    # Always return all configured index cards, even before the first qualifying decision.
     result = []
     for sym in symbols:
         result.append(latest.get(sym, {
@@ -9599,14 +9748,14 @@ def ai_option_capture_api():
 # =============================================================================
 
 AUTOTRADE_AI_POLL_SECONDS = int(os.environ.get("AUTOTRADE_AI_POLL_SECONDS", "20"))
-AUTOTRADE_AI_SYMBOLS = list(AI_HIST_SYMBOLS)  # NIFTY, BANKNIFTY, FINNIFTY
+AUTOTRADE_AI_SYMBOLS = list(AI_HIST_SYMBOLS)  # NIFTY, BANKNIFTY, FINNIFTY, SENSEX
 
 AUTOTRADE_AI_DEFAULTS = {
     "execution_mode": "paper",           # "paper" (default, always available) | "live"
     "armed": False,                      # master on/off switch for NEW automatic entries
     "capital_per_trade_live": 25000.0,   # rupees earmarked per LIVE entry
     "capital_per_trade_paper": 25000.0,  # rupees used to size PAPER quantity (for realistic P&L)
-    "max_concurrent_positions": 3,       # across NIFTY/BANKNIFTY/FINNIFTY combined
+    "max_concurrent_positions": 3,       # across all configured AI indices combined
     "max_daily_loss_paper": 15000.0,     # paper circuit breaker (rupees)
     "max_daily_loss_live": 7500.0,       # live circuit breaker (rupees) -- deliberately tighter
     "max_hold_minutes": 180,             # force flatten a stale position even if flat
@@ -11816,10 +11965,10 @@ def _build_desk_engine_class():
     FEATURES = ['ret_1','ret_3','ret_5','ret_10','ret_20','ema_gap_9_20',
                 'ema_gap_20_50','rsi14','volatility_10','range_20','volume_ratio',
                 'trend_score','momentum_score','time_sin','time_cos']
-    DEFAULTS = dict(mode='paper', armed=False, capital=25000., risk=1500.,
+    DEFAULTS = dict(mode='paper', armed=False, live_override=False, capital=25000., risk=1500.,
         daily_loss=7500., max_positions=3, confidence=.58, stop_pct=12.,
         reward_r=1.8, max_spread=1., max_hold=90, square_off='15:15',
-        cooldown=10, slippage_bps=5., fee_per_order=25., partial_take_r=1.)
+        lots=0, cooldown=10, slippage_bps=5., fee_per_order=25., partial_take_r=1.)
     TERMINAL = {'COMPLETE','CANCELLED','REJECTED'}
 
     def stamp(): return datetime.now(IST).isoformat()
@@ -11852,6 +12001,7 @@ def _build_desk_engine_class():
         def __init__(self, adapter):
             self.a=adapter;self.lock=threading.RLock();self.train_lock=threading.Lock()
             self.signals={};self.health={};self.mismatches=set();self.training=dict(status='IDLE',progress=0)
+            self.record_cache={};self.recorder_error=None
             self.last_cycle=None;self.stop_event=threading.Event();self.started=False
             self.init_db()
             # A process restart must never silently re-arm real trading.
@@ -11862,10 +12012,15 @@ def _build_desk_engine_class():
                 c.execute("UPDATE desk_positions SET status='CANCELLED' WHERE status='ENTRY_PENDING' AND qty=0 AND NOT EXISTS (SELECT 1 FROM desk_orders WHERE position_id=desk_positions.id)")
             for order in self.rows("SELECT * FROM desk_orders WHERE mode='paper' AND status NOT IN ('COMPLETE','CANCELLED','REJECTED')"):
                 self.apply_order(order['id'],dict(status='CANCELLED',filled_quantity=order['filled'],average_price=order['notional']/order['filled'] if order['filled'] else 0))
+            for position in self.active():
+                self.record_trade(position['id'],'RESTART_GAP',dict(note='Process restarted; observations during downtime are unavailable.'))
         def db(self):return self.a.db()
         def init_db(self):
             with self.db() as c:
                 c.executescript('''
+                CREATE TABLE IF NOT EXISTS desk_trade_events(id INTEGER PRIMARY KEY,position_id TEXT,ts TEXT,kind TEXT,payload TEXT);
+                CREATE INDEX IF NOT EXISTS desk_trade_events_position ON desk_trade_events(position_id,id);
+                CREATE TABLE IF NOT EXISTS desk_exit_reviews(id INTEGER PRIMARY KEY,position_id TEXT,ts TEXT,payload TEXT);
                 CREATE TABLE IF NOT EXISTS desk_meta(key TEXT PRIMARY KEY,value TEXT);
                 CREATE TABLE IF NOT EXISTS desk_models(id TEXT PRIMARY KEY,ts TEXT,payload TEXT);
                 CREATE TABLE IF NOT EXISTS desk_events(id INTEGER PRIMARY KEY,ts TEXT,kind TEXT,symbol TEXT,detail TEXT);
@@ -11888,6 +12043,41 @@ def _build_desk_engine_class():
             with self.db() as c:c.execute('INSERT OR REPLACE INTO desk_meta VALUES(?,?)',(key,json.dumps(value)))
         def event(self,kind,detail,symbol=''):
             with self.db() as c:c.execute('INSERT INTO desk_events VALUES(NULL,?,?,?,?)',(stamp(),kind,symbol,str(detail)))
+        def record_trade(self,pid,kind,payload):
+            # Recorder failures must not prevent broker reconciliation or protective exits.
+            try:
+                with self.db() as c:
+                    if self.recorder_error:
+                        c.execute('INSERT INTO desk_trade_events(position_id,ts,kind,payload) VALUES(?,?,?,?)',
+                            (pid,stamp(),'RECORDER_GAP',json.dumps(dict(note=self.recorder_error))))
+                    c.execute('INSERT INTO desk_trade_events(position_id,ts,kind,payload) VALUES(?,?,?,?)',
+                        (pid,stamp(),kind,json.dumps(payload,default=str)))
+                self.recorder_error=None
+                return True
+            except Exception:
+                self.recorder_error='Some events could not be saved; recording is incomplete.'
+                return False
+        def record_observation(self,p,q=None,error=None,decision=None):
+            now=time.monotonic();prev=self.record_cache.get(p['id'],{})
+            sig=self.signals.get(p['symbol'],{})
+            signal={k:sig.get(k) for k in ('direction','confidence','spot','bar_ts','ts','bar_age','model_id')}
+            key=(error,decision,signal.get('direction'),signal.get('bar_ts'),p.get('stop'),p.get('target'))
+            # At most one routine sample per second, plus decision / signal / gap changes.
+            if prev.get('key')==key and now-prev.get('at',0)<1:return
+            if error and prev.get('key')==key and now-prev.get('at',0)<30:return
+            payload=dict(signal=signal,stop=p.get('stop'),target=p.get('target'),remaining_qty=p['qty'],decision=decision,
+                seconds_since_previous=round(now-prev['at'],3) if prev else None)
+            if error:payload['error']=str(error)
+            else:
+                payload['quote']={k:q.get(k) for k in ('bid','ask','spread_pct','bid_qty','ask_qty','volume','oi','quote_ts','exchange_ts','source')}
+                payload['open_pnl_at_bid']=(q['bid']-p['entry'])*p['qty']
+                payload['net_total_at_bid']=payload['open_pnl_at_bid']+p['pnl']-p['fees']
+            if self.record_trade(p['id'],'DATA_GAP' if error else 'OBSERVATION',payload):
+                self.record_cache[p['id']]=dict(at=now,key=key)
+        def trade_timeline(self,pid,after=0,limit=200):
+            rows=self.rows('SELECT * FROM desk_trade_events WHERE position_id=? AND id>? ORDER BY id LIMIT ?', (pid,after,limit+1))
+            return dict(events=[dict(id=r['id'],ts=r['ts'],kind=r['kind'],data=json.loads(r['payload'])) for r in rows[:limit]],
+                next_after=rows[limit-1]['id'] if len(rows)>limit else None)
         def config(self):return {**DEFAULTS,**self.get('config',{})}
         def rows(self,sql,args=()):
             with self.db() as c:return [dict(r) for r in c.execute(sql,args).fetchall()]
@@ -11900,17 +12090,18 @@ def _build_desk_engine_class():
                 cfg=self.config()
                 bounds=dict(capital=(1000,10000000),risk=(100,100000),daily_loss=(100,1000000),max_positions=(1,5),
                   confidence=(.55,.85),stop_pct=(3,40),reward_r=(1,4),max_spread=(.1,3),max_hold=(5,360),
-                  cooldown=(1,120),slippage_bps=(1,100),fee_per_order=(1,500),partial_take_r=(.5,3))
+                  lots=(0,50),cooldown=(0,120),slippage_bps=(1,100),fee_per_order=(1,500),partial_take_r=(.5,3))
                 for k,v in body.items():
                     if k=='square_off':
                         if not isinstance(v,str) or len(v)!=5 or not '10:00'<=v<='15:20':raise ValueError('Square-off must be 10:00–15:20 IST')
                         datetime.strptime(v,'%H:%M');cfg[k]=v
                     elif k in bounds:
                         if isinstance(v,bool):raise ValueError('Invalid '+k)
+                        if k=='cooldown' and (v is None or isinstance(v,str) and v.strip().lower() in ('na','n/a','')):v=0
                         v=float(v);lo,hi=bounds[k]
                         if not math.isfinite(v) or not lo<=v<=hi:raise ValueError(f'{k}: expected {lo} to {hi}')
-                        if k in ('max_positions','max_hold','cooldown') and not v.is_integer():raise ValueError(k+' must be a whole number')
-                        cfg[k]=int(v) if k in ('max_positions','max_hold','cooldown') else v
+                        if k in ('max_positions','max_hold','cooldown','lots') and not v.is_integer():raise ValueError(k+' must be a whole number')
+                        cfg[k]=int(v) if k in ('max_positions','max_hold','cooldown','lots') else v
                     else:raise ValueError('Unsupported setting: '+k)
                 if cfg['partial_take_r']>=cfg['reward_r']:raise ValueError('Partial take-profit must be below the full target in R')
                 if cfg['risk']>cfg['capital']:raise ValueError('Risk budget exceeds capital per trade')
@@ -11933,7 +12124,7 @@ def _build_desk_engine_class():
                         if (end-t).total_seconds()!=900:continue
                         f=self.a.features(rows,i,arr);x=[f[k] for k in FEATURES]
                         if all(finite(v) for v in x):samples.append((t.timestamp(),end.timestamp(),x,int(rows[i+3]['close']>rows[i]['close'])))
-                    self.training=dict(status='BUILDING FEATURES',progress=10+20*(j+1),symbol=symbol)
+                    self.training=dict(status='BUILDING FEATURES',progress=10+20*(j+1)/max(1,len(self.a.symbols)),symbol=symbol)
                 samples.sort(key=lambda r:r[0])
                 if len(samples)<300:raise ValueError('Need at least 300 labelled observations from five-minute history. Connect Kite and sync the archive.')
                 split=int(len(samples)*.8);cut=samples[split][0]
@@ -11972,8 +12163,14 @@ def _build_desk_engine_class():
                 m=fit([json.loads(r['features']) for r in train],[r['label'] for r in train]);p=predict(m,[json.loads(r['features']) for r in val]);y=np.array([r['label'] for r in val])
                 m.update(samples=n,accuracy=float(((p>=.5)==y).mean()*100),auc=auc(y,p),ts=stamp())
                 self.put('online_model',m);self.put('online_trained_count',n);self.put('online_last_sample',evidence[-1]['ts']);self.put('online_trained_at',stamp())
-        def inspect(self,symbol):
-            self.a.refresh(symbol)
+        def direction_snapshot(self,symbol,refresh=True,record_observation=True,max_bar_age=15):
+            """Run the common directional model without touching an option chain.
+
+            Stock AI uses this as its cheap first-stage full-universe scan.  The normal
+            index desk still calls inspect(), which asks for a refresh and then performs
+            the same option-chain/execution checks as before.
+            """
+            if refresh:self.a.refresh(symbol)
             bars=self.a.bars(symbol,260)
             now=datetime.now(IST)
             bars=[r for r in bars if dt(r['ts'])+timedelta(minutes=5)<=now]
@@ -11993,18 +12190,24 @@ def _build_desk_engine_class():
                 regime='UPTREND' if f['ema_gap_20_50']>.05 else 'DOWNTREND' if f['ema_gap_20_50']<-.05 else 'RANGE',
                 direction='UP' if p>=.5 else 'DOWN',confidence=max(p,1-p))
             s['factors']=sorted([dict(name=FEATURES[i],impact=float(v)) for i,v in enumerate(np.clip((np.array(x)-m['mu'])/m['sd'],-6,6)*m['w'])],key=lambda d:abs(d['impact']),reverse=True)[:4]
-            if age<0 or age>15:s['reason']='Stale index candles';return s
+            if age<0 or age>max_bar_age:s['reason']='Stale index candles';return s
             # Forward labels accrue without requiring a trade, breaking the no-trades/no-learning loop.
             target=dt(last['ts'])+timedelta(minutes=15)
-            if self.a.market_open() and target.date()==dt(last['ts']).date() and target.strftime('%H:%M')<='15:25':
+            if record_observation and self.a.market_open() and target.date()==dt(last['ts']).date() and target.strftime('%H:%M')<='15:25':
                 key=symbol+dt(last['ts']).isoformat()
                 with self.db() as c:c.execute('INSERT OR IGNORE INTO desk_observations VALUES(?,?,?,?,?,?,?,?,NULL,NULL)',
                     (key,symbol,dt(last['ts']).isoformat(),target.isoformat(),float(last['close']),json.dumps(x),m['id'],p))
             cfg=self.config()
             if not self.a.market_open():s['reason']='Market closed · historical prediction only';return s
             if s['confidence']<cfg['confidence']:s['reason']='Direction below confidence threshold';return s
+            s.update(decision='CANDIDATE',reason='Direction qualifies for option-liquidity check')
+            return s
+        def inspect(self,symbol):
+            s=self.direction_snapshot(symbol,refresh=True,record_observation=True,max_bar_age=15)
+            if s.get('decision')!='CANDIDATE':return s
+            cfg=self.config();p=s['p_up']
             data,err=self.a.chain(symbol)
-            if err:s['reason']='Option chain: '+str(err);return s
+            if err:s.update(decision='WAIT',reason='Option chain: '+str(err));return s
             typ='CE' if p>.5 else 'PE';candidates=[]
             for o in data.get('chain',[]):
                 if o.get('instrument_type')!=typ or not finite(o.get('delta')):continue
@@ -12013,18 +12216,29 @@ def _build_desk_engine_class():
                 spread=(ask-bid)/((ask+bid)/2)*100
                 if spread>cfg['max_spread'] or not .3<=abs(o['delta'])<=.7:continue
                 candidates.append((abs(abs(o['delta'])-.5)+spread/10,o))
-            if not candidates:s['reason']='No liquid CE/PE contract within spread limit';return s
-            o=min(candidates,key=lambda r:r[0])[1];s.update(contract=o['tradingsymbol'],exchange=self.a.exchange(symbol),
-               lot=int(o.get('lot_size') or data.get('lot_size') or 0),tick=float(o.get('tick_size') or .05),option_type=typ)
+            if not candidates:s.update(decision='WAIT',reason='No liquid CE/PE contract within spread limit');return s
+            o=min(candidates,key=lambda r:r[0])[1]
+            expiry=o.get('expiry');dte=None
+            try:dte=(expiry-now_ist().date()).days if hasattr(expiry,'__sub__') else None
+            except Exception:dte=None
+            s.update(contract=o['tradingsymbol'],exchange=self.a.exchange(symbol),
+               lot=int(o.get('lot_size') or data.get('lot_size') or 0),tick=float(o.get('tick_size') or .05),option_type=typ,
+               option_delta=float(o.get('delta') or 0),option_volume=float(o.get('volume') or 0),option_oi=float(o.get('oi') or 0),
+               option_expiry=str(expiry) if expiry is not None else None,dte=dte)
             q,why=self.a.quote(s['exchange'],s['contract'])
-            if why:s['reason']=why;return s
+            if why:s.update(decision='WAIT',reason=why);return s
             s.update(bid=q['bid'],ask=q['ask'],spread=q['spread_pct'],depth_qty=q['ask_qty'])
-            if q['spread_pct'] is None or not 0<=q['spread_pct']<=cfg['max_spread']:s['reason']='Option spread widened';return s
-            if s['lot']<=0:s['reason']='Invalid contract lot size';return s
+            if q['spread_pct'] is None or not 0<=q['spread_pct']<=cfg['max_spread']:s.update(decision='WAIT',reason='Option spread widened');return s
+            if s['lot']<=0:s.update(decision='WAIT',reason='Invalid contract lot size');return s
             entry=round(math.ceil(q['ask']*(1+cfg['slippage_bps']/10000)/s['tick'])*s['tick'],2);risk=entry*cfg['stop_pct']/100
-            lots=int(min(cfg['capital']/entry,cfg['risk']/risk,q['ask_qty'])//s['lot']);qty=lots*s['lot']
+            max_lots=max(0,int(min(cfg['capital']/entry,cfg['risk']/risk,q['ask_qty'])//s['lot']))
+            lots=cfg['lots'] or max_lots
+            s.update(requested_lots=cfg['lots'],max_lots=max_lots,lots=lots)
+            if lots>max_lots:
+                s['qty']=0;s.update(decision='WAIT',reason=f'Requested {lots} lots exceed capital, risk or visible depth limit ({max_lots} lots)');return s
+            qty=lots*s['lot']
             s.update(entry=entry,stop=entry-risk,target=entry+risk*cfg['reward_r'],qty=qty)
-            if qty<=0:s['reason']='Budget or visible ask depth cannot fund one lot';return s
+            if qty<=0:s.update(decision='WAIT',reason='Budget or visible ask depth cannot fund one lot');return s
             s.update(decision='READY',reason=f'{typ} qualifies: direction, quote freshness, spread and size passed')
             return s
         def evidence(self):
@@ -12049,8 +12263,11 @@ def _build_desk_engine_class():
             if any(p['qty']>0 and self.health.get(p['id'],{}).get('bid') is None for p in self.active()):return 'Position quote unavailable · new entries paused'
             if datetime.now(IST).strftime('%H:%M')>=cfg['square_off']:return 'Square-off window · no new entries'
             if self.train_lock.locked():return 'Model training · new entries paused'
-            if cfg['mode']=='live' and not self.evidence()['ready']:return 'Live locked · build the forward paper record'
+            if cfg['mode']=='live' and not (cfg.get('live_override') is True or self.evidence()['ready']):return 'Live locked · build the forward paper record'
             if self.get('close_requested'):return 'Close requested · waiting for all exits'
+            if hasattr(self,'shared_risk'):
+                shared=self.shared_risk.snapshot(cfg['mode'])
+                if shared['entry_block']:return shared['entry_block']
             if self.day_pnl(cfg['mode'])<=-cfg['daily_loss']:return 'Daily loss limit reached'
             return None
         def day_pnl(self,mode):
@@ -12064,22 +12281,49 @@ def _build_desk_engine_class():
         def submit(self,p,side,qty,price,reason):
             oid=uuid.uuid4().hex;tag='DSK'+oid[:17];cfg=self.config()
             if qty<=0:return
+            if side=='BUY' and self.get('close_requested'):
+                with self.db() as c:c.execute("UPDATE desk_positions SET status='CANCELLED',exit_reason='Close requested before submission' WHERE id=? AND qty=0",(p['id'],))
+                self.record_trade(p['id'],'ENTRY_CANCELLED_BEFORE_SUBMISSION',dict(reason='Close requested; no broker request sent'))
+                return
+            if side=='BUY' and hasattr(self,'shared_risk'):
+                try:shared=self.shared_risk.snapshot(p['mode'])
+                except Exception:
+                    with self.db() as c:c.execute("UPDATE desk_positions SET status='CANCELLED',exit_reason='Shared risk unavailable before submission' WHERE id=? AND qty=0",(p['id'],))
+                    self.record_trade(p['id'],'ENTRY_CANCELLED_BEFORE_SUBMISSION',dict(reason='Shared risk unavailable; no broker request sent'))
+                    return
+                if shared['liquidate']:
+                    with self.db() as c:c.execute("UPDATE desk_positions SET status='CANCELLED',exit_reason=? WHERE id=? AND qty=0",(shared['reason'],p['id']))
+                    self.record_trade(p['id'],'ENTRY_CANCELLED_BEFORE_SUBMISSION',dict(reason=shared['reason']))
+                    return
             if self.rows("SELECT id FROM desk_orders WHERE position_id=? AND status NOT IN ('COMPLETE','CANCELLED','REJECTED')",(p['id'],)):return
             # Intent is durable before contacting the broker. Unknown submissions are never blindly retried.
             with self.db() as c:
                 c.execute('INSERT INTO desk_orders(id,ts,position_id,side,qty,mode,tag,status,limit_price,reason) VALUES(?,?,?,?,?,?,?,?,?,?)',
                     (oid,stamp(),p['id'],side,qty,p['mode'],tag,'SUBMITTING',price,reason))
                 c.execute('UPDATE desk_positions SET status=? WHERE id=?',('ENTRY_PENDING' if side=='BUY' else 'EXIT_PENDING',p['id']))
+                if side=='SELL':
+                    snapshot=dict(reason=reason,limit_price=price,requested_qty=qty,observed_bid=self.health.get(p['id'],{}).get('bid'),stop=p.get('stop'),target=p.get('target'),signal={k:self.signals.get(p['symbol'],{}).get(k) for k in ('direction','confidence','spot','bar_ts','ts')},risk_config=self.config())
+                    c.execute('INSERT INTO desk_exit_reviews(position_id,ts,payload) VALUES(?,?,?)',(p['id'],stamp(),json.dumps(snapshot)))
+            self.record_trade(p['id'],'ORDER_INTENT',dict(order_id=oid,side=side,qty=qty,limit_price=price,reason=reason,mode=p['mode'],stop=p.get('stop'),target=p.get('target'),signal=self.signals.get(p['symbol'],{})))
             if p['mode']=='paper':
                 self.apply_order(oid,dict(status='COMPLETE',filled_quantity=qty,average_price=price,order_id='PAPER-'+oid));return
             try:
                 broker_id=self.a.place(p['exchange'],p['contract'],side,qty,price,tag)
                 with self.db() as c:c.execute("UPDATE desk_orders SET broker_id=?,status='OPEN' WHERE id=?",(str(broker_id),oid))
+                self.record_trade(p['id'],'BROKER_ACK',dict(order_id=oid,broker_id=str(broker_id),side=side))
                 self.event('ORDER',f'{side} submitted; awaiting confirmed fill',p['symbol'])
             except Exception as e:
+                if type(e).__name__=='BrokerDeferred':
+                    self.apply_order(oid,dict(status='REJECTED',filled_quantity=0,average_price=0,status_message=str(e)))
+                    return
                 with self.db() as c:c.execute("UPDATE desk_orders SET status='UNKNOWN',error=? WHERE id=?",(str(e),oid))
+                self.record_trade(p['id'],'SUBMISSION_UNCERTAIN',dict(order_id=oid,error=str(e)))
                 self.put('halt','Order submission uncertain · inspect broker orders');self.event('ERROR','Submission uncertain: '+str(e),p['symbol'])
         def apply_order(self,oid,update):
+            guard=getattr(self,'shared_risk',None)
+            with guard.lock if guard else self.lock:
+                return self._apply_order_locked(oid,update)
+        def _apply_order_locked(self,oid,update):
             with self.db() as c:
                 o=dict(c.execute('SELECT * FROM desk_orders WHERE id=?',(oid,)).fetchone());p=dict(c.execute('SELECT * FROM desk_positions WHERE id=?',(o['position_id'],)).fetchone())
                 filled=int(update.get('filled_quantity') or 0);avg=float(update.get('average_price') or 0);status=str(update.get('status') or 'OPEN')
@@ -12102,29 +12346,100 @@ def _build_desk_engine_class():
                     row=c.execute('SELECT qty FROM desk_positions WHERE id=?',(p['id'],)).fetchone();qty=row[0]
                     closed=qty==0 and o['side']=='SELL';new='CLOSED' if closed else 'OPEN' if qty else 'CANCELLED'
                     c.execute('UPDATE desk_positions SET status=?,exit_ts=? WHERE id=?',(new,stamp() if closed else None,p['id']))
+            if delta or status!=o['status'] or notional!=o['notional']:
+                self.record_trade(p['id'],'FILL' if delta else 'ORDER_STATUS',dict(order_id=oid,side=o['side'],status=status,filled_total=filled,fill_delta=delta,average_price=avg,incremental_fill_price=delta_value/delta if delta else None,broker_id=update.get('order_id') or o['broker_id'],broker_timestamp=update.get('exchange_update_timestamp') or update.get('order_timestamp'),reason=o['reason'],error=update.get('status_message')))
+            if status in TERMINAL and not self.rows("SELECT id FROM desk_positions WHERE id=? AND status IN ('OPEN','ENTRY_PENDING','EXIT_PENDING')",(p['id'],)):self.record_cache.pop(p['id'],None)
             if delta:self.event('FILL',f"{o['side']} {delta} units confirmed at cumulative average {avg:.2f}",p['symbol'])
             if status in ('REJECTED','CANCELLED'):self.event(status,update.get('status_message') or status,p['symbol'])
+        def broker_match(self,o,book,manual_id=None):
+            p=self.rows('SELECT * FROM desk_positions WHERE id=?',(o['position_id'],))[0]
+            bid=str(manual_id or o['broker_id'] or '')
+            matches=[r for r in book if str(r.get('order_id'))==bid] if bid else [r for r in book if r.get('tag')==o['tag']]
+            if not matches and bid:
+                history=self.a.order_history(bid)
+                if history:matches=[history[-1]]
+            if len(matches)!=1:raise ValueError('No unique broker match. Supply the exact Kite order ID; do not delete the pending record.')
+            r=matches[0]
+            if (r.get('tradingsymbol')!=p['contract'] or r.get('exchange')!=p['exchange'] or
+                r.get('transaction_type')!=o['side'] or int(r.get('quantity') or 0)!=o['qty'] or
+                r.get('product')!=p.get('product','MIS')):raise ValueError('Broker order contract, side, quantity or product does not match this entry')
+            if manual_id:
+                when=r.get('order_timestamp')
+                if not when or abs((dt(when)-dt(o['ts'])).total_seconds())>120:raise ValueError('Manual order ID does not match the local submission time')
+                if self.rows('SELECT id FROM desk_orders WHERE broker_id=? AND id!=?',(bid,o['id'])):raise ValueError('Broker ID already belongs to another local order')
+            return r
+        def recover_order(self,oid,body):
+            # Caller owns the engine's execution/risk lock. No automatic re-arming.
+            cfg=self.config();cfg['armed']=False;self.put('config',cfg)
+            rows=self.rows('SELECT * FROM desk_orders WHERE id=?',(oid,))
+            if not rows:raise ValueError('Order not found')
+            o=rows[0]
+            if o['mode']!='live':raise ValueError('Recovery is for live broker orders')
+            if o['status'] in TERMINAL:return dict(status=o['status'],message='Order is already terminal; clear the resolved halt if no other order is pending.')
+            p=self.rows('SELECT * FROM desk_positions WHERE id=?',(o['position_id'],))[0]
+            if body.get('action')=='verify-not-placed':
+                if body.get('ack') is not True:raise ValueError('Explicit confirmation of checking Kite Orders, Trades and Positions is required')
+                if o['side']!='BUY' or o['broker_id'] or o['filled'] or p['qty'] or o['status'] not in ('UNKNOWN','SUBMITTING'):raise ValueError('Only an unacknowledged zero-fill BUY can be verified as not placed')
+                age=(datetime.now(IST)-dt(o['ts'])).total_seconds()
+                if dt(o['ts']).date()!=datetime.now(IST).date() or age<120:raise ValueError('This check requires a same-day order at least two minutes old. Older records require broker evidence.')
+                for r in self.a.orders():
+                    if r.get('tag')==o['tag'] or (r.get('exchange')==p['exchange'] and r.get('tradingsymbol')==p['contract']):raise ValueError('A broker order exists for this contract. Reconcile its order ID instead.')
+                if any(r.get('exchange')==p['exchange'] and r.get('tradingsymbol')==p['contract'] for r in self.a.trades()):raise ValueError('Broker fills exist for this contract; cannot mark not placed')
+                if any(r.get('exchange')==p['exchange'] and r.get('tradingsymbol')==p['contract'] and int(r.get('quantity') or 0)!=0 for r in self.a.holdings()):raise ValueError('Broker position exists; cannot mark not placed')
+                # This is an explicit operator attestation supported by broker snapshots,
+                # not a fabricated broker cancellation. Keep the original row and audit log.
+                with self.db() as c:
+                    c.execute("UPDATE desk_orders SET status='REJECTED',error='Operator verified NOT PLACED; broker order/trade/position checks empty' WHERE id=?",(oid,))
+                    c.execute("UPDATE desk_positions SET status='CANCELLED',exit_reason='Verified not placed by operator' WHERE id=?",(p['id'],))
+                self.event('RECOVERY','Operator confirmed NOT PLACED after broker checks; local intent retired: '+oid,p['symbol'])
+                result=dict(status='NOT_PLACED',message='Local entry request retired after your confirmation and broker checks.')
+            else:
+                supplied=str(body.get('broker_id') or '').strip()
+                r=self.broker_match(o,self.a.orders(),supplied or None)
+                self.apply_order(oid,r)
+                if r['status'] not in TERMINAL:
+                    self.a.cancel(str(r['order_id']))
+                    # Cancellation acceptance is not final status. Re-read before closing.
+                    refreshed=self.rows('SELECT * FROM desk_orders WHERE id=?',(oid,))[0]
+                    r=self.broker_match(refreshed,self.a.orders())
+                    self.apply_order(oid,r)
+                self.event('RECOVERY','Cancel/reconcile requested for '+str(r['order_id']),p['symbol'])
+                result=dict(status=r['status'],message='Broker status reconciled. Filled quantity remains owned; only the unfilled remainder is cancelled.')
+            remaining=self.rows("SELECT id FROM desk_orders WHERE mode='live' AND status NOT IN ('COMPLETE','CANCELLED','REJECTED')")
+            self.verify_positions()
+            halt=self.get('halt') or ''
+            if not remaining and not self.mismatches and any(halt.startswith(x) for x in ('Unresolved broker order','Order submission uncertain','Broker reconciliation:')):
+                self.put('halt',None);result['message']+=' Order block cleared. Entries remain disarmed; re-arm when ready.'
+            else:result['message']+=' Any remaining order or risk block still needs resolution.'
+            self.record_trade(p['id'],'OPERATOR_RECOVERY',dict(order_id=oid,action=body.get('action'),result=result))
+            return result
         def reconcile(self):
             pending=self.rows("SELECT * FROM desk_orders WHERE mode='live' AND status NOT IN ('COMPLETE','CANCELLED','REJECTED')")
             if not pending:return
-            book=self.a.orders()
+            try:book=self.a.orders()
+            except Exception as e:
+                if type(e).__name__=='BrokerDeferred':return
+                raise
             for o in pending:
-                matches=[r for r in book if (o['broker_id'] and str(r.get('order_id'))==o['broker_id']) or r.get('tag')==o['tag']]
-                if len(matches)!=1:
-                    self.put('halt','Unresolved broker order · reconcile before entries');continue
-                r=matches[0];self.apply_order(o['id'],r)
-                if r['status'] not in TERMINAL and (datetime.now(IST)-dt(o['ts'])).total_seconds()>45:
-                    self.a.cancel(str(r['order_id'])) # Confirm the resulting status on a subsequent poll.
-            # Clearing a halt is explicit; successful reconciliation alone cannot re-arm entries.
+                try:
+                    r=self.broker_match(o,book);self.apply_order(o['id'],r)
+                    if r['status'] not in TERMINAL and (datetime.now(IST)-dt(o['ts'])).total_seconds()>45:self.a.cancel(str(r['order_id']))
+                except Exception as e:
+                    # One unresolved order must not abort supervision of other positions.
+                    if type(e).__name__=='BrokerDeferred':continue
+                    self.put('halt','Broker reconciliation: '+str(e))
+                    with self.db() as c:c.execute('UPDATE desk_orders SET error=? WHERE id=?',(str(e),o['id']))
+            # A remaining uncertainty blocks entries, while verified positions are managed.
         def verify_positions(self):
             live=[p for p in self.active() if p['mode']=='live']
-            self.mismatches=set()
-            if not live:return
+            if not live:self.mismatches=set();return
             actual={}
             try:holdings=self.a.holdings()
-            except Exception:
+            except Exception as e:
+                if type(e).__name__=='BrokerDeferred':return
                 self.mismatches={p['id'] for p in live}
                 raise
+            self.mismatches=set()
             for p in holdings:
                 if p.get('product')=='MIS':
                     key=(p.get('exchange'),p.get('tradingsymbol'))
@@ -12145,33 +12460,64 @@ def _build_desk_engine_class():
             if cfg['mode']=='live':
                 if any(p.get('exchange')==s['exchange'] and p.get('tradingsymbol')==s['contract'] and int(p.get('quantity') or 0)!=0 for p in self.a.holdings()):
                     self.event('WAIT','Existing broker position in this contract; no entry',s['symbol']);return
-            active=self.active()
-            if len(active)>=cfg['max_positions'] or any(p['symbol']==s['symbol'] for p in active):return
-            recent=self.rows('SELECT ts,exit_ts FROM desk_positions WHERE symbol=? ORDER BY ts DESC LIMIT 1',(s['symbol'],))
-            if recent and (datetime.now(IST)-dt(recent[0]['exit_ts'] or recent[0]['ts'])).total_seconds()<cfg['cooldown']*60:return
-            pid=uuid.uuid4().hex;entry=s['entry'];qty=s['qty'];risk=(entry-s['stop'])*qty
-            with self.db() as c:c.execute('INSERT INTO desk_positions(id,ts,symbol,mode,contract,exchange,lot,stop,target,risk,status,setup) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-                (pid,stamp(),s['symbol'],cfg['mode'],s['contract'],s['exchange'],s['lot'],s['stop'],s['target'],risk,'ENTRY_PENDING',json.dumps(s)))
+            guard=getattr(self,'shared_risk',None)
+            with guard.lock if guard else self.lock:
+                cfg=self.config()
+                if not cfg['armed']:return
+                s=dict(s)
+                if guard:
+                    reason=guard.admit(self,s)
+                    if reason:
+                        self.signals[s['symbol']]=dict(s,decision='WAIT',reason=reason)
+                        return
+                active=self.active()
+                if len(active)>=cfg['max_positions'] or any(p['symbol']==s['symbol'] for p in active):return
+                recent=self.rows('SELECT ts,exit_ts FROM desk_positions WHERE symbol=? ORDER BY ts DESC LIMIT 1',(s['symbol'],))
+                if cfg['cooldown']>0 and recent and (datetime.now(IST)-dt(recent[0]['exit_ts'] or recent[0]['ts'])).total_seconds()<cfg['cooldown']*60:return
+                s=dict(s);s['risk_config_at_entry']={k:cfg.get(k) for k in ('risk','capital','daily_loss','max_positions','cooldown','lots','stop_pct','reward_r','max_hold','square_off','live_override','confidence')}
+                pid=uuid.uuid4().hex;entry=s['entry'];qty=s['qty'];risk=(entry-s['stop'])*qty
+                with self.db() as c:c.execute('INSERT INTO desk_positions(id,ts,symbol,mode,contract,exchange,lot,stop,target,risk,status,setup) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (pid,stamp(),s['symbol'],cfg['mode'],s['contract'],s['exchange'],s['lot'],s['stop'],s['target'],risk,'ENTRY_PENDING',json.dumps(s)))
+                if guard and guard.config()['one_trade_per_arm']:
+                    cfg['armed']=False;self.put('config',cfg)
+                    self.event('CONTROL','One entry attempt used; entries disarmed',s['symbol'])
             p=self.rows('SELECT * FROM desk_positions WHERE id=?',(pid,))[0]
+            self.record_trade(pid,'ENTRY_PLAN',s)
             limit=math.ceil(entry/s.get('tick',.05))*s.get('tick',.05)
             self.submit(p,'BUY',qty,round(limit,2),'Qualified direction and risk checks')
         def manage(self,close_all=False):
             cfg=self.config()
+            if hasattr(self,'shared_risk'):
+                for o in self.rows("SELECT * FROM desk_orders WHERE mode='live' AND side='BUY' AND status NOT IN ('COMPLETE','CANCELLED','REJECTED')"):
+                    try:liquidate=self.shared_risk.snapshot('live')['liquidate']
+                    except Exception:liquidate=False
+                    if liquidate and o['broker_id']:
+                        try:self.a.cancel(o['broker_id'])
+                        except Exception as e:self.record_trade(o['position_id'],'CANCEL_DEFERRED',dict(reason=str(e)))
             for p in self.active():
-                if p['qty']<=0 or p['id'] in self.mismatches:continue
+                if p['qty']<=0:continue
+                if p['id'] in self.mismatches:
+                    self.record_observation(p,error='Broker quantity mismatch; automated exit suspended');continue
                 q,err=self.a.quote(p['exchange'],p['contract'])
-                if err:self.health[p['id']]={'reason':err};continue
-                bid=q['bid'];self.health[p['id']]=dict(bid=bid,reason='HOLD · within plan')
+                if err:
+                    self.health[p['id']]={'reason':err};self.record_observation(p,error=err);continue
+                bid=q['bid'];quote_age=max(0.,(datetime.now(IST)-dt(q['quote_ts'])).total_seconds()) if q.get('quote_ts') else 0.
+                self.health[p['id']]=dict(bid=bid,observed_mono=time.monotonic()-quote_age,reason='HOLD · within plan')
                 setup=json.loads(p['setup']);sig=self.signals.get(p['symbol'],{})
                 reason=None
-                if close_all:reason='Manual close all'
+                try:shared=self.shared_risk.snapshot(p['mode']) if hasattr(self,'shared_risk') else {}
+                except Exception:
+                    shared={};self.record_trade(p['id'],'RISK_DATA_GAP',dict(note='Shared risk calculation unavailable; local stop/target supervision continues.'))
+                if shared.get('liquidate'):reason=shared['reason']
+                elif close_all:reason='Manual close all'
                 elif bid<=p['stop']:reason='Stop reached'
                 elif bid>=p['target']:reason='Target reached'
                 elif datetime.now(IST).strftime('%H:%M')>=cfg['square_off']:reason='Intraday square-off'
-                elif (datetime.now(IST)-dt(p['ts'])).total_seconds()>=cfg['max_hold']*60:reason='Maximum holding time'
+                elif cfg.get('max_hold') is not None and (datetime.now(IST)-dt(p['ts'])).total_seconds()>=cfg['max_hold']*60:reason='Maximum holding time'
                 elif self.day_pnl(p['mode'])<=-cfg['daily_loss']:reason='Daily loss limit'
                 elif sig.get('bar_age',999)<=15 and sig.get('confidence',0)>=cfg['confidence'] and sig.get('direction')!=setup.get('direction'):reason='Direction reversed'
                 elif not p.get('reduced') and p['qty']>=2*p['lot'] and bid>=p['entry']+max(.01,p['entry']-p['stop'])*cfg['partial_take_r']:reason='Partial profit at planned R'
+                self.record_observation(p,q,decision=reason or 'HOLD')
                 if reason:
                     self.health[p['id']]['reason']=reason
                     if p['status']!='OPEN':
@@ -12233,16 +12579,25 @@ def _build_desk_engine_class():
         def control(self,action,body):
             with self.lock:
                 cfg=self.config()
-                if action=='mode':
+                if action=='live-override':
+                    enabled=body.get('enabled')
+                    if not isinstance(enabled,bool):raise ValueError('Override enabled must be true or false')
+                    if enabled and body.get('ack') is not True:raise ValueError('Manual live override requires explicit acknowledgement')
+                    cfg.update(live_override=enabled,armed=False)
+                    self.event('LIVE_OVERRIDE','Enabled' if enabled else 'Disabled')
+                elif action=='mode':
                     if body.get('mode') not in ('paper','live'):raise ValueError('Invalid execution mode')
                     if self.active():raise ValueError('Close active positions before switching execution mode')
-                    if body['mode']=='live' and (not self.evidence()['ready'] or body.get('ack') is not True):raise ValueError('Live requires paper evidence and explicit acknowledgement')
+                    if body['mode']=='live' and (not (cfg.get('live_override') is True or self.evidence()['ready']) or body.get('ack') is not True):raise ValueError('Live requires paper evidence or manual override, and explicit acknowledgement')
                     cfg.update(mode=body['mode'],armed=False)
                 elif action=='arm':
+                    if hasattr(self,'shared_risk'):
+                        blocked=self.shared_risk.snapshot(cfg['mode'])['entry_block']
+                        if blocked:raise ValueError(blocked)
                     if not self.a.connected():raise ValueError('Connect Kite first')
                     if self.get('halt'):raise ValueError(self.get('halt'))
                     if not self.model():raise ValueError('Train a model first')
-                    if cfg['mode']=='live' and (not self.evidence()['ready'] or body.get('ack') is not True):raise ValueError('Live evidence/acknowledgement missing')
+                    if cfg['mode']=='live' and (not (cfg.get('live_override') is True or self.evidence()['ready']) or body.get('ack') is not True):raise ValueError('Live evidence or manual override / acknowledgement missing')
                     if self.a.legacy_open():raise ValueError('Legacy positions must be reconciled and closed first')
                     cfg['armed']=True
                 elif action=='disarm':cfg['armed']=False
@@ -12262,6 +12617,83 @@ def _build_desk_engine_class():
                     self.put('halt',None);cfg['armed']=False
                 else:raise ValueError('Unknown action')
                 self.put('config',cfg);self.event('CONTROL',action);return cfg
+        def trade_review(self,pid):
+            rows=self.rows('SELECT * FROM desk_positions WHERE id=?',(pid,))
+            if not rows:raise ValueError('Trade not found')
+            p=rows[0];setup=json.loads(p.get('setup') or '{}')
+            orders=self.rows('SELECT * FROM desk_orders WHERE position_id=? ORDER BY ts,id',(pid,))
+            bought=sum(o['filled'] for o in orders if o['side']=='BUY');sold=sum(o['filled'] for o in orders if o['side']=='SELL')
+            buy_value=sum(o['notional'] for o in orders if o['side']=='BUY');sell_value=sum(o['notional'] for o in orders if o['side']=='SELL')
+            entry=buy_value/bought if bought else (p.get('entry') or None);exit_price=sell_value/sold if sold else None
+            stored_entry_only=not bought and bool(entry)
+            exit_record=self.rows('SELECT ts,payload FROM desk_exit_reviews WHERE position_id=? ORDER BY id DESC LIMIT 1',(pid,))
+            recorded_reason=p.get('exit_reason') or next((o.get('reason') for o in reversed(orders) if o['side']=='SELL' and o['filled'] and o.get('reason')),None)
+            if not recorded_reason and exit_record:recorded_reason=json.loads(exit_record[0]['payload']).get('reason')
+            if not recorded_reason:recorded_reason='Exit reason was not saved in this historical record' if p['status']=='CLOSED' else 'No completed exit recorded'
+            explanations=[]
+            if p['mode']=='paper':explanations.append('Paper trade: fills and P&L are simulated, not broker executions.')
+            if stored_entry_only:explanations.append('A stored entry price and position result exist, but entry-order fills are missing. This trade cannot be reconciled to broker fills from this database alone.')
+            elif not bought:explanations.append('No entry fill is recorded; this is an unfilled request, not a completed losing trade.')
+            if sold and entry:
+                change=(exit_price/entry-1)*100
+                explanations.append(f'Average option exit premium was {change:+.2f}% relative to average entry. Realized P&L is derived from confirmed fills; estimated fees are deducted separately.')
+            explanations.append('Recorded exit trigger: '+recorded_reason)
+            explanations.append('The model estimates underlying direction, not the probability of an option trade being profitable.')
+            counts=self.rows('SELECT kind,COUNT(*) n FROM desk_trade_events WHERE position_id=? GROUP BY kind',(pid,))
+            coverage={r['kind']:r['n'] for r in counts}
+            limitation='Recorded observations are samples from existing supervision, not every exchange tick. Underlying signal prices may be from older candles (see bar_ts). News, continuous IV and auction imbalance are not recorded; market causes cannot be proven. Offline periods and gaps cannot be reconstructed. This recorder does not automatically retrain the trading models from profits or losses.'
+            if not coverage.get('ENTRY_PLAN'):limitation+=' Historical trade: no event recorder entry record; only previously stored evidence is available.'
+            if self.recorder_error:limitation+=' '+self.recorder_error
+            observations=self.rows("SELECT MIN(CAST(json_extract(payload,'$.quote.bid') AS REAL)) low, MAX(CAST(json_extract(payload,'$.quote.bid') AS REAL)) high, MAX(CAST(json_extract(payload,'$.quote.spread_pct') AS REAL)) widest_spread FROM desk_trade_events WHERE position_id=? AND kind='OBSERVATION'",(pid,))[0]
+            drop=self.rows("""WITH samples AS (SELECT ts,CAST(json_extract(payload,'$.quote.bid') AS REAL) bid,
+                LAG(CAST(json_extract(payload,'$.quote.bid') AS REAL)) OVER (ORDER BY id) previous_bid,
+                LAG(ts) OVER (ORDER BY id) previous_ts FROM desk_trade_events WHERE position_id=? AND kind='OBSERVATION')
+                SELECT ts,previous_ts,bid,previous_bid,bid-previous_bid change FROM samples WHERE previous_bid>0 ORDER BY change LIMIT 1""",(pid,))
+            opposite=self.rows("SELECT ts,json_extract(payload,'$.signal.direction') direction,json_extract(payload,'$.signal.bar_ts') bar_ts FROM desk_trade_events WHERE position_id=? AND kind='OBSERVATION' AND json_extract(payload,'$.signal.direction') IS NOT NULL AND json_extract(payload,'$.signal.direction')!=? ORDER BY id LIMIT 1",(pid,setup.get('direction','')))
+            changes=dict(largest_sampled_bid_drop=drop[0] if drop and drop[0]['change']<0 else None,first_signal_different_from_entry=opposite[0] if opposite else None)
+            if changes['largest_sampled_bid_drop']:
+                v=changes['largest_sampled_bid_drop'];explanations.append(f"Largest recorded bid decline between samples: {v['previous_bid']:.2f} to {v['bid']:.2f}, between {v['previous_ts']} and {v['ts']}. Unobserved moves between samples are unknown.")
+            if opposite:explanations.append('A monitored direction signal differed from the entry plan at '+opposite[0]['ts']+'; its source candle time is recorded separately. This alone does not establish the cause of loss.')
+            if observations['low'] is not None:
+                explanations.append(f"Observed option bids ranged from {observations['low']:.2f} to {observations['high']:.2f}; these are sampled prices, not guaranteed intratrade extremes.")
+            if not setup.get('risk_config_at_entry'):limitation+=' Historical risk settings were not captured for this trade; current settings must not be substituted.'
+            direction=setup.get('direction')
+            if direction:
+                expected='The saved signal expected the underlying to move '+str(direction)+'. This was a direction forecast, not a guarantee of option profit.'
+            elif str(p.get('contract','')).endswith('PE'):
+                expected='The recorded contract is a put: the position has bearish exposure. This is inferred from the contract; the original model forecast was not saved.'
+            elif str(p.get('contract','')).endswith('CE'):
+                expected='The recorded contract is a call: the position has bullish exposure. This is inferred from the contract; the original model forecast was not saved.'
+            else:expected='The original entry thesis was not saved in this historical record.'
+            if setup.get('entry') is not None:expected+=f" Planned premium {setup['entry']}; planned stop {setup.get('stop','not recorded')}; planned target {setup.get('target','not recorded')}."
+            net=p['pnl']-p['fees']
+            actual=f"Stored realized result: {p['pnl']:+.2f}; estimated costs: {p['fees']:.2f}; net realized: {net:+.2f}. Status: {p['status']}."
+            if entry:actual+=f" Average entry premium available: {entry:.2f}"+(' (position ledger only).' if stored_entry_only else ' (order fills).')
+            if exit_price:actual+=f" Average exit premium: {exit_price:.2f}."
+            interpretations={'Stop reached':'The engine recorded its stop condition. This explains the exit decision; it does not establish whether the underlying, volatility or liquidity caused the premium decline.',
+                'Target reached':'The engine recorded its target condition and requested an exit.',
+                'Maximum holding time':'The holding-time setting triggered the exit. A timed exit can close either a profit or a loss.',
+                'Intraday square-off':'The configured square-off time triggered the exit; this was not necessarily a stop or target.',
+                'Manual close all':'A manual close-all request triggered the exit.',
+                'Direction reversed':'The monitored direction signal changed enough to meet the reversal-exit rule.',
+                'Partial profit at planned R':'The engine requested a partial profit exit; remaining quantity is recorded separately.'}
+            why=interpretations.get(recorded_reason,recorded_reason)
+            changed=' '.join(x for x in explanations if x.startswith(('Largest recorded','A monitored direction')))
+            if not changed:changed='No recorded price/signal transition establishes what suddenly changed.'+(' No during-trade observations were saved for this historical trade.' if not coverage.get('OBSERVATION') else ' Available samples cannot establish the market cause.')
+            summary=dict(expected=expected,actual=actual,exit_decision=why,what_changed=changed,
+                evidence_quality='Recorded entry and sampled observations available' if coverage.get('ENTRY_PLAN') and coverage.get('OBSERVATION') else 'Partial historical evidence; unavailable fields are marked Not recorded',
+                learning='Review records do not automatically retrain the model from this trade’s profit or loss.')
+            explanations=[expected,actual,why,changed]+explanations
+            timeline=self.trade_timeline(pid)
+            if not timeline['events'] and orders:
+                timeline=dict(events=[dict(id='legacy-'+str(i),ts=o['ts'],kind='LEGACY_ORDER_RECORD',data=dict(side=o['side'],qty=o['qty'],filled=o['filled'],status=o['status'],reason=o.get('reason') or 'Not recorded',note='Historical order snapshot. This timestamp is the submission time, not a reconstructed fill timestamp.')) for i,o in enumerate(orders)],next_after=None)
+            return dict(position={k:v for k,v in p.items() if k!='setup'},
+                entry_plan={k:setup.get(k) for k in ('ts','bar_ts','bar_age','direction','p_up','confidence','model_id','regime','spot','contract','entry','stop','target','qty','lots','max_lots','requested_lots','spread','reason','risk_config_at_entry','shared_signal_key','shared_risk_at_entry')},
+                outcome=dict(bought=bought,sold=sold,remaining=p['qty'],average_entry=entry,average_exit=exit_price,
+                    realized=p['pnl'],estimated_costs=p['fees'],net_realized=p['pnl']-p['fees']),
+                review_summary=summary,recorded_exit_reason=recorded_reason,explanations=explanations,limitations=limitation,coverage=coverage,observed_range=observations,observed_changes=changes,timeline=timeline,recorder_error=self.recorder_error,
+                orders=[{k:o.get(k) for k in ('ts','side','qty','filled','notional','limit_price','status','broker_id','reason','error')} for o in orders],
+                exit_observations=[dict(ts=r['ts'],snapshot=json.loads(r['payload'])) for r in self.rows('SELECT ts,payload FROM desk_exit_reviews WHERE position_id=? ORDER BY id',(pid,))])
         def state(self):
             cfg=self.config();model=self.model();evidence=self.evidence();active=self.active()
             for p in active:
@@ -12273,7 +12705,11 @@ def _build_desk_engine_class():
             if model:model={k:v for k,v in model.items() if k not in ('mu','sd','w','bias')}
             online=self.get('online_model');online={k:online[k] for k in ('samples','accuracy','auc','ts')} if online else None
             trades=self.rows("SELECT id,ts,symbol,mode,contract,qty,entry,status,exit_ts,pnl,fees,risk,exit_reason FROM desk_positions ORDER BY ts DESC LIMIT 100")
-            return dict(version='2.0',timestamp=stamp(),connected=self.a.connected(),market_open=self.a.market_open(),config=cfg,
+            for trade in trades:
+                if not trade.get('exit_reason'):
+                    last=self.rows("SELECT reason FROM desk_orders WHERE position_id=? AND side='SELL' AND filled>0 AND reason IS NOT NULL ORDER BY ts DESC LIMIT 1",(trade['id'],))
+                    trade['exit_reason']=last[0]['reason'] if last else ('Not recorded · open Trade review' if trade['status']=='CLOSED' else 'No completed exit recorded')
+            return dict(version='2.0',recorder_error=self.recorder_error,timestamp=stamp(),connected=self.a.connected(),market_open=self.a.market_open(),config=cfg,
                 block=self.block(),last_cycle=self.last_cycle,training=self.training,model=model,online=online,evidence=evidence,
                 observations=obs,signals=signals,positions=active,trades=trades,
                 orders=self.rows('SELECT * FROM desk_orders ORDER BY ts DESC LIMIT 60'),
@@ -12286,7 +12722,7 @@ DeskEngine = _build_desk_engine_class()
 
 
 class DeskAdapter:
-    symbols = ("NIFTY", "BANKNIFTY", "FINNIFTY")
+    symbols = tuple(AI_SYMBOLS)
     @contextmanager
     def db(self):
         c=ai_db()
@@ -12317,6 +12753,7 @@ class DeskAdapter:
             st=quote_stats(q)
             if not st.get("bid") or not st.get("ask") or st["bid"]>st["ask"]:return None,"No executable bid/ask"
             if not all(math.isfinite(float(st[k])) for k in ("bid","ask")):return None,"Invalid option prices"
+            st.update(quote_ts=ts.isoformat(),source="Kite REST; timestamp IST")
             return st,None
         except Exception as e:return None,str(e)
     def place(self,exchange,contract,side,qty,price,tag):
@@ -12325,9 +12762,13 @@ class DeskAdapter:
             transaction_type=side,quantity=int(qty),product="MIS",order_type="LIMIT",
             validity="DAY",price=float(price),tag=tag)
     def orders(self):return kite.orders()
+    def order_history(self,order_id):return kite.order_history(order_id)
+    def trades(self):return kite.trades()
     def holdings(self):return kite.positions().get("net",[])
     def cancel(self,order_id):return kite.cancel_order(variety="regular",order_id=order_id)
-    def legacy_open(self):return autotrade_ai_open_positions()
+    def legacy_open(self):
+        cas=globals().get('CAS_DESK')
+        return autotrade_ai_open_positions()+(cas.active() if cas else [])
 
 ai_init_db()
 autotrade_ai_init_db()
@@ -12348,6 +12789,28 @@ def acquire_desk_process_lock():
 
 if os.environ.get("AI_START_WORKERS","1")=="1":acquire_desk_process_lock()
 if AI_HIST_INTERVAL != "5minute":raise RuntimeError("AI Desk v2 requires AI_HIST_INTERVAL=5minute")
+# Prevent separate worker processes from independently spending the same risk budget
+# and each issuing a full allocation of Kite requests against the same ledgers.
+def _claim_ai_worker_lease():
+    if os.environ.get('AI_START_WORKERS','1')!='1':return None
+    path=os.path.abspath(AI_DB_FILE)+'.worker.lock'
+    handle=open(path,'a+b')
+    try:
+        if os.name=='nt':
+            import msvcrt
+            handle.seek(0,2)
+            if handle.tell()==0:handle.write(b'0');handle.flush()
+            handle.seek(0);msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+        return handle
+    except OSError:
+        handle.close()
+        raise SystemExit('Another AI backend worker owns these ledgers. Run one backend process; shared risk and broker throttling require a single owner.')
+
+_AI_WORKER_LEASE=_claim_ai_worker_lease()
+
 DESK = DeskEngine(DeskAdapter())
 
 @app.route('/api/ai-desk/state')
@@ -12392,6 +12855,1725 @@ def desk_legacy_close_route():
     if (request.get_json(silent=True) or {}).get('ack') is not True:return jsonify({"error":"Explicit acknowledgement required"}),400
     return jsonify({"closed":autotrade_ai_close_all("Migration: user requested legacy close")})
 
+
+# ===========================================================================
+# STOCK OPTIONS AI — isolated ledger/models; same validated desk execution core.
+# Full F&O directional monitoring, then bounded deep option-chain/liquidity checks.
+# API reference: https://kite.trade/docs/connect/v3/market-quotes/
+# API reference: https://kite.trade/docs/connect/v3/historical/
+# ===========================================================================
+STOCK_FULL_SCAN_DEEP_N = 24
+STOCK_FULL_REFRESH_BATCH = 28
+STOCK_HISTORY_REFRESH_SECONDS = 210
+STOCK_HISTORY_PACE_SECONDS = 0.36
+# On the first Kite connection the Stock AI begins a resumable deep backfill in
+# the background. One calendar year is long enough to expose the directional and
+# setup-success models to multiple regimes while keeping the local archive and
+# broker request volume bounded. Override with STOCK_HISTORY_BACKFILL_DAYS if a
+# different retention target is required.
+STOCK_HISTORY_BACKFILL_DAYS = max(90, int(os.environ.get('STOCK_HISTORY_BACKFILL_DAYS', '365')))
+STOCK_HISTORY_BACKFILL_CHUNK_DAYS = max(15, min(60, int(os.environ.get('STOCK_HISTORY_BACKFILL_CHUNK_DAYS', '60'))))
+STOCK_HISTORY_BACKFILL_PACE_SECONDS = max(0.36, float(os.environ.get('STOCK_HISTORY_BACKFILL_PACE_SECONDS', '0.40')))
+STOCK_HISTORY_BACKFILL_RETRY_SECONDS = max(60, int(os.environ.get('STOCK_HISTORY_BACKFILL_RETRY_SECONDS', '900')))
+STOCK_FULL_SCAN_BAR_MAX_AGE = 15
+STOCK_SUCCESS_MIN_SAMPLES = 40
+STOCK_SUCCESS_MIN_AUC = 0.52
+STOCK_HIST_SUCCESS_MIN_SAMPLES = 300
+STOCK_HIST_SUCCESS_MIN_AUC = 0.52
+STOCK_HIST_SUCCESS_MAX_SAMPLES = 24000
+STOCK_HIST_SUCCESS_PER_SYMBOL = 160
+STOCK_HIST_SUCCESS_RETRY_SECONDS = 900
+STOCK_HIST_MIN_ARCHIVE_COVERAGE = max(0.50, min(1.0, float(os.environ.get('STOCK_HIST_MIN_ARCHIVE_COVERAGE', '0.70'))))
+STOCK_DIRECTION_FEATURES = ['ret_1','ret_3','ret_5','ret_10','ret_20','ema_gap_9_20',
+    'ema_gap_20_50','rsi14','volatility_10','range_20','volume_ratio','trend_score','momentum_score','time_sin','time_cos']
+STOCK_HIST_SUCCESS_FEATURES = [
+    'direction_confidence','ret_1_aligned','ret_3_aligned','ret_5_aligned','ret_20_aligned',
+    'ema_9_20_aligned','ema_20_50_aligned','rsi_alignment','trend_alignment','momentum_alignment',
+    'volatility_10','range_20','volume_ratio','time_sin','time_cos','stop_barrier_pct','reward_r'
+]
+STOCK_SUCCESS_FEATURES = [
+    'direction_confidence','historical_strength','online_strength','model_agreement',
+    'trend_score','momentum_score','volatility_10','range_20','volume_ratio','regime_alignment',
+    'spread_quality','depth_ratio','delta_quality','log_option_volume','log_option_oi',
+    'dte_scaled','bar_freshness','reward_r','stop_pct_scaled','cost_r'
+]
+
+def _stock_success_sigmoid(x):
+    return 1.0/(1.0+np.exp(-np.clip(x,-30,30)))
+
+def _stock_success_fit(X,Y):
+    X=np.asarray(X,float);Y=np.asarray(Y,float)
+    mu=X.mean(0);sd=np.maximum(X.std(0),1e-5);z=np.clip((X-mu)/sd,-6,6)
+    w=np.zeros(X.shape[1]);b=0.0
+    for _ in range(260):
+        err=_stock_success_sigmoid(z@w+b)-Y
+        w-=.05*(z.T@err/len(Y)+.03*w);b-=.05*err.mean()
+    return dict(mu=mu.tolist(),sd=sd.tolist(),w=w.tolist(),bias=float(b))
+
+def _stock_success_predict(model,X):
+    z=np.clip((np.asarray(X,float)-np.asarray(model['mu']))/np.asarray(model['sd']),-6,6)
+    return _stock_success_sigmoid(z@np.asarray(model['w'])+float(model['bias']))
+
+def _stock_direction_predict(model,X):
+    # Same standardized logistic form used by the shared directional desk model.
+    z=np.clip((np.asarray(X,float)-np.asarray(model['mu']))/np.asarray(model['sd']),-6,6)
+    return float(_stock_success_sigmoid(z@np.asarray(model['w'])+float(model['bias'])))
+
+def _stock_success_auc(y,p):
+    y=np.asarray(y,int);p=np.asarray(p,float);a=int(y.sum());b=len(y)-a
+    if not a or not b:return None
+    order=np.argsort(p);ranks=np.empty(len(p),float);i=0
+    while i<len(p):
+        j=i+1
+        while j<len(p) and p[order[j]]==p[order[i]]:j+=1
+        ranks[order[i:j]]=(i+1+j)/2;i=j
+    return float((ranks[y==1].sum()-a*(a+1)/2)/(a*b))
+
+class StockDeskAdapter(DeskAdapter):
+    def __init__(self):
+        self.symbols=()
+        self.refreshed={}
+        self.history_lock=threading.Lock()
+    @contextmanager
+    def db(self):
+        c=sqlite3.connect(os.path.join(os.path.dirname(__file__),'stock_options_ai.db'),timeout=30)
+        c.row_factory=sqlite3.Row
+        try:
+            c.execute('PRAGMA journal_mode=WAL')
+            yield c
+            c.commit()
+        except Exception:
+            c.rollback();raise
+        finally:c.close()
+    def refresh(self,symbol):
+        # Fast tail refresh used by the live scanner. Deep history is collected by the
+        # independent resumable backfill worker below so a one-year archive never blocks
+        # entry execution or the 5-second position supervisor.
+        with self.history_lock:
+            if time.monotonic()-self.refreshed.get(symbol,-1e9)<STOCK_HISTORY_REFRESH_SECONDS:return
+            token,err=resolve_token_for_symbol(symbol)
+            if err:raise ValueError(err)
+            end=now_ist()
+            recent=self.bars(symbol,1)
+            start=end-timedelta(days=20)
+            if recent:
+                last=_ai_ts_naive(recent[-1]['ts'])
+                if last:start=max(start,last-timedelta(minutes=10))
+            candles,err=_hist_fetch_chunk(token,start,end)
+            if err:raise ValueError(str(err))
+            _hist_insert_candles(symbol,candles)
+            self.refreshed[symbol]=time.monotonic()
+    def history_bounds(self,symbol):
+        c=ai_db()
+        try:
+            r=c.execute("SELECT COUNT(*) n,MIN(ts) first_ts,MAX(ts) last_ts FROM ai_hist_candles WHERE symbol=? AND interval=?",(symbol,AI_HIST_INTERVAL)).fetchone()
+            return dict(n=int(r['n'] or 0),first_ts=r['first_ts'],last_ts=r['last_ts']) if r else dict(n=0,first_ts=None,last_ts=None)
+        finally:c.close()
+    def backfill_history(self,symbol,target_days=STOCK_HISTORY_BACKFILL_DAYS,progress=None,pause_check=None):
+        """Resumably fill older 5-minute stock history, newest missing chunk first.
+
+        This intentionally uses the shared historical-data request gate. It never holds
+        the live refresh lock across the long backfill and persists every successful chunk
+        immediately, so a disconnect/restart simply resumes from the oldest stored candle.
+        """
+        token,err=resolve_token_for_symbol(symbol)
+        if err:raise ValueError(err)
+        now=now_ist();target_start=now-timedelta(days=int(target_days));bounds=self.history_bounds(symbol)
+        first=_ai_ts_naive(bounds.get('first_ts')) if bounds.get('first_ts') else None
+        # Work backwards so the most recent missing months become usable first.
+        cursor_end=(first-timedelta(minutes=1)) if first else now
+        if cursor_end<=target_start:
+            return dict(symbol=symbol,status='COMPLETE',rows_added=0,chunks=0,bounds=bounds)
+        added_total=0;chunks=0;fetched_total=0;error=None
+        while cursor_end>target_start:
+            if pause_check:
+                reason=pause_check()
+                if reason:
+                    bounds=self.history_bounds(symbol)
+                    return dict(symbol=symbol,status='PAUSED_LIVE_PRIORITY',rows_added=added_total,fetched=fetched_total,
+                        chunks=chunks,error=None,bounds=bounds,target_start=str(target_start),pause_reason=str(reason))
+            start=max(target_start,cursor_end-timedelta(days=STOCK_HISTORY_BACKFILL_CHUNK_DAYS))
+            candles,fetch_err=_hist_fetch_chunk(token,start,cursor_end)
+            if fetch_err:
+                error=str(fetch_err);break
+            added=_hist_insert_candles(symbol,candles);added_total+=added;fetched_total+=len(candles);chunks+=1
+            if progress:
+                try:progress(dict(symbol=symbol,start=str(start),end=str(cursor_end),rows_added=added_total,chunks=chunks))
+                except Exception:pass
+            # Do not skip across a failed window: next run resumes exactly at the oldest
+            # successfully persisted boundary.
+            cursor_end=start-timedelta(seconds=1)
+            time.sleep(STOCK_HISTORY_BACKFILL_PACE_SECONDS)
+        bounds=self.history_bounds(symbol)
+        first=_ai_ts_naive(bounds.get('first_ts')) if bounds.get('first_ts') else None
+        complete=bool(first and first<=target_start+timedelta(days=3))
+        return dict(symbol=symbol,status='COMPLETE' if complete else ('PARTIAL' if chunks else 'ERROR'),rows_added=added_total,
+            fetched=fetched_total,chunks=chunks,error=error,bounds=bounds,target_start=str(target_start))
+    def chain(self,symbol):
+        exchange,opts=get_option_instruments_for_symbol(symbol)
+        today=now_ist().date()
+        expiries=sorted({o['expiry'] for o in opts if (o['expiry']-today).days>=MIN_DAYS_TO_EXPIRY})
+        if not expiries:return None,f'No stock expiry at least {MIN_DAYS_TO_EXPIRY} calendar days away'
+        data,err=get_chain_for_symbol(symbol,str(expiries[0]))
+        if err:return None,err
+        data=dict(data)
+        data['chain']=[o for o in data['chain'] if float(o.get('volume') or 0)>=max(1,int(o.get('lot_size') or 1))*10 and float(o.get('oi') or 0)>=max(1,int(o.get('lot_size') or 1))*20]
+        return data,None
+
+class StockDeskEngine(DeskEngine):
+    def __init__(self,adapter):
+        super().__init__(adapter)
+        self.a.symbols=tuple(self.get('stock_universe',[]))
+        self.scan_status={'status':'IDLE','completed':0,'total':0,'deep_total':0,'deep_completed':0}
+        self.ban_checked=0;self.banned=None;self.ban_error='Ban list not checked yet'
+        self.risk_lock=threading.Lock();self.entry_lock=threading.Lock();self.candidate_lock=threading.Lock()
+        self.execution_event=threading.Event();self.execution_candidates=[];self.execution_generation=0
+        self.execution_status={'status':'IDLE'};self.refresh_cursor=0
+        self.success_lock=threading.Lock();self.success_model_cache=None;self.success_model_cache_at=0.0
+        self.hist_success_lock=threading.Lock();self.hist_success_model_cache=None;self.hist_success_model_cache_at=0.0
+        self.hist_success_thread=None;self.hist_success_last_attempt=0.0
+        self.history_backfill_thread=None;self.history_backfill_last_attempt=0.0;self.history_backfill_universe=()
+        self.history_backfill_status=dict(status='WAITING FOR KITE',target_days=STOCK_HISTORY_BACKFILL_DAYS,completed=0,total=0,rows_added=0)
+    def _full_mode(self):
+        return self.get('stock_universe_info',{}).get('mode')!='Custom watchlist'
+    def select_universe(self,body=None):
+        body=body or {}
+        if self.config()['armed']:raise ValueError('Disarm entries before changing the scan universe')
+        universe=fo_stock_universe()
+        selected=body.get('symbols',[])
+        if not isinstance(selected,list) or any(not isinstance(x,str) for x in selected):raise ValueError('symbols must be a list of stock symbols')
+        if selected:
+            selected=list(dict.fromkeys(x.strip().upper() for x in selected if x.strip()))
+            if not 1<=len(selected)<=60 or any(x not in universe for x in selected):raise ValueError('Choose 1–60 current F&O stocks; indices are excluded')
+            mode='Custom watchlist'
+        else:
+            selected=list(universe);mode='Full F&O universe'
+        if not selected:raise ValueError('No current F&O stocks found. Connect Kite and refresh instruments.')
+        self.a.symbols=tuple(selected)
+        self.put('stock_universe',selected)
+        self.put('stock_universe_info',dict(mode=mode,total_fo=len(universe),selected=len(selected),deep_check=STOCK_FULL_SCAN_DEEP_N,
+            refresh_batch=STOCK_FULL_REFRESH_BATCH,updated=now_ist().isoformat()))
+        self.signals={k:v for k,v in self.signals.items() if k in selected}
+        self.refresh_cursor=0
+        self.event('UNIVERSE',f'{mode}: monitoring {len(selected)} stocks; deep option checks top {min(STOCK_FULL_SCAN_DEEP_N,len(selected))}')
+        return selected
+    def _sync_full_universe_membership(self):
+        if not self._full_mode():return
+        universe=fo_stock_universe()
+        if tuple(universe)==tuple(self.a.symbols):return
+        self.a.symbols=tuple(universe);self.put('stock_universe',universe)
+        info=self.get('stock_universe_info',{});info.update(mode='Full F&O universe',total_fo=len(universe),selected=len(universe),
+            deep_check=STOCK_FULL_SCAN_DEEP_N,refresh_batch=STOCK_FULL_REFRESH_BATCH,updated=now_ist().isoformat())
+        self.put('stock_universe_info',info);self.signals={k:v for k,v in self.signals.items() if k in universe}
+        self.event('UNIVERSE',f'F&O membership refreshed: {len(universe)} stocks')
+    @staticmethod
+    def rank_signal(s,max_spread):
+        confidence=max(0.,min(1.,float(s.get('confidence') or 0)))
+        base=100*confidence
+        if s.get('decision')!='READY':return round(base,2) if s.get('p_up') is not None else 0.
+        # Once the trade-success model is validated, learned probability dominates ranking.
+        if s.get('success_model_valid') and s.get('success_probability') is not None:
+            p=max(0.,min(1.,float(s['success_probability'])))
+            ev=float(s.get('expected_r') or 0)
+            ev_quality=max(0.,min(1.,(ev+0.5)/2.0))
+            spread=max(0.,min(1.,1-float(s.get('spread') or 0)/max_spread))
+            return round(85*p+10*ev_quality+5*spread,2)
+        spread=max(0.,min(1.,1-float(s.get('spread') or 0)/max_spread))
+        depth=min(1.,float(s.get('depth_qty') or 0)/max(1,float(s.get('qty') or 1))/3)
+        return round(90*confidence+7*spread+3*depth,2)
+    def _success_vector(self,s):
+        feats=list(s.get('features') or [])
+        def fidx(i,default=0.):
+            try:return float(feats[i]) if math.isfinite(float(feats[i])) else default
+            except Exception:return default
+        conf=max(0.,min(1.,float(s.get('confidence') or 0)))
+        hp=s.get('historical_probability');op=s.get('online_probability')
+        hs=abs(float(hp)-.5)*2 if hp is not None else conf
+        os=abs(float(op)-.5)*2 if op is not None else 0.
+        agree=1. if hp is not None and op is not None and (float(hp)>=.5)==(float(op)>=.5) else 0.5 if op is None else 0.
+        direction=s.get('direction');reg=s.get('regime')
+        align=1. if (direction=='UP' and reg=='UPTREND') or (direction=='DOWN' and reg=='DOWNTREND') else .5 if reg=='RANGE' else 0.
+        spread=float(s.get('spread') or 99);max_spread=max(.01,float(self.config().get('max_spread') or 1.))
+        spreadq=max(0.,min(1.,1-spread/max_spread))
+        qty=max(1.,float(s.get('qty') or 1));depth=max(0.,min(5.,float(s.get('depth_qty') or 0)/qty))/5
+        delta=abs(float(s.get('option_delta') or .5));deltaq=max(0.,1-abs(delta-.5)/.2)
+        vol=np.log1p(max(0.,float(s.get('option_volume') or 0)))/15.
+        oi=np.log1p(max(0.,float(s.get('option_oi') or 0)))/18.
+        dte=max(0.,min(60.,float(s.get('dte') or 0)))/60.
+        fresh=max(0.,min(1.,1-float(s.get('bar_age') or 15)/15.))
+        cfg=self.config();reward=float(cfg.get('reward_r') or 1.8);stop=float(cfg.get('stop_pct') or 12)/40.
+        planned=max(.01,(float(s.get('entry') or 0)-float(s.get('stop') or 0))*max(1.,float(s.get('qty') or 1)))
+        cost_r=(2*float(cfg.get('fee_per_order') or 0))/planned
+        return [conf,hs,os,agree,fidx(11),fidx(12),fidx(8),fidx(9),fidx(10),align,spreadq,depth,deltaq,vol,oi,dte,fresh,reward,stop,cost_r]
+    def _historical_setup_vector_from_features(self,f,p,reward=None,stop_barrier=None):
+        direction=1. if float(p)>=.5 else -1.
+        conf=max(float(p),1-float(p))
+        reward=float(reward if reward is not None else self.config().get('reward_r',1.8))
+        if stop_barrier is None:
+            # This is an UNDERLYING-stock barrier, not an option-premium stop. It is
+            # deliberately volatility-scaled so historical candles can provide a
+            # useful setup prior without fabricating option-chain history.
+            vol=max(0.,float(f.get('volatility_10') or 0));rng=max(0.,float(f.get('range_20') or 0))
+            stop_barrier=max(.20,min(1.75,.55*vol+.35*rng))
+        return [
+            conf,
+            direction*float(f.get('ret_1') or 0),direction*float(f.get('ret_3') or 0),
+            direction*float(f.get('ret_5') or 0),direction*float(f.get('ret_20') or 0),
+            direction*float(f.get('ema_gap_9_20') or 0),direction*float(f.get('ema_gap_20_50') or 0),
+            direction*(float(f.get('rsi14') or 50)-50),
+            direction*(float(f.get('trend_score') or 12.5)-12.5),
+            direction*(float(f.get('momentum_score') or 12.5)-12.5),
+            float(f.get('volatility_10') or 0),float(f.get('range_20') or 0),float(f.get('volume_ratio') or 0),
+            float(f.get('time_sin') or 0),float(f.get('time_cos') or 0),float(stop_barrier),reward
+        ]
+    def _historical_setup_vector(self,s):
+        vals=list(s.get('features') or [])
+        f={name:(float(vals[i]) if i<len(vals) and math.isfinite(float(vals[i])) else 0.) for i,name in enumerate(STOCK_DIRECTION_FEATURES)}
+        p=s.get('p_up')
+        if p is None:return None
+        return self._historical_setup_vector_from_features(f,float(p))
+    @staticmethod
+    def _historical_barrier_outcome(rows,i,direction,stop_pct,target_pct,horizon_bars):
+        entry=float(rows[i]['close'] or 0)
+        if entry<=0:return None
+        stop=float(stop_pct)/100.;target=float(target_pct)/100.;end=min(len(rows)-1,i+int(horizon_bars))
+        for j in range(i+1,end+1):
+            hi=float(rows[j]['high'] or rows[j]['close'] or 0);lo=float(rows[j]['low'] or rows[j]['close'] or 0)
+            if direction>0:
+                fav=(hi/entry)-1;adv=1-(lo/entry)
+            else:
+                fav=1-(lo/entry);adv=(hi/entry)-1
+            hit_target=fav>=target;hit_stop=adv>=stop
+            # If both barriers occur inside the same five-minute candle, intrabar order
+            # is unknowable from OHLC. Count it conservatively as a failure.
+            if hit_target and hit_stop:return 0
+            if hit_stop:return 0
+            if hit_target:return 1
+        return None
+    def _live_execution_priority_reason(self):
+        """Heavy history work yields whenever any automated live desk may need Kite."""
+        try:
+            cfg=self.config()
+            if cfg.get('mode')=='live' and cfg.get('armed'):return 'Stock AI live entries armed'
+            if any(p.get('mode')=='live' for p in self.active()):return 'Stock AI live position active'
+            if self.rows("SELECT id FROM desk_orders WHERE mode='live' AND status NOT IN ('COMPLETE','CANCELLED','REJECTED') LIMIT 1"):
+                return 'Stock AI live order unresolved'
+        except Exception:
+            return 'Stock AI live-state check unavailable'
+        for name,label in (('DESK','Index AI'),('CAS_DESK','CAS AI')):
+            desk=globals().get(name)
+            if not desk or desk is self:continue
+            try:
+                cfg=desk.config()
+                if cfg.get('mode')=='live' and cfg.get('armed'):return label+' live entries armed'
+                if any(p.get('mode')=='live' for p in desk.active()):return label+' live position active'
+                if desk.rows("SELECT id FROM desk_orders WHERE mode='live' AND status NOT IN ('COMPLETE','CANCELLED','REJECTED') LIMIT 1"):
+                    return label+' live order unresolved'
+            except Exception:
+                pass
+        try:
+            cfg=autotrade_ai_config()
+            if cfg.get('execution_mode')=='live' and cfg.get('armed'):return 'Auto Buy/Sell AI live entries armed'
+            if any(p.get('execution_mode')=='live' for p in autotrade_ai_open_positions()):
+                return 'Auto Buy/Sell AI live position active'
+        except Exception:
+            pass
+        return None
+    def _history_archive_coverage(self):
+        hb=self.history_backfill_status or {}
+        total=max(0,int(hb.get('total') or len(self.a.symbols) or 0))
+        complete=max(0,int(hb.get('archive_complete_symbols') or (total if hb.get('status')=='COMPLETE' else 0)))
+        ratio=(complete/total) if total else 0.0
+        return dict(complete=complete,total=total,ratio=ratio,ready=bool(total and ratio>=STOCK_HIST_MIN_ARCHIVE_COVERAGE),
+            required_ratio=STOCK_HIST_MIN_ARCHIVE_COVERAGE)
+    def _ensure_deep_history_backfill(self,force=False):
+        """Start/resume the one-year archive only when live execution has no priority."""
+        if not self.a.connected() or not self.a.symbols:return False
+        universe=tuple(self.a.symbols)
+        priority=self._live_execution_priority_reason()
+        if priority:
+            prior=self.history_backfill_status or {}
+            self.history_backfill_status={**prior,'status':'PAUSED · LIVE PRIORITY','pause_reason':priority,
+                'target_days':STOCK_HISTORY_BACKFILL_DAYS,'total':len(universe),'updated':now_ist().isoformat()}
+            self.history_backfill_last_attempt=0.
+            return False
+        if self.history_backfill_thread and self.history_backfill_thread.is_alive():return False
+        if not force and self.history_backfill_status.get('status')=='COMPLETE' and self.history_backfill_universe==universe:return False
+        now=time.monotonic()
+        if not force and now-self.history_backfill_last_attempt<STOCK_HISTORY_BACKFILL_RETRY_SECONDS:return False
+        self.history_backfill_last_attempt=now;self.history_backfill_universe=universe
+        def job():
+            total=len(universe);added_total=0;errors=[];archive_complete=0
+            self.history_backfill_status=dict(status='BACKFILLING',target_days=STOCK_HISTORY_BACKFILL_DAYS,completed=0,total=total,
+                archive_complete_symbols=0,coverage_ratio=0.0,required_coverage=STOCK_HIST_MIN_ARCHIVE_COVERAGE,rows_added=0,
+                started=now_ist().isoformat(),symbol=None,pause_reason=None)
+            for i,symbol in enumerate(universe):
+                if self.stop_event.is_set():break
+                if not self.a.connected():
+                    self.history_backfill_status.update(status='PAUSED · KITE DISCONNECTED',completed=i,symbol=symbol);self.history_backfill_last_attempt=0.;return
+                priority=self._live_execution_priority_reason()
+                if priority:
+                    self.history_backfill_status.update(status='PAUSED · LIVE PRIORITY',pause_reason=priority,completed=i,symbol=symbol,
+                        archive_complete_symbols=archive_complete,coverage_ratio=round(archive_complete/max(1,total),4),updated=now_ist().isoformat())
+                    self.history_backfill_last_attempt=0.;return
+                self.history_backfill_status.update(symbol=symbol,completed=i,pause_reason=None)
+                def chunk_progress(info):
+                    self.history_backfill_status.update(symbol=symbol,current_chunk=info.get('chunks'),chunk_start=info.get('start'),chunk_end=info.get('end'),
+                        rows_added=added_total+int(info.get('rows_added') or 0))
+                try:
+                    r=self.a.backfill_history(symbol,STOCK_HISTORY_BACKFILL_DAYS,chunk_progress,self._live_execution_priority_reason)
+                    added_total+=int(r.get('rows_added') or 0)
+                    if r.get('status')=='PAUSED_LIVE_PRIORITY':
+                        self.history_backfill_status.update(status='PAUSED · LIVE PRIORITY',pause_reason=r.get('pause_reason') or 'Live execution priority',
+                            completed=i,symbol=symbol,rows_added=added_total,archive_complete_symbols=archive_complete,
+                            coverage_ratio=round(archive_complete/max(1,total),4),updated=now_ist().isoformat())
+                        self.history_backfill_last_attempt=0.;return
+                    if r.get('status')=='COMPLETE':archive_complete+=1
+                    else:errors.append(symbol+': '+str(r.get('error') or r.get('status')))
+                except Exception as e:
+                    errors.append(symbol+': '+str(e))
+                self.history_backfill_status.update(completed=i+1,rows_added=added_total,last_symbol=symbol,error_count=len(errors),
+                    archive_complete_symbols=archive_complete,coverage_ratio=round(archive_complete/max(1,total),4))
+            complete=(not self.stop_event.is_set() and self.a.connected() and not errors and archive_complete==total)
+            self.history_backfill_status.update(status='COMPLETE' if complete else 'PARTIAL · WILL RETRY',
+                completed=total if complete else self.history_backfill_status.get('completed',0),total=total,rows_added=added_total,
+                archive_complete_symbols=archive_complete,coverage_ratio=round(archive_complete/max(1,total),4),
+                finished=now_ist().isoformat(),errors=errors[:8],pause_reason=None)
+            self.event('HISTORY_BACKFILL',f"{self.history_backfill_status['status']} · {STOCK_HISTORY_BACKFILL_DAYS}d · added {added_total} rows")
+            if added_total>0 and not self.train_lock.locked() and not self._live_execution_priority_reason():self.train()
+            if self._history_archive_coverage()['ready'] and not self._live_execution_priority_reason():self._ensure_historical_success_training(force=True)
+        self.history_backfill_thread=threading.Thread(target=job,daemon=True,name='stock-ai-deep-history')
+        self.history_backfill_thread.start();return True
+    def historical_success_model(self,force=False):
+        now=time.monotonic()
+        if not force and self.hist_success_model_cache is not None and now-self.hist_success_model_cache_at<30:return self.hist_success_model_cache
+        m=self.get('historical_setup_success_model')
+        self.hist_success_model_cache=m;self.hist_success_model_cache_at=now
+        return m
+    def train_historical_success_model(self,force=False):
+        if not self.hist_success_lock.acquire(False):return self.historical_success_model()
+        try:
+            direction_model=self.model()
+            if not direction_model or not direction_model.get('mu') or not direction_model.get('validation_start'):
+                m=dict(status='WAITING FOR DIRECTION MODEL',valid=False,samples=0,required=STOCK_HIST_SUCCESS_MIN_SAMPLES,
+                    features=STOCK_HIST_SUCCESS_FEATURES,updated=now_ist().isoformat(),
+                    note='Train the stock directional model first; historical setup learning uses its unseen holdout period.')
+                self.put('historical_setup_success_model',m);self.hist_success_model_cache=m;self.hist_success_model_cache_at=time.monotonic();return m
+            prior=self.historical_success_model();dm_id=direction_model.get('id')
+            if not force and prior and prior.get('direction_model_id')==dm_id and prior.get('valid'):
+                return prior
+            try:
+                holdout_start=datetime.fromisoformat(str(direction_model['validation_start']).replace('Z','+00:00'))
+                if holdout_start.tzinfo is None:holdout_start=holdout_start.replace(tzinfo=IST)
+                else:holdout_start=holdout_start.astimezone(IST)
+            except Exception:
+                holdout_start=None
+            if holdout_start is None:
+                raise ValueError('Directional model validation_start is missing or invalid')
+            cfg=self.config();reward=float(cfg.get('reward_r') or 1.8);horizon=max(3,min(24,int(float(cfg.get('max_hold') or 90)//5)))
+            covered={str(r.get('symbol')) for r in (direction_model.get('coverage') or []) if int(r.get('bars') or 0)>=300}
+            train_symbols=[sym for sym in self.a.symbols if not covered or sym in covered]
+            samples=[];per_symbol={};coverage=[]
+            for n,symbol in enumerate(train_symbols):
+                rows=self.a.bars(symbol,20000)
+                if len(rows)<240:continue
+                arr={k:np.asarray([float(r[k] or 0) for r in rows],float) for k in ('close','high','low','volume')};arr['ts']=[str(r['ts']) for r in rows]
+                made=[]
+                for i in range(200,len(rows)-horizon,3):
+                    try:
+                        t=datetime.fromisoformat(str(rows[i]['ts']).replace('Z','+00:00'))
+                        if t.tzinfo is None:t=t.replace(tzinfo=IST)
+                        else:t=t.astimezone(IST)
+                    except Exception:continue
+                    if t<holdout_start:continue
+                    f=self.a.features(rows,i,arr);x=[f.get(k,0) for k in STOCK_DIRECTION_FEATURES]
+                    if len(x)!=len(direction_model.get('mu') or []) or not all(math.isfinite(float(v)) for v in x):continue
+                    p=_stock_direction_predict(direction_model,x);conf=max(p,1-p)
+                    if conf<.55:continue
+                    vol=max(0.,float(f.get('volatility_10') or 0));rng=max(0.,float(f.get('range_20') or 0))
+                    stop_barrier=max(.20,min(1.75,.55*vol+.35*rng));target_barrier=stop_barrier*reward
+                    direction=1 if p>=.5 else -1
+                    label=self._historical_barrier_outcome(rows,i,direction,stop_barrier,target_barrier,horizon)
+                    if label is None:continue
+                    hv=self._historical_setup_vector_from_features(f,p,reward,stop_barrier)
+                    if all(math.isfinite(float(v)) for v in hv):
+                        end_t=t+timedelta(minutes=5*horizon);made.append((t.timestamp(),end_t.timestamp(),hv,int(label),symbol))
+                if len(made)>STOCK_HIST_SUCCESS_PER_SYMBOL:
+                    # Keep each stock balanced while spreading its samples across the whole
+                    # available holdout instead of retaining only the most recent tail.
+                    keep=np.linspace(0,len(made)-1,STOCK_HIST_SUCCESS_PER_SYMBOL,dtype=int)
+                    made=[made[int(k)] for k in keep]
+                samples.extend(made);per_symbol[symbol]=len(made);coverage.append(dict(symbol=symbol,samples=len(made),bars=len(rows)))
+                if n%12==0:time.sleep(.01)
+            samples.sort(key=lambda r:r[0])
+            if len(samples)>STOCK_HIST_SUCCESS_MAX_SAMPLES:
+                # Deterministic evenly-spaced downsample preserves chronology and coverage.
+                idx=np.linspace(0,len(samples)-1,STOCK_HIST_SUCCESS_MAX_SAMPLES,dtype=int);samples=[samples[int(i)] for i in idx]
+            if len(samples)<STOCK_HIST_SUCCESS_MIN_SAMPLES or len({r[3] for r in samples})<2:
+                m=dict(status='LEARNING',valid=False,samples=len(samples),required=STOCK_HIST_SUCCESS_MIN_SAMPLES,
+                    features=STOCK_HIST_SUCCESS_FEATURES,direction_model_id=dm_id,holdout_start=holdout_start.isoformat(),direction_coverage_symbols=len(train_symbols),
+                    per_symbol=per_symbol,updated=now_ist().isoformat(),
+                    note='Historical stock setup samples are still building. Full-F&O recent history is collected progressively.')
+            else:
+                split=int(len(samples)*.8);cut=samples[split][0]
+                train=[r for r in samples[:split] if r[1]<cut];val=[r for r in samples[split:] if r[0]>=cut]
+                if len(train)<200 or len(val)<60 or len({r[3] for r in train})<2 or len({r[3] for r in val})<2:
+                    m=dict(status='LEARNING',valid=False,samples=len(samples),required=STOCK_HIST_SUCCESS_MIN_SAMPLES,
+                        train_samples=len(train),validation_samples=len(val),features=STOCK_HIST_SUCCESS_FEATURES,direction_model_id=dm_id,
+                        holdout_start=holdout_start.isoformat(),direction_coverage_symbols=len(train_symbols),per_symbol=per_symbol,updated=now_ist().isoformat(),
+                        note='Need more chronological winners and failures for historical setup validation.')
+                else:
+                    X=[r[2] for r in train];Y=[r[3] for r in train];Xv=[r[2] for r in val];Yv=np.asarray([r[3] for r in val],int)
+                    m=_stock_success_fit(X,Y);pv=np.asarray(_stock_success_predict(m,Xv),float)
+                    aucv=_stock_success_auc(Yv,pv);acc=float(((pv>=.5)==Yv).mean()*100);baseline=float(max(Yv.mean(),1-Yv.mean())*100);brier=float(np.mean((pv-Yv)**2))
+                    valid=aucv is not None and aucv>=STOCK_HIST_SUCCESS_MIN_AUC and acc>=baseline-2
+                    m.update(status='VALIDATED' if valid else 'LEARNING',valid=bool(valid),samples=len(samples),train_samples=len(train),validation_samples=len(val),
+                        accuracy=acc,auc=aucv,brier=brier,baseline=baseline,features=STOCK_HIST_SUCCESS_FEATURES,direction_model_id=dm_id,
+                        holdout_start=holdout_start.isoformat(),direction_coverage_symbols=len(train_symbols),horizon_minutes=horizon*5,reward_r=reward,
+                        label_definition='Underlying target-before-stop using volatility-scaled barriers on the directional model holdout; not an historical option-P&L backtest.',
+                        per_symbol=per_symbol,coverage=coverage,updated=now_ist().isoformat())
+            self.put('historical_setup_success_model',m);self.hist_success_model_cache=m;self.hist_success_model_cache_at=time.monotonic()
+            self.event('HIST_SUCCESS_MODEL',f"{m.get('status')} samples={m.get('samples',0)} auc={m.get('auc')}")
+            return m
+        except Exception as e:
+            m=dict(status='ERROR',valid=False,samples=0,required=STOCK_HIST_SUCCESS_MIN_SAMPLES,features=STOCK_HIST_SUCCESS_FEATURES,
+                error=str(e),updated=now_ist().isoformat())
+            self.put('historical_setup_success_model',m);self.hist_success_model_cache=m;self.hist_success_model_cache_at=time.monotonic()
+            self.event('ERROR','Historical success model: '+str(e));return m
+        finally:self.hist_success_lock.release()
+    def _ensure_historical_success_training(self,force=False):
+        # Historical-success fitting is background research; live execution always wins.
+        if self._live_execution_priority_reason():return False
+        direction_model=self.model()
+        if not direction_model:return False
+        prior=self.historical_success_model()
+        same=prior and prior.get('direction_model_id')==direction_model.get('id')
+        if not force and same and prior.get('valid'):return False
+        if self.hist_success_thread and self.hist_success_thread.is_alive():return False
+        now=time.monotonic()
+        if not force and now-self.hist_success_last_attempt<STOCK_HIST_SUCCESS_RETRY_SECONDS:return False
+        self.hist_success_last_attempt=now
+        def job():self.train_historical_success_model(force=force)
+        self.hist_success_thread=threading.Thread(target=job,daemon=True,name='stock-ai-historical-success')
+        self.hist_success_thread.start();return True
+    def success_model(self,force=False):
+        now=time.monotonic()
+        if not force and self.success_model_cache is not None and now-self.success_model_cache_at<30:return self.success_model_cache
+        m=self.get('trade_success_model')
+        self.success_model_cache=m;self.success_model_cache_at=now
+        return m
+    def train_success_model(self,force=False):
+        if not self.success_lock.acquire(False):return self.success_model()
+        try:
+            rows=self.rows("SELECT id,exit_ts,pnl,fees,setup FROM desk_positions WHERE status='CLOSED' AND mode='paper' AND setup IS NOT NULL ORDER BY exit_ts,id")
+            stamp_key=rows[-1]['exit_ts'] if rows else None;prior=self.success_model()
+            if not force and prior and prior.get('last_exit_ts')==stamp_key:return prior
+            X=[];Y=[]
+            for r in rows:
+                try:
+                    s=json.loads(r['setup'] or '{}')
+                    if s.get('decision')!='READY':continue
+                    x=self._success_vector(s)
+                    if len(x)==len(STOCK_SUCCESS_FEATURES) and all(math.isfinite(float(v)) for v in x):
+                        X.append(x);Y.append(1 if float(r['pnl'] or 0)-float(r['fees'] or 0)>0 else 0)
+                except Exception:continue
+            if len(X)<STOCK_SUCCESS_MIN_SAMPLES or len(set(Y))<2:
+                m=dict(status='LEARNING',valid=False,samples=len(X),required=STOCK_SUCCESS_MIN_SAMPLES,features=STOCK_SUCCESS_FEATURES,last_exit_ts=stamp_key,updated=now_ist().isoformat())
+                self.put('trade_success_model',m);self.success_model_cache=m;self.success_model_cache_at=time.monotonic();return m
+            split=max(25,int(len(X)*.8));split=min(split,len(X)-10)
+            Xt,Yt=X[:split],Y[:split];Xv,Yv=X[split:],Y[split:]
+            if len(set(Yt))<2 or len(set(Yv))<2:
+                m=dict(status='LEARNING',valid=False,samples=len(X),required=STOCK_SUCCESS_MIN_SAMPLES,features=STOCK_SUCCESS_FEATURES,last_exit_ts=stamp_key,updated=now_ist().isoformat(),note='Need wins and losses in both chronological train and validation sets')
+            else:
+                m=_stock_success_fit(Xt,Yt);pv=np.asarray(_stock_success_predict(m,Xv),float);yv=np.asarray(Yv,int)
+                aucv=_stock_success_auc(yv,pv);acc=float(((pv>=.5)==yv).mean()*100);baseline=float(max(yv.mean(),1-yv.mean())*100);brier=float(np.mean((pv-yv)**2))
+                valid=aucv is not None and aucv>=STOCK_SUCCESS_MIN_AUC and acc>=baseline-2
+                m.update(status='VALIDATED' if valid else 'LEARNING',valid=bool(valid),samples=len(X),train_samples=len(Xt),validation_samples=len(Xv),accuracy=acc,auc=aucv,brier=brier,baseline=baseline,features=STOCK_SUCCESS_FEATURES,last_exit_ts=stamp_key,updated=now_ist().isoformat())
+            self.put('trade_success_model',m);self.success_model_cache=m;self.success_model_cache_at=time.monotonic()
+            self.event('SUCCESS_MODEL',f"{m.get('status')} samples={m.get('samples',0)} auc={m.get('auc')}")
+            return m
+        finally:self.success_lock.release()
+    def _apply_success_intelligence(self,s):
+        if s.get('decision')!='READY':return s
+        live_model=self.success_model() or self.train_success_model()
+        hist_model=self.historical_success_model()
+        archive=self._history_archive_coverage()
+        live_valid=bool(live_model and live_model.get('valid') and live_model.get('w'))
+        hist_model_valid=bool(hist_model and hist_model.get('valid') and hist_model.get('w'))
+        hist_valid=bool(hist_model_valid and archive.get('ready'))
+        s['live_success_model_valid']=live_valid;s['historical_success_model_valid']=hist_valid
+        s['historical_success_model_trained']=hist_model_valid
+        s['historical_archive_coverage']=round(float(archive.get('ratio') or 0),4)
+        s['historical_archive_ready']=bool(archive.get('ready'))
+        cfg=self.config();planned=max(.01,(float(s['entry'])-float(s['stop']))*max(1,int(s['qty'])))
+        cost_r=(2*float(cfg.get('fee_per_order') or 0))/planned
+        hp=None;lp=None;raw_hist=None;raw_live=None
+        hv=self._historical_setup_vector(s)
+        if hist_valid and hv:
+            raw_hist=float(_stock_success_predict(hist_model,hv))
+            # Historical candles do not contain old option books. Treat the historical
+            # setup model as a conservative prior and shrink it toward 50%.
+            h_samples=float(hist_model.get('samples') or 0);h_auc=float(hist_model.get('auc') or .5)
+            coverage=float(archive.get('ratio') or 0)
+            coverage_factor=max(.50,min(1.,coverage))
+            h_shrink=min(.78,max(.30,.35+min(h_samples,6000)/6000*.25+max(0.,h_auc-.5)*1.2))*coverage_factor
+            hp=.5+(raw_hist-.5)*h_shrink
+            s['historical_setup_probability']=round(max(0.,min(1.,hp)),6)
+            s['historical_setup_probability_raw']=round(raw_hist,6)
+        else:
+            s['historical_setup_probability']=None
+            if hist_model_valid and not archive.get('ready'):
+                s['historical_setup_status']=f"WAITING FOR HISTORY COVERAGE · {float(archive.get('ratio') or 0)*100:.0f}% / {float(archive.get('required_ratio') or 0)*100:.0f}%"
+            elif not hist_model_valid:
+                s['historical_setup_status']='LEARNING'
+        if live_valid:
+            raw_live=float(_stock_success_predict(live_model,self._success_vector(s)))
+            l_samples=float(live_model.get('samples') or 0)
+            l_shrink=min(1.,max(.25,(l_samples-STOCK_SUCCESS_MIN_SAMPLES)/160.0+.25))
+            lp=.5+(raw_live-.5)*l_shrink
+            s['live_success_probability']=round(max(0.,min(1.,lp)),6)
+            s['live_success_probability_raw']=round(raw_live,6)
+        else:s['live_success_probability']=None
+        if hp is not None and lp is not None:
+            # Forward executable option outcomes gain authority as evidence accumulates.
+            live_weight=min(.75,max(.25,.25+(float(live_model.get('samples') or 0)-STOCK_SUCCESS_MIN_SAMPLES)/460*.50))
+            p=(1-live_weight)*hp+live_weight*lp
+            s['success_blend']=dict(historical_weight=round(1-live_weight,3),live_weight=round(live_weight,3))
+            s['selection_basis']=f"Historical setup + live option-success ML ({int(round((1-live_weight)*100))}/{int(round(live_weight*100))})"
+        elif hp is not None:
+            p=hp;s['success_blend']=dict(historical_weight=1.0,live_weight=0.0)
+            s['selection_basis']='Historical setup bootstrap · live option-success ML still learning'
+        elif lp is not None:
+            p=lp;s['success_blend']=dict(historical_weight=0.0,live_weight=1.0)
+            s['selection_basis']='Validated live option-success ML'
+        else:
+            p=None;s['success_blend']=None
+            s['selection_basis']='Directional-confidence fallback while success models learn'
+        s['success_model_valid']=p is not None
+        if p is not None:
+            s['success_probability']=round(max(0.,min(1.,p)),6)
+            s['expected_r']=round(p*float(cfg['reward_r'])-(1-p)-cost_r,4)
+        else:
+            s['success_probability']=None;s['expected_r']=None
+        s['rank_score']=self.rank_signal(s,cfg['max_spread'])
+        return s
+    def _screen_direction(self,symbol):
+        s=self.direction_snapshot(symbol,refresh=False,record_observation=True,max_bar_age=STOCK_FULL_SCAN_BAR_MAX_AGE)
+        s['reason']=s.get('reason','').replace('index candles','stock candles')
+        if self.banned is not None and symbol in self.banned:s.update(decision='WAIT',reason='Stock in F&O ban list; new entries excluded')
+        if self.config()['mode']=='live' and self.banned is None:s.update(decision='WAIT',reason='Daily F&O ban list unavailable; live entries paused')
+        if s.get('decision')=='CANDIDATE':s['reason']='Full-universe ML direction qualified · awaiting deep option check'
+        s['scan_stage']='UNIVERSE';s['rank_score']=self.rank_signal(s,self.config()['max_spread'])
+        return s
+    def inspect(self,symbol):
+        s=super().inspect(symbol)
+        s['reason']=s.get('reason','').replace('index candles','stock candles')
+        if self.banned is not None and symbol in self.banned:s.update(decision='WAIT',reason='Stock in F&O ban list; new entries excluded')
+        if self.config()['mode']=='live' and self.banned is None:s.update(decision='WAIT',reason='Daily F&O ban list unavailable; live entries paused')
+        s['scan_stage']='DEEP'
+        if s.get('decision')=='READY':self._apply_success_intelligence(s)
+        else:s['rank_score']=self.rank_signal(s,self.config()['max_spread'])
+        return s
+    def _refresh_batch(self,names,screened):
+        if not names:return []
+        # Stale/missing symbols get first claim on the refresh budget; the rotating
+        # cursor then guarantees the rest of the universe is revisited continuously.
+        stale=[s for s in names if screened.get(s,{}).get('bar_age') is None or screened.get(s,{}).get('bar_age',999)>STOCK_FULL_SCAN_BAR_MAX_AGE]
+        chosen=[]
+        for s in stale:
+            if s not in chosen:chosen.append(s)
+            if len(chosen)>=STOCK_FULL_REFRESH_BATCH:break
+        if len(chosen)<STOCK_FULL_REFRESH_BATCH:
+            total=len(names);start=self.refresh_cursor%total
+            for step in range(total):
+                s=names[(start+step)%total]
+                if s not in chosen:chosen.append(s)
+                if len(chosen)>=STOCK_FULL_REFRESH_BATCH:break
+            self.refresh_cursor=(start+STOCK_FULL_REFRESH_BATCH)%total
+        # Always keep owned positions fresh even if they fall outside this cycle's batch.
+        for p in self.active():
+            if p['symbol'] in names and p['symbol'] not in chosen:chosen.append(p['symbol'])
+        return chosen
+    def enter(self,s):
+        # Reprice/revalidate immediately before the order.  A high universe rank never
+        # permits a stale option fill or bypasses the normal desk/shared risk gates.
+        # This method is called by the dedicated execution thread, never by the broad
+        # universe scanner, so slow scanning cannot hold up broker execution/supervision.
+        if s.get('decision')!='READY' or self.block() or self.get('close_requested'):return
+        fresh=self.inspect(s['symbol']);self.signals[s['symbol']]=fresh
+        if fresh.get('decision')!='READY' or self.get('close_requested'):return
+        return super().enter(fresh)
+    def _publish_execution_candidates(self,ranked):
+        ready=[dict(s) for s in ranked if s.get('decision')=='READY' and s.get('symbol') in self.a.symbols]
+        with self.candidate_lock:
+            self.execution_generation+=1
+            self.execution_candidates=ready
+            self.execution_status=dict(status='CANDIDATES READY' if ready else 'NO READY CANDIDATE',generation=self.execution_generation,
+                count=len(ready),best=ready[0]['symbol'] if ready else None,
+                best_success_probability=ready[0].get('success_probability') if ready else None,best_expected_r=ready[0].get('expected_r') if ready else None,
+                updated=now_ist().isoformat())
+        if ready:self.execution_event.set()
+    def execute_candidates(self):
+        # Entry execution is serialized independently of both the scanner and the risk
+        # supervisor.  Existing positions/exits never wait for this entry lock.
+        if not self.entry_lock.acquire(False):return
+        try:
+            if not self.a.connected() or not self.a.market_open() or self.get('close_requested'):return
+            with self.candidate_lock:
+                candidates=[dict(s) for s in self.execution_candidates]
+                generation=self.execution_generation
+            if not candidates:return
+            self.execution_status=dict(status='EXECUTING',generation=generation,count=len(candidates),updated=now_ist().isoformat())
+            for seed in candidates:
+                if self.get('close_requested') or not self.config()['armed']:break
+                if self.block():break
+                try:self.enter(seed)
+                except Exception as e:self.event('ERROR','Stock execution: '+str(e),seed.get('symbol',''))
+                # Re-evaluate limits after each admitted attempt.  If more positions are
+                # allowed, the next-ranked READY candidate may be considered.
+                if len(self.active())>=self.config()['max_positions']:break
+            self.execution_status=dict(status='IDLE',generation=generation,count=len(candidates),updated=now_ist().isoformat())
+        finally:self.entry_lock.release()
+    def cycle(self):
+        if not self.lock.acquire(False):return
+        try:
+            self.last_cycle=now_ist().isoformat()
+            if not self.a.connected():return
+            if not self.a.symbols:self.select_universe()
+            else:self._sync_full_universe_membership()
+            # First successful Kite connection immediately starts/resumes the deep
+            # historical archive in a separate thread. Normal scan/execution continues.
+            self._ensure_deep_history_backfill()
+            if time.monotonic()-self.ban_checked>1800:
+                self.banned,self.ban_error=get_fo_ban_list();self.ban_checked=time.monotonic()
+            self.supervise()
+            names=list(dict.fromkeys(list(self.a.symbols)+[p['symbol'] for p in self.active()]))
+            if not self.a.market_open():
+                self.scan_status=dict(status='MARKET CLOSED',phase='Full F&O scan resumes during market hours',completed=0,total=len(names),
+                    deep_completed=0,deep_total=0,finished=now_ist().isoformat())
+                self.settle_observations();self.maybe_train();self._ensure_historical_success_training();return
+            self.scan_status=dict(status='SCANNING FULL F&O',phase='ML universe pass',completed=0,total=len(names),
+                deep_completed=0,deep_total=0,started=now_ist().isoformat())
+            screened={}
+            # Cheap pass: no option chain and no per-symbol history request.  This lets
+            # every F&O stock compete on the same model probability each cycle.
+            for i,symbol in enumerate(names):
+                try:screened[symbol]=self._screen_direction(symbol)
+                except Exception as e:screened[symbol]=dict(symbol=symbol,ts=now_ist().isoformat(),decision='WAIT',reason=str(e),rank_score=0,scan_stage='UNIVERSE')
+                if i%25==0:self.scan_status.update(completed=i+1,symbol=symbol)
+            # Rotate recent-history refreshes so the whole universe stays within the
+            # freshness window without a burst of ~200 historical-data requests.
+            refresh_names=self._refresh_batch(names,screened)
+            self.scan_status.update(phase='Refreshing market history',refreshing=len(refresh_names),completed=len(names))
+            for j,symbol in enumerate(refresh_names):
+                try:
+                    self.a.refresh(symbol);screened[symbol]=self._screen_direction(symbol)
+                except Exception as e:
+                    prior=screened.get(symbol,dict(symbol=symbol));prior.update(decision='WAIT',reason='History refresh: '+str(e),rank_score=0,scan_stage='UNIVERSE');screened[symbol]=prior
+                self.supervise()
+                if j+1<len(refresh_names):time.sleep(STOCK_HISTORY_PACE_SECONDS)
+            # Deep checks are deliberately limited to the strongest model candidates.
+            directional=[s for s in screened.values() if s.get('decision')=='CANDIDATE']
+            directional.sort(key=lambda s:(float(s.get('confidence') or 0),float(s.get('rank_score') or 0)),reverse=True)
+            shortlist=directional[:min(STOCK_FULL_SCAN_DEEP_N,len(directional))]
+            self.signals=dict(screened)
+            self.scan_status.update(phase='Deep option checks',deep_total=len(shortlist),deep_completed=0,
+                directional_candidates=len(directional),fresh_universe=sum(1 for s in screened.values() if s.get('bar_age') is not None and s.get('bar_age')<=STOCK_FULL_SCAN_BAR_MAX_AGE))
+            for i,seed in enumerate(shortlist):
+                symbol=seed['symbol']
+                try:self.signals[symbol]=self.inspect(symbol)
+                except Exception as e:self.signals[symbol]=dict(seed,decision='WAIT',reason='Deep check: '+str(e),scan_stage='DEEP')
+                self.scan_status.update(deep_completed=i+1,symbol=symbol)
+                self.supervise()
+            ranked=sorted(self.signals.values(),key=lambda s:(s.get('decision')=='READY',s.get('success_probability') is not None,float(s.get('success_probability') or 0),float(s.get('expected_r') or -99),float(s.get('rank_score') or 0)),reverse=True)
+            # Scanner only publishes the ranked READY list.  A dedicated execution
+            # thread performs fresh pre-entry validation and broker submission.
+            self._publish_execution_candidates(ranked)
+            self.settle_observations();self.maybe_train();self.train_success_model();self._ensure_historical_success_training()
+            self.scan_status.update(status='COMPLETE',phase='Complete',completed=len(names),ready=sum(1 for s in self.signals.values() if s.get('decision')=='READY'),finished=now_ist().isoformat())
+            self.last_cycle=now_ist().isoformat()
+            if self.get('close_requested') and not self.active():self.put('close_requested',False)
+        except Exception as e:
+            self.scan_status.update(status='ERROR',error=str(e));self.event('ERROR','Stock scan: '+str(e))
+        finally:self.lock.release()
+    def supervise(self):
+        if not self.risk_lock.acquire(False):return
+        try:
+            self.reconcile();self.verify_positions()
+            # Close requests have priority over scanning and new entries.  Cancel live
+            # BUYs that are still pending so a manual close cannot be followed by a
+            # late entry fill.  Filled quantity remains owned and is managed below.
+            if self.get('close_requested'):
+                for o in self.rows("SELECT * FROM desk_orders WHERE mode='live' AND side='BUY' AND status NOT IN ('COMPLETE','CANCELLED','REJECTED')"):
+                    if o.get('broker_id'):
+                        try:self.a.cancel(o['broker_id'])
+                        except Exception as e:self.record_trade(o['position_id'],'CANCEL_DEFERRED',dict(reason=str(e)))
+            if self.a.market_open():self.manage(close_all=bool(self.get('close_requested')))
+        except Exception as e:
+            self.put('halt','Position supervision error: '+str(e));self.event('ERROR',str(e))
+        finally:self.risk_lock.release()
+    def start(self):
+        if self.started:return
+        self.started=True
+        def scan_loop():
+            while not self.stop_event.is_set():self.cycle();self.stop_event.wait(30)
+        def risk_loop():
+            while not self.stop_event.wait(5):
+                if self.a.connected():self.supervise()
+        def execution_loop():
+            while not self.stop_event.is_set():
+                self.execution_event.wait(1)
+                if self.stop_event.is_set():break
+                if not self.execution_event.is_set():continue
+                self.execution_event.clear()
+                self.execute_candidates()
+        threading.Thread(target=scan_loop,daemon=True,name='stock-ai-scan').start()
+        threading.Thread(target=risk_loop,daemon=True,name='stock-ai-risk').start()
+        threading.Thread(target=execution_loop,daemon=True,name='stock-ai-execution').start()
+    def state(self):
+        s=super().state()
+        s['signals'].sort(key=lambda x:(x.get('decision')=='READY',x.get('success_probability') is not None,float(x.get('success_probability') or 0),float(x.get('expected_r') or -99),float(x.get('rank_score') or 0)),reverse=True)
+        for i,row in enumerate(s['signals'],1):row['rank']=i
+        sm=self.train_success_model();hm=self.historical_success_model()
+        if sm:sm={k:v for k,v in sm.items() if k not in ('mu','sd','w','bias')}
+        if hm:hm={k:v for k,v in hm.items() if k not in ('mu','sd','w','bias','per_symbol','coverage')}
+        archive=self._history_archive_coverage();hist_ready=bool(hm and hm.get('valid') and archive.get('ready'))
+        selector_status='BLENDED' if hist_ready and sm and sm.get('valid') else 'HISTORICAL BOOTSTRAP' if hist_ready else 'LIVE OPTION MODEL' if sm and sm.get('valid') else 'DIRECTIONAL FALLBACK'
+        s.update(universe=self.get('stock_universe_info',{}),scan=dict(self.scan_status),ban_status=self.ban_error or 'Daily list checked',watchlist=list(self.a.symbols),
+            full_fo_monitoring=self._full_mode(),deep_check_limit=STOCK_FULL_SCAN_DEEP_N,refresh_batch=STOCK_FULL_REFRESH_BATCH,
+            execution=dict(self.execution_status),success_model=sm,live_success_model=sm,historical_success_model=hm,success_selector_status=selector_status,
+            historical_archive=archive,history_backfill=dict(self.history_backfill_status))
+        return s
+    def control(self,action,body):
+        # Disarming is immediate even while a broad scan is running.
+        if action in ('disarm','close'):
+            with self.risk_lock:
+                cfg=self.config();cfg['armed']=False;self.put('config',cfg)
+                if action=='close':
+                    self.put('close_requested',True)
+                    # Drop queued entries immediately; the risk thread performs broker
+                    # cancellation/reconciliation independently of the scan thread.
+                    with self.candidate_lock:self.execution_candidates=[]
+                    self.execution_event.clear()
+                self.event('CONTROL',action)
+            if action=='close' and self.a.connected():self.supervise()
+            return cfg
+        if not self.lock.acquire(False):raise ValueError('Scan in progress; retry after completion')
+        try:
+            with self.risk_lock:return super().control(action,body)
+        finally:self.lock.release()
+
+STOCK_DESK=StockDeskEngine(StockDeskAdapter())
+
+@app.route('/api/stock-ai/state')
+def stock_ai_state():
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    return jsonify(STOCK_DESK.state())
+
+@app.route('/api/stock-ai/config',methods=['POST'])
+def stock_ai_config():
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    if not STOCK_DESK.lock.acquire(False):return jsonify(error='Scan in progress; retry after completion'),409
+    try:
+        with STOCK_DESK.risk_lock:return jsonify(ok=True,config=STOCK_DESK.save_config(request.get_json(silent=True) or {}))
+    except (ValueError,TypeError) as e:return jsonify(error=str(e)),400
+    finally:STOCK_DESK.lock.release()
+
+@app.route('/api/stock-ai/control/<action>',methods=['POST'])
+def stock_ai_control(action):
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    body=request.get_json(silent=True) or {}
+    try:
+        if action in ('scan','universe','sync'):
+            if not STOCK_DESK.train_lock.acquire(False):return jsonify(error='Learning/universe job already running'),409
+            def job():
+                try:
+                    if action in ('universe','sync'):
+                        with STOCK_DESK.lock:
+                            if action=='universe' or not STOCK_DESK.a.symbols:STOCK_DESK.select_universe(body)
+                            if action=='sync':
+                                for i,symbol in enumerate(STOCK_DESK.a.symbols):
+                                    STOCK_DESK.training=dict(status='SYNCING HISTORY',progress=round(100*i/max(1,len(STOCK_DESK.a.symbols))))
+                                    STOCK_DESK.a.refresh(symbol)
+                                    if i+1<len(STOCK_DESK.a.symbols):time.sleep(STOCK_HISTORY_PACE_SECONDS)
+                                STOCK_DESK.training=dict(status='HISTORY READY',progress=100)
+                    STOCK_DESK.cycle()
+                    if action=='sync':
+                        STOCK_DESK._ensure_deep_history_backfill(force=True)
+                        STOCK_DESK._ensure_historical_success_training(force=True)
+                except Exception as e:
+                    STOCK_DESK.training=dict(status='ERROR',progress=0,error=str(e));STOCK_DESK.event('ERROR',str(e))
+                finally:STOCK_DESK.train_lock.release()
+            threading.Thread(target=job,daemon=True,name='stock-ai-job').start()
+            return jsonify(ok=True,started=True)
+        if action=='train':return jsonify(ok=True,started=STOCK_DESK.train())
+        return jsonify(ok=True,config=STOCK_DESK.control(action,body))
+    except (ValueError,TypeError) as e:return jsonify(error=str(e)),400
+
+
+# ===========================================================================
+# CAS OPTIONS DESK: sampled momentum, isolated learning and durable execution.
+# Trades continuous index options, never sends cash-auction orders.
+# Sources checked 2026-09-10:
+# https://www.nseindia.com/static/market-data/market-timings
+# https://kite.trade/docs/connect/v3/market-quotes/
+# No IEP/auction-imbalance feed is assumed. Streaming is not an HFT or fill guarantee.
+# ===========================================================================
+from collections import deque
+
+CAS_DEFAULTS = dict(entry_start='15:15', entry_end='15:38', square_off='15:39',
+    market_close='15:40', broker_cutoff='15:40', verified_date='', poll_seconds=1.,
+    spike_bps=5., max_spike_bps=120., lookback_seconds=3., confirm_ticks=2,
+    max_quote_age=2., min_premium_move=1., max_premium_move=35., max_trades=4,
+    max_positions=1, max_hold=None, cooldown=1/6, capital=15000., risk=750.,
+    daily_loss=2000., confidence=.60, stop_pct=15., reward_r=2., partial_take_r=1.,
+    max_spread=1., lots=1, trail_pct=10., order_timeout=2.)
+
+def _cas_epoch(value):
+    return value.replace(tzinfo=timezone(timedelta(hours=5,minutes=30))).timestamp()
+
+class CASAdapter(DeskAdapter):
+    symbols = ('NIFTY','BANKNIFTY','FINNIFTY','SENSEX')
+    def __init__(self):
+        self.engine=None;self.quotes={};self.contracts={};self.contract_day=None;self.last_batch=0.
+        self.stream=None;self.stream_token=None;self.stream_connected=False;self.stream_status='WAITING FOR KITE'
+        self.stream_lock=threading.RLock();self.wake=threading.Event();self.stream_quotes={};self.stream_queue=deque()
+        self.stream_signatures={};self.stream_generation=0;self.seen_generation=0;self.wanted_tokens=set();self.token_keys={}
+        self.last_subscription=0.;self.last_tick_mono=0.;self.order_dirty=False;self.exit_quotes={}
+        self.last_connect_attempt=0.;self.stream_retry_needed=False;self.stream_error_code=None;self.stream_error_detail=''
+    @contextmanager
+    def db(self):
+        c=sqlite3.connect(os.path.join(os.path.dirname(__file__),'cas_options_ai.db'),timeout=10)
+        c.row_factory=sqlite3.Row
+        try:
+            c.execute('PRAGMA journal_mode=WAL');yield c;c.commit()
+        except Exception:c.rollback();raise
+        finally:c.close()
+    def market_open(self):
+        t=now_ist();cfg=self.engine.config() if self.engine else CAS_DEFAULTS
+        return t.weekday()<5 and '09:15'<=t.strftime('%H:%M')<cfg['market_close']
+    def load_contracts(self):
+        today=now_ist().date()
+        if self.contract_day==today:return
+        result={}
+        for symbol in self.symbols:
+            ex,items=get_option_instruments_for_symbol(symbol)
+            result[symbol]=[dict(i,exchange=ex) for i in items
+                if i.get('instrument_type') in ('CE','PE') and str(i.get('expiry',''))[:10]>=today.isoformat()]
+        self.contracts=result;self.contract_day=today
+    def _invalidate_stream(self,ws,status):
+        if ws is not self.stream:return
+        with self.stream_lock:
+            self.stream_connected=False;self.stream_status=status;self.stream_quotes.clear();self.stream_queue.clear();self.stream_signatures.clear();self.stream_generation+=1
+        self.wake.set()
+    def _on_connect(self,ws,response):
+        if ws is not self.stream:return
+        self._invalidate_stream(ws,'CONNECTED · warming fresh ticks')
+        with self.stream_lock:
+            self.stream_connected=True;self.stream_retry_needed=False;self.stream_error_code=None;tokens=list(self.wanted_tokens)
+        if tokens:ws.subscribe(tokens);ws.set_mode(ws.MODE_FULL,tokens)
+        self.wake.set()
+    def _on_ticks(self,ws,ticks):
+        if ws is not self.stream or not self.stream_connected:return
+        # The reactor callback only validates/enqueues data. It never calls REST,
+        # SQLite, strategy logic or broker order placement.
+        received=now_ist();mono=time.monotonic()
+        with self.stream_lock:
+            for tick in ticks:
+                key=self.token_keys.get(tick.get('instrument_token'))
+                if not key:continue
+                ex=tick.get('exchange_timestamp')
+                # KiteTicker decodes exchange epochs with local datetime.fromtimestamp.
+                stamp=datetime.fromtimestamp(ex.timestamp(),timezone(timedelta(hours=5,minutes=30))).replace(tzinfo=None) if isinstance(ex,datetime) else _ai_ts_naive(ex)
+                if stamp is None:continue
+                previous=self.stream_quotes.get(key)
+                if previous and stamp<_ai_ts_naive(previous['_exchange_ts']):continue
+                signature=(str(ex),tick.get('last_price'),str(tick.get('depth')),tick.get('volume_traded'))
+                if self.stream_signatures.get(key)==signature:continue
+                self.stream_signatures[key]=signature
+                q=dict(tick,timestamp=received.isoformat(),_exchange_ts=stamp.isoformat(),_received_mono=mono,
+                    volume=tick.get('volume_traded',0))
+                self.stream_quotes[key]=q
+                if len(self.stream_queue)>=4000:
+                    self.stream_queue.clear();self.stream_generation+=1
+                self.stream_queue.append((key,q))
+            self.last_tick_mono=mono
+        self.wake.set()
+    def _on_order(self,ws,data):
+        if ws is self.stream:self.order_dirty=True;self.wake.set()
+    def request_stream_reconnect(self):
+        self.stream_retry_needed=True;self.last_connect_attempt=0.;self.wake.set()
+    def _safe_stream_error(self,reason):
+        import re
+        value=str(reason)
+        for secret in (globals().get('API_KEY'),self.stream_token,(globals().get('SESSION') or {}).get('access_token')):
+            if secret:value=value.replace(str(secret),'[redacted]')
+        value=re.sub(r'(?:https?|wss?)://[^\s]+','[connection endpoint]',value)
+        value=re.sub(r'(?i)(access_token|api_key|api_secret)\s*[=:]\s*[^\s&,]+',r'\1=[redacted]',value)
+        return value[:350]
+    def _on_stream_close(self,ws,code,reason):
+        if ws is not self.stream:return
+        self.stream_error_code=str(code);self.stream_error_detail=self._safe_stream_error(reason)
+        self._invalidate_stream(ws,'DISCONNECTED · reconnect scheduled');self.stream_retry_needed=True
+    def _on_stream_error(self,ws,code,reason):
+        if ws is not self.stream:return
+        self.stream_error_code=str(code);self.stream_error_detail=self._safe_stream_error(reason)
+        self._invalidate_stream(ws,'STREAM ERROR · code '+str(code))
+        self.stream_retry_needed=True
+    def _on_stream_exhausted(self,ws):
+        if ws is not self.stream:return
+        self._invalidate_stream(ws,'RECONNECT EXHAUSTED · retry scheduled');self.stream_retry_needed=True
+    def ensure_stream(self):
+        try:self._ensure_stream()
+        except Exception as e:
+            self.stream_error_detail=self._safe_stream_error(e)
+            if self.stream:self._invalidate_stream(self.stream,'CONNECT FAILED · '+type(e).__name__)
+            else:self.stream_status='CONNECT FAILED · '+type(e).__name__
+            self.stream_retry_needed=True
+    def _ensure_stream(self):
+        token=SESSION.get('access_token')
+        if not token:
+            if self.stream:
+                self._invalidate_stream(self.stream,'DISCONNECTED · login required')
+                old=self.stream;self.stream=None
+                from twisted.internet import reactor
+                reactor.callFromThread(old.close)
+            self.stream_token=None;return
+        if self.stream and token==self.stream_token and not self.stream_retry_needed:
+            elapsed=time.monotonic()-self.last_connect_attempt
+            stalled=not self.stream_connected and elapsed>25
+            silent=self.stream_connected and self.wanted_tokens and self.market_open() and time.monotonic()-max(self.last_tick_mono,self.last_connect_attempt)>30
+            if not (stalled or silent):return
+            self.stream_error_detail='Connection handshake timed out' if stalled else 'No stream arrivals for 30 seconds during configured market hours'
+            self._invalidate_stream(self.stream,'STREAM WATCHDOG · retry scheduled');self.stream_retry_needed=True
+        if time.monotonic()-self.last_connect_attempt<10:return
+        self.last_connect_attempt=time.monotonic()
+        from kiteconnect import KiteTicker
+        from twisted.internet import reactor
+        if self.stream:
+            old=self.stream;self._invalidate_stream(old,'SESSION CHANGED');reactor.callFromThread(old.close)
+        self.stream=KiteTicker(API_KEY,token,reconnect=True,reconnect_max_tries=50,reconnect_max_delay=10)
+        self.stream_token=token;ws=self.stream;self.stream_retry_needed=False;self.stream_status='CONNECTING'
+        ws.on_connect=self._on_connect;ws.on_ticks=self._on_ticks;ws.on_order_update=self._on_order
+        ws.on_close=self._on_stream_close
+        ws.on_error=self._on_stream_error
+        ws.on_reconnect=lambda w,n:self._invalidate_stream(w,'RECONNECTING')
+        ws.on_noreconnect=self._on_stream_exhausted
+        ws.connect(threaded=True)
+    def update_subscriptions(self):
+        if time.monotonic()-self.last_subscription<3:return
+        self.last_subscription=time.monotonic();self.load_contracts()
+        mapping={}
+        for symbol in self.symbols:
+            token,err=resolve_token_for_symbol(symbol)
+            if err:raise ValueError(err)
+            mapping[int(token)]=INDEX_SYMBOLS[symbol]
+        for items in self.contracts.values():
+            for i in items:mapping[int(i['instrument_token'])]=i['exchange']+':'+i['tradingsymbol']
+        reverse={v:k for k,v in mapping.items()};wanted={reverse[INDEX_SYMBOLS[s]] for s in self.symbols}
+        with self.stream_lock:latest=dict(self.stream_quotes)
+        for symbol in self.symbols:
+            rows=self.contracts.get(symbol,[]);spot=latest.get(INDEX_SYMBOLS[symbol],{}).get('last_price')
+            if not rows or not spot:continue
+            expiry=min(str(i['expiry']) for i in rows)
+            for typ in ('CE','PE'):
+                near=sorted((i for i in rows if str(i['expiry'])==expiry and i['instrument_type']==typ),key=lambda i:abs(float(i['strike'])-float(spot)))[:5]
+                wanted.update(int(i['instrument_token']) for i in near)
+        for p in self.engine.active():
+            key=p['exchange']+':'+p['contract']
+            if key in reverse:wanted.add(reverse[key])
+        with self.stream_lock:
+            previous=self.wanted_tokens;self.wanted_tokens=wanted;self.token_keys=mapping
+            removed=previous-wanted
+            for t in removed:
+                key=mapping.get(t)
+                if key:self.stream_quotes.pop(key,None);self.stream_signatures.pop(key,None)
+        ws=self.stream
+        if ws and self.stream_connected:
+            from twisted.internet import reactor
+            def change():
+                if ws is not self.stream or not self.stream_connected:return
+                if removed:ws.unsubscribe(list(removed))
+                added=list(wanted-previous)
+                if added:ws.subscribe(added);ws.set_mode(ws.MODE_FULL,added)
+            reactor.callFromThread(change)
+    def batch(self):
+        self.update_subscriptions()
+        with self.stream_lock:
+            pending=list(self.stream_queue);self.stream_queue.clear();snapshot=dict(self.stream_quotes);generation=self.stream_generation
+        if generation!=self.seen_generation:
+            for p in self.engine.active():self.engine.record_trade(p['id'],'STREAM_RESET',dict(note='Stream generation changed: reconnect, invalidation or queue overflow. Price continuity is not guaranteed.',generation=generation))
+            self.engine.ticks.clear();self.engine.option_ticks.clear();self.engine.confirm.clear();self.seen_generation=generation
+        # Drain every received update into history, not merely the last snapshot.
+        for key,q in pending:
+            self.quotes={key:q};self.engine.collect()
+        self.quotes=snapshot
+        if not self.stream_connected:
+            # REST is only an exit fallback for owned options; never an entry feed.
+            keys=list(dict.fromkeys(p['exchange']+':'+p['contract'] for p in self.engine.active() if p['qty']>0))
+            if keys and time.monotonic()-self.last_batch>=1.05:
+                self.last_batch=time.monotonic();self.exit_quotes=kite.quote(keys)
+            self.quotes=dict(self.exit_quotes)
+    def feed_state(self):
+        with self.stream_lock:
+            return dict(connected=self.stream_connected,status=self.stream_status,subscriptions=len(self.wanted_tokens),
+                last_tick_age_seconds=round(time.monotonic()-self.last_tick_mono,2) if self.last_tick_mono else None,
+                source='KiteTicker FULL · event-driven',error_detail=getattr(self,'stream_error_detail',''),error_code=self.stream_error_code,retry_scheduled=self.stream_retry_needed,exit_fallback='REST only when streaming is disconnected')
+    def fresh(self,key):
+        q=self.quotes.get(key)
+        if not q:raise ValueError('Missing quote: '+key)
+        if '_received_mono' in q:
+            if time.monotonic()-q['_received_mono']>self.engine.config()['max_quote_age']:raise ValueError('Stale stream arrival: '+key)
+            ex=_ai_ts_naive(q.get('_exchange_ts'))
+            if ex is None or not -1<=(now_ist()-ex).total_seconds()<=self.engine.config()['max_quote_age']+1:raise ValueError('Delayed exchange tick: '+key)
+        ts=_ai_ts_naive(q.get('timestamp'))
+        if ts is None:raise ValueError('No exchange timestamp: '+key)
+        age=(now_ist()-ts).total_seconds()
+        if not 0<=age<=self.engine.config()['max_quote_age']:raise ValueError('Stale quote: '+key)
+        price=float(q.get('last_price') or 0)
+        if not math.isfinite(price) or price<=0:raise ValueError('Invalid price: '+key)
+        return q,ts
+    def quote(self,exchange,contract):
+        try:
+            raw,ts=self.fresh(exchange+':'+contract);q=quote_stats(raw)
+            if not all(isinstance(q.get(k),(int,float)) and math.isfinite(q[k]) and q[k]>0 for k in ('bid','ask')) or q['ask']<q['bid']:raise ValueError('No executable option book')
+            q['quote_ts']=ts.isoformat();q['source']='Kite stream; receipt timestamp' if '_received_mono' in raw else 'Kite REST fallback; exchange timestamp';q['exchange_ts']=str(raw.get('_exchange_ts') or raw.get('timestamp'));return q,None
+        except Exception as e:return None,str(e)
+    def place(self,exchange,contract,side,qty,price,tag):
+        with self.db() as c:
+            row=c.execute('SELECT p.product FROM desk_positions p JOIN desk_orders o ON o.position_id=p.id WHERE o.tag=?',(tag,)).fetchone()
+        if not row or row['product'] not in ('MIS','NRML'):raise ValueError('Missing order product in CAS ledger')
+        return kite.place_order(variety='regular',exchange=exchange,tradingsymbol=contract,
+            transaction_type=side,quantity=int(qty),product=row['product'],order_type='LIMIT',
+            validity='IOC',price=float(price),tag=tag)
+    def legacy_open(self):
+        # CAS owns product-specific quantities exclusively while armed; other desks must be idle.
+        return autotrade_ai_open_positions()+DESK.active()+STOCK_DESK.active()
+
+class CASEngine(DeskEngine):
+    def __init__(self,adapter):
+        self.ticks={};self.option_ticks={};self.confirm={};self.day=None;self.last_learn={};self.last_fit_count=0;self.last_reconcile=0.;self.last_verify=0.
+        super().__init__(adapter);adapter.engine=self
+        # One-time migration of the old shipped profile. Keep custom risk amounts and
+        # existing positions; their stored product remains MIS for correct exits.
+        if self.get('fast_profile_version',0)<2:
+            cfg=self.config()
+            old=dict(entry_end='15:28',square_off='15:29',broker_cutoff='15:30',poll_seconds=2.,
+                spike_bps=12.,lookback_seconds=10.,max_quote_age=5.,max_hold=1,cooldown=1,order_timeout=6.)
+            for key,value in old.items():
+                if cfg.get(key)==value:cfg[key]=CAS_DEFAULTS[key]
+            cfg.update(armed=False,verified_date='');self.put('config',cfg)
+            self.put('fast_profile_version',2);self.event('UPGRADE','Fast CAS profile installed; entries disarmed. New trades use NRML IOC limits.')
+    def config(self):return {**super().config(),**CAS_DEFAULTS,**self.get('config',{}),'max_hold':None}
+    def init_db(self):
+        super().init_db()
+        with self.db() as c:
+            c.execute('CREATE TABLE IF NOT EXISTS cas_samples(id INTEGER PRIMARY KEY,symbol TEXT,ts REAL,target REAL,spot REAL,features TEXT,label INTEGER,settled REAL)')
+            if 'product' not in [r[1] for r in c.execute('PRAGMA table_info(desk_positions)')]:
+                c.execute("ALTER TABLE desk_positions ADD COLUMN product TEXT NOT NULL DEFAULT 'MIS'")
+            if 'profile' not in [r[1] for r in c.execute('PRAGMA table_info(cas_samples)')]:
+                c.execute('ALTER TABLE cas_samples ADD COLUMN profile INTEGER NOT NULL DEFAULT 1')
+    def model(self):
+        m=super().model()
+        return m if m and m.get('fast_profile')==2 else None
+    def submit(self,p,side,qty,price,reason):
+        if side=='BUY' and not self.rows('SELECT id FROM desk_orders WHERE position_id=?',(p['id'],)):
+            with self.db() as c:c.execute("UPDATE desk_positions SET product='NRML' WHERE id=?",(p['id'],))
+        return super().submit(p,side,qty,price,reason)
+    def verify_positions(self):
+        if time.monotonic()-self.last_verify<1:return
+        self.last_verify=time.monotonic()
+        live=[p for p in self.active() if p['mode']=='live']
+        if not live:self.mismatches=set();return
+        try:book=self.a.holdings()
+        except Exception as e:
+            if type(e).__name__=='BrokerDeferred':return
+            self.mismatches={p['id'] for p in live};raise
+        self.mismatches=set();actual={};expected={}
+        for p in book:
+            key=(p.get('exchange'),p.get('tradingsymbol'),p.get('product'))
+            actual[key]=actual.get(key,0)+int(p.get('quantity') or 0)
+        for p in live:
+            key=(p['exchange'],p['contract'],p['product']);expected[key]=expected.get(key,0)+p['qty']
+        for p in live:
+            key=(p['exchange'],p['contract'],p['product'])
+            if actual.get(key,0)!=expected[key]:
+                self.mismatches.add(p['id']);self.health[p['id']]={'reason':'Broker/product quantity mismatch; exit suspended'}
+        if self.mismatches:self.put('halt','CAS broker/product quantity mismatch; reconcile in Kite')
+    def save_config(self,body):
+        with self.lock:
+            if self.config()['armed'] or self.active():raise ValueError('Disarm and close positions before changing CAS settings')
+            cfg=self.config();times={'entry_start','entry_end','square_off','market_close','broker_cutoff'}
+            bounds=dict(poll_seconds=(1,10),spike_bps=(2,100),max_spike_bps=(10,300),lookback_seconds=(2,60),confirm_ticks=(2,5),
+                max_quote_age=(1,10),min_premium_move=(0,20),max_premium_move=(5,100),max_trades=(1,20),
+                trail_pct=(3,30),order_timeout=(1,20),capital=(1000,10000000),risk=(100,100000),
+                daily_loss=(100,1000000),confidence=(.55,.85),stop_pct=(3,40),reward_r=(1,4),partial_take_r=(.5,3),
+                max_spread=(.1,3),lots=(0,50),cooldown=(0,120),max_positions=(1,4),slippage_bps=(1,100),fee_per_order=(1,500))
+            for k,v in body.items():
+                if k in times:
+                    if not isinstance(v,str) or len(v)!=5:raise ValueError('Use HH:MM for '+k)
+                    datetime.strptime(v,'%H:%M')
+                    if not '14:45'<=v<='15:40':raise ValueError(k+' must be 14:45–15:40 IST')
+                    cfg[k]=v
+                elif k in bounds:
+                    if isinstance(v,bool):raise ValueError('Invalid '+k)
+                    v=float(v);lo,hi=bounds[k]
+                    if not math.isfinite(v) or not lo<=v<=hi:raise ValueError(f'{k}: expected {lo}–{hi}')
+                    if k in ('confirm_ticks','max_trades','lots','max_positions'):
+                        if not v.is_integer():raise ValueError(k+' requires an integer')
+                        v=int(v)
+                    cfg[k]=v
+                else:raise ValueError('Unsupported CAS setting: '+k)
+            if not cfg['entry_start']<cfg['entry_end']<cfg['square_off']<min(cfg['market_close'],cfg['broker_cutoff']):raise ValueError('Require start < last entry < square-off < both exchange and broker cutoff')
+            if cfg['spike_bps']>=cfg['max_spike_bps'] or cfg['min_premium_move']>=cfg['max_premium_move']:raise ValueError('Minimum threshold must be below maximum')
+            if cfg['partial_take_r']>=cfg['reward_r'] or cfg['risk']>cfg['capital']:raise ValueError('Invalid target or risk budget')
+            cfg.update(verified_date='',armed=False);self.put('config',cfg);self.confirm.clear();return cfg
+    def block(self):
+        cfg=self.config();t=now_ist()
+        if not self.a.stream_connected:return 'Streaming unavailable · new entries paused'
+        if t.strftime('%H:%M')<cfg['entry_start'] or t.strftime('%H:%M')>=cfg['entry_end']:return 'Outside CAS entry window'
+        if cfg['mode']=='live' and cfg.get('verified_date')!=t.date().isoformat():return 'Verify today’s exchange session and broker NRML cutoff in controls'
+        if cfg['mode']=='live' and not self.model():return 'Live requires a validated CAS model; collect paper observations first'
+        if DESK.config()['armed'] or STOCK_DESK.config()['armed'] or autotrade_ai_config().get('armed'):return 'Disarm other AI desks before CAS entries'
+        count=self.rows("SELECT COUNT(*) n FROM desk_positions WHERE ts LIKE ? AND mode=?",(t.date().isoformat()+'%',cfg['mode']))[0]['n']
+        if count>=cfg['max_trades']:return 'CAS daily entry-attempt limit reached'
+        return super().block()
+    @staticmethod
+    def momentum(points,stamp,lookback):
+        # Strictly advancing exchange timestamps only; never count repeated REST snapshots.
+        usable=[p for p in points if stamp-lookback-4<=p[0]<=stamp-lookback]
+        if not usable:return None
+        return (points[-1][1]/usable[-1][1]-1)*10000
+    def collect(self):
+        now=now_ist();today=now.date().isoformat();cfg=self.config()
+        if self.day!=today:
+            self.ticks.clear();self.option_ticks.clear();self.confirm.clear();self.last_learn.clear();self.day=today
+            with self.db() as c:c.execute('DELETE FROM cas_samples WHERE label IS NULL AND target<?',(_cas_epoch(now)-60,))
+        for key in self.a.quotes:
+            try:
+                raw,ts=self.a.fresh(key);stamp=_cas_epoch(ts)
+                if key in [INDEX_SYMBOLS[s] for s in self.a.symbols]:
+                    symbol=next(s for s in self.a.symbols if INDEX_SYMBOLS[s]==key);hist=self.ticks.setdefault(symbol,deque(maxlen=200))
+                    price=float(raw['last_price'])
+                else:
+                    q=quote_stats(raw)
+                    if not q.get('mid') or not q.get('bid') or not q.get('ask'):continue
+                    hist=self.option_ticks.setdefault(key,deque(maxlen=200));price=q['mid']
+                if hist and stamp<=hist[-1][0]:continue
+                if hist and stamp-hist[-1][0]>cfg['max_quote_age']+cfg['poll_seconds']:
+                    hist.clear()
+                    if key in INDEX_SYMBOLS.values():self.confirm.pop(symbol,None)
+                hist.append((stamp,price))
+            except (ValueError,TypeError):continue
+        # Short-horizon labels use the first fresh sample at/after target, within 5s.
+        for symbol,hist in self.ticks.items():
+            if not hist:continue
+            stamp,spot=hist[-1]
+            with self.db() as c:
+                c.execute('UPDATE cas_samples SET label=CASE WHEN ? > spot THEN 1 ELSE 0 END,settled=? WHERE symbol=? AND label IS NULL AND target<=? AND target>=?',(spot,stamp,symbol,stamp,stamp-5))
+    def inspect(self,symbol):
+        cfg=self.config();s=dict(symbol=symbol,decision='WAIT',reason='Warming fresh quote history',ts=now_ist().isoformat())
+        raw,ts=self.a.fresh(INDEX_SYMBOLS[symbol]);hist=self.ticks.get(symbol,[])
+        s.update(spot=float(raw['last_price']),chart=[dict(ts=datetime.fromtimestamp(t,timezone.utc).isoformat(),close=v) for t,v in hist],bar_age=(now_ist()-ts).total_seconds()/60)
+        move=self.momentum(hist,_cas_epoch(ts),cfg['lookback_seconds']) if hist else None
+        if move is None:self.confirm.pop(symbol,None);return s
+        recent=[v for t,v in hist if t>=_cas_epoch(ts)-cfg['lookback_seconds']]
+        noise=float(np.std(np.diff(np.log(recent))))*10000 if len(recent)>2 else 0
+        direction='UP' if move>0 else 'DOWN';s.update(move_bps=round(move,2),direction=direction)
+        features=[move/50,noise/20,(max(recent)-min(recent))/recent[-1]*100,(ts.hour*60+ts.minute-915)/20,1. if symbol=='SENSEX' else 0.]
+        if cfg['entry_start']<=now_ist().strftime('%H:%M')<cfg['entry_end'] and _cas_epoch(ts)-self.last_learn.get(symbol,0)>=5:
+            with self.db() as c:c.execute('INSERT INTO cas_samples(symbol,ts,target,spot,features,profile) VALUES(?,?,?,?,?,2)',(symbol,_cas_epoch(ts),_cas_epoch(ts)+5,s['spot'],json.dumps(features)))
+            self.last_learn[symbol]=_cas_epoch(ts)
+        model=self.model();p=None
+        if model:
+            z=np.clip((np.array(features)-model['mu'])/model['sd'],-6,6)
+            p=float(1/(1+np.exp(-np.clip(z@np.array(model['w'])+model['bias'],-30,30))))
+        s.update(p_up=p,confidence=max(p,1-p) if p is not None else 0,learning='Validated CAS model' if model else 'Rule-based paper bootstrap')
+        if not cfg['spike_bps']<=abs(move)<=cfg['max_spike_bps']:
+            self.confirm.pop(symbol,None);s['reason']='Move below trigger or above chase limit';return s
+        prev=self.confirm.get(symbol,{})
+        count=(prev.get('count',0)+1 if prev.get('direction')==direction else 1) if prev.get('ts')!=_cas_epoch(ts) else prev.get('count',0)
+        self.confirm[symbol]=dict(direction=direction,count=count,ts=_cas_epoch(ts));s['confirmations']=count
+        if count<cfg['confirm_ticks']:s['reason']='Waiting for consecutive fresh confirmations';return s
+        if p is not None and (s['confidence']<cfg['confidence'] or (p>.5)!=(move>0)):
+            s['reason']='CAS model does not confirm momentum';return s
+        typ='CE' if move>0 else 'PE';rows=self.a.contracts.get(symbol,[])
+        if not rows:s['reason']='No available option contracts';return s
+        expiry=min(str(i['expiry']) for i in rows);candidates=[]
+        for ins in rows:
+            if str(ins['expiry'])!=expiry or ins['instrument_type']!=typ:continue
+            key=ins['exchange']+':'+ins['tradingsymbol']
+            if key not in self.a.quotes:continue
+            q,err=self.a.quote(ins['exchange'],ins['tradingsymbol'])
+            if err or q['spread_pct']>cfg['max_spread']:continue
+            ticks=self.option_ticks.get(key,[])
+            om=self.momentum(ticks,ticks[-1][0],cfg['lookback_seconds']) if ticks else None
+            if om is None or not cfg['min_premium_move']<=om/100<=cfg['max_premium_move']:continue
+            candidates.append((q['spread_pct']+abs(float(ins['strike'])-s['spot'])/s['spot']*100,ins,q,om/100))
+        if not candidates:s['reason']='No liquid near-ATM option with confirmed premium momentum';return s
+        _,ins,q,om=min(candidates,key=lambda x:x[0]);lot=int(ins.get('lot_size') or 0);tick=float(ins.get('tick_size') or .05)
+        if lot<=0 or not math.isfinite(tick) or tick<=0:s['reason']='Invalid contract metadata';return s
+        entry=round(math.ceil(q['ask']*(1+cfg['slippage_bps']/10000)/tick)*tick,2);risk=entry*cfg['stop_pct']/100
+        maxlots=int(min(max(0,cfg['capital']-2*cfg['fee_per_order'])/entry,max(0,cfg['risk']-2*cfg['fee_per_order'])/risk,q['ask_qty'])//lot)
+        lots=cfg['lots'] or maxlots
+        s.update(contract=ins['tradingsymbol'],exchange=ins['exchange'],lot=lot,tick=tick,option_type=typ,entry=entry,stop=entry-risk,target=entry+risk*cfg['reward_r'],lots=lots,qty=lots*lot,spread=q['spread_pct'],premium_move=om,features=features,quote_ts=q['quote_ts'])
+        if lots<=0 or lots>maxlots:s['qty']=0;s['reason']='Capital, planned risk or visible depth cannot fund requested lots';return s
+        s.update(decision='READY',reason='Confirmed index spike + option momentum + executable spread',signal_epoch=_cas_epoch(ts))
+        return s
+    def enter(self,s):
+        if s.get('decision')!='READY':return
+        if _cas_epoch(now_ist())-s.get('signal_epoch',0)>self.config()['max_quote_age']:return
+        q,err=self.a.quote(s['exchange'],s['contract'])
+        if err or q['ask_qty']<s['qty'] or q['ask']>s['entry']:return
+        super().enter(s)
+    def reconcile(self):
+        if not self.a.order_dirty and time.monotonic()-self.last_reconcile<1:return
+        self.a.order_dirty=False;self.last_reconcile=time.monotonic();self.last_verify=0.
+        super().reconcile()
+        cfg=self.config();cutoff=now_ist().strftime('%H:%M')>=cfg['entry_end'] or bool(self.get('close_requested'))
+        for o in self.rows("SELECT * FROM desk_orders WHERE mode='live' AND status NOT IN ('COMPLETE','CANCELLED','REJECTED')"):
+            if o['broker_id'] and (cutoff and o['side']=='BUY' or (now_ist()-_ai_ts_naive(o['ts'])).total_seconds()>=cfg['order_timeout']):self.a.cancel(o['broker_id'])
+    def manage(self,close_all=False):
+        cfg=self.config()
+        # Raise the stop only after one initial R is earned. Stop never moves down.
+        for p in self.active():
+            q,err=self.a.quote(p['exchange'],p['contract'])
+            if err or p['qty']<=0:continue
+            setup=json.loads(p['setup']);initial=max(.01,setup['entry']-setup['stop'])
+            if q['bid']>=p['entry']+initial:
+                stop=max(p['stop'],p['entry'],q['bid']*(1-cfg['trail_pct']/100))
+                with self.db() as c:c.execute('UPDATE desk_positions SET stop=? WHERE id=?',(stop,p['id']))
+        # Apply confirmed rule reversal as a per-position exit without inventing ML confidence.
+        for p in self.active():
+            sig=self.signals.get(p['symbol'],{});setup=json.loads(p['setup'])
+            if sig.get('decision')=='READY' and sig.get('bar_age',999)*60<=cfg['max_quote_age'] and sig.get('direction')!=setup.get('direction'):
+                q,err=self.a.quote(p['exchange'],p['contract'])
+                if not err:
+                    with self.db() as c:c.execute('UPDATE desk_positions SET stop=MAX(stop,?) WHERE id=?',(q['bid'],p['id']))
+        super().manage(close_all)
+    def train(self):
+        if not self.train_lock.acquire(False):return False
+        threading.Thread(target=self._train,daemon=True,name='cas-learn').start();return True
+    def _train(self):
+        try:
+            self.training=dict(status='FITTING CAS SAMPLES',progress=10)
+            rows=self.rows('SELECT * FROM cas_samples WHERE label IS NOT NULL AND profile=2 ORDER BY ts DESC LIMIT 20000')[::-1]
+            if len(rows)<300:raise ValueError('Need 300 settled CAS observations; collect them during the session, even while disarmed')
+            cut=rows[int(len(rows)*.8)]['ts'];train=[r for r in rows if r['settled']<cut];val=[r for r in rows if r['ts']>=cut]
+            X=np.array([json.loads(r['features']) for r in train]);y=np.array([r['label'] for r in train]);V=np.array([json.loads(r['features']) for r in val]);vy=np.array([r['label'] for r in val])
+            if len(set(y))<2 or len(set(vy))<2:raise ValueError('Both directions required in training and validation')
+            mu=X.mean(0);sd=np.maximum(X.std(0),1e-5);z=np.clip((X-mu)/sd,-6,6);w=np.zeros(5);b=0.
+            for _ in range(220):
+                pred=1/(1+np.exp(-np.clip(z@w+b,-30,30)));err=pred-y;w-=.06*(z.T@err/len(y)+.02*w);b-=.06*err.mean()
+            pred=1/(1+np.exp(-np.clip(np.clip((V-mu)/sd,-6,6)@w+b,-30,30)))
+            accuracy=float(((pred>=.5)==vy).mean());baseline=float(max(vy.mean(),1-vy.mean()));brier=float(((pred-vy)**2).mean())
+            if accuracy<=baseline or brier>=.25:raise ValueError('CAS validation did not beat baseline; current model retained, rule-based paper continues if none')
+            m=dict(id='CAS-'+str(int(time.time())),ts=now_ist().isoformat(),mu=mu.tolist(),sd=sd.tolist(),w=w.tolist(),bias=float(b),train_samples=len(train),validation_samples=len(val),accuracy=accuracy*100,baseline=baseline*100,brier=brier,horizon_seconds=5,fast_profile=2)
+            with self.db() as c:c.execute('INSERT INTO desk_models VALUES(?,?,?)',(m['id'],m['ts'],json.dumps(m)))
+            self.training=dict(status='COMPLETE',progress=100);self.event('LEARN','CAS model validated on later, purged observations')
+        except Exception as e:self.training=dict(status='ERROR',progress=0,error=str(e))
+        finally:self.train_lock.release()
+    def control(self,action,body):
+        with self.lock:
+            cfg=self.config()
+            if action=='verify-session':
+                if body.get('ack') is not True:raise ValueError('Confirm today is a trading day and the configured NFO/BFO/NRML cutoffs are supported')
+                cfg.update(verified_date=now_ist().date().isoformat(),armed=False);self.put('config',cfg);return cfg
+            if action=='arm' and cfg['mode']=='paper':
+                if hasattr(self,'shared_risk'):
+                    blocked=self.shared_risk.snapshot('paper')['entry_block']
+                    if blocked:raise ValueError(blocked)
+                if not self.a.connected():raise ValueError('Connect Kite first')
+                if self.get('halt') or self.get('close_requested'):raise ValueError('Resolve halt/close request first')
+                cfg['armed']=True;self.put('config',cfg);return cfg
+            if action in ('arm','mode') and (cfg['mode']=='live' or body.get('mode')=='live'):
+                if cfg.get('verified_date')!=now_ist().date().isoformat():raise ValueError('Verify today’s session and broker cutoffs first')
+                if not self.model():raise ValueError('Live requires a validated CAS-specific model')
+            if action in ('clear-halt','close'):self.last_verify=0.;self.last_reconcile=0.
+            return super().control(action,body)
+    def cycle(self):
+        if not self.lock.acquire(False):return
+        try:
+            self.last_cycle=now_ist().isoformat()
+            self.a.ensure_stream()
+            if not self.a.connected():return
+            self.reconcile();self.verify_positions();cfg=self.config();hhmm=now_ist().strftime('%H:%M')
+            if self.get('close_requested') and not self.active():self.put('close_requested',False)
+            if not self.a.market_open():return
+            warm_start=(datetime.strptime(cfg['entry_start'],'%H:%M')-timedelta(minutes=2)).strftime('%H:%M')
+            if hhmm<warm_start and not self.active():return
+            if hhmm>=cfg['square_off'] and not self.active():return
+            try:self.a.batch()
+            except Exception:
+                self.a.quotes={};self.confirm.clear();raise
+            self.collect()
+            halt=self.get('halt') or ''
+            if halt.startswith('CAS cycle error:') and not self.mismatches and not self.rows("SELECT id FROM desk_orders WHERE mode='live' AND status NOT IN ('COMPLETE','CANCELLED','REJECTED')"):
+                self.put('halt',None);cfg=self.config();cfg['armed']=False;self.put('config',cfg)
+                self.event('RECOVERED','CAS cycle recovered; entries remain disarmed. Review readiness and arm again.')
+            # Manage owned positions before scanning for another entry.
+            self.manage(bool(self.get('close_requested')))
+            for symbol in self.a.symbols:
+                try:self.signals[symbol]=self.inspect(symbol)
+                except Exception as e:
+                    self.confirm.pop(symbol,None);self.signals[symbol]=dict(symbol=symbol,decision='WAIT',reason=str(e))
+            self.manage(bool(self.get('close_requested')))
+            for s in sorted(self.signals.values(),key=lambda s:abs(s.get('move_bps',0)),reverse=True):self.enter(s)
+            if self.get('close_requested') and not self.active():self.put('close_requested',False)
+            count=self.rows('SELECT COUNT(*) n FROM cas_samples WHERE label IS NOT NULL AND profile=2')[0]['n']
+            if count>=300 and count-self.last_fit_count>=100 and not cfg['armed'] and not self.active() and not self.train_lock.locked():
+                self.last_fit_count=count;self.train()
+        except Exception as e:
+            self.put('halt','CAS cycle error: '+str(e));self.event('ERROR',str(e))
+        finally:self.lock.release()
+    def live_readiness(self,s):
+        cfg=s['config'];stream=s['stream'];today=now_ist().date().isoformat();hhmm=now_ist().strftime('%H:%M')
+        checks=[]
+        def add(name,ok,detail):checks.append(dict(check=name,passed=bool(ok),detail=detail))
+        add('Kite login',s['connected'],'Connect or renew the Kite session if disconnected.')
+        add('Configured trading day and hours',self.a.market_open(),'Weekday schedule and saved market hours apply; exchange holidays still require verification.')
+        add('CAS entry window',cfg['entry_start']<=hhmm<cfg['entry_end'],cfg['entry_start']+'–'+cfg['entry_end']+' IST. Outside this window, no new CAS entries are permitted.')
+        add('Streaming connection',stream['connected'],stream['status']+'; '+(stream.get('error_detail') or 'No connection error detail recorded.'))
+        add('Instrument subscriptions',stream['subscriptions']>len(self.a.symbols),str(stream['subscriptions'])+' subscriptions. Use Prepare CAS feed; option subscriptions populate after index ticks arrive.')
+        age=stream.get('last_tick_age_seconds')
+        add('Recent stream arrivals',age is not None and age<=cfg['max_quote_age'],'Arrival age: '+(str(age)+' seconds' if age is not None else 'not received')+'. Every entry also requires fresh exchange timestamps and an executable option book.')
+        add('Validated CAS model',bool(s.get('model')),str(s['observations'].get('settled') or 0)+' settled CAS observations available. At least 300 and a passing validation result are required; use paper collection then Train CAS model.')
+        add('Today’s session verification',cfg.get('verified_date')==today,'Verify today’s exchange hours and broker NRML cutoff after saving settings.')
+        add('Paper performance gate',cfg.get('live_override') is True or s['evidence']['ready'],'The existing paper-evidence override bypasses only this gate, never model validation or risk controls.')
+        others=DESK.config()['armed'] or STOCK_DESK.config()['armed'] or autotrade_ai_config().get('armed') or bool(self.a.legacy_open())
+        add('Other desks idle',not others,'Disarm the other AI desks and reconcile/close their positions before CAS entries.')
+        shared=self.shared_risk.snapshot('live')['entry_block'] if hasattr(self,'shared_risk') else None
+        add('Shared live risk',not shared,shared or 'Shared live risk checks clear.')
+        add('CAS error state',not s.get('halt'),s.get('halt') or 'No retained CAS halt.')
+        add('Live mode selected',cfg['mode']=='live','Select Live after the required model, performance and verification gates pass.')
+        add('Entries armed',cfg['armed'],'Arm live execution explicitly. One-attempt mode disarms after its entry request.')
+        qualified=any(x.get('decision')=='READY' for x in s['signals'])
+        add('Qualifying signal',qualified,'At least one fresh signal must meet spike, confirmation, option momentum, spread, depth and risk checks; see each index’s signal reason.')
+        return checks
+    def state(self):
+        s=super().state();s['observations']=self.rows('SELECT COUNT(*) total,SUM(label IS NOT NULL) settled FROM cas_samples WHERE profile=2')[0]
+        s.update(version='CAS-4',feed='Kite FULL streaming; no auction IEP or imbalance feed',stream=self.a.feed_state(),learning_target='Index direction 5 seconds ahead; not option profit',timing_note='Entries until 15:38; square-off attempts from 15:39. Verify NFO/BFO and NRML cutoffs.')
+        s['live_readiness']=self.live_readiness(s)
+        return s
+    def start(self):
+        if self.started:return
+        self.started=True
+        def run():
+            while not self.stop_event.is_set():
+                self.a.wake.clear();started=time.monotonic();self.cycle()
+                # Coalesce tick bursts to at most ten cycles/sec; REST reconciliation
+                # remains bounded independently. Wake immediately for streamed data.
+                self.stop_event.wait(max(0,.1-(time.monotonic()-started)))
+                self.a.wake.wait(1 if self.a.market_open() else 10)
+        threading.Thread(target=run,daemon=True,name='cas-options').start()
+
+CAS_DESK=CASEngine(CASAdapter())
+
+class SharedAIRisk:
+    """One backend process, three AI ledgers; manual/other-app trades are outside this budget."""
+    DEFAULTS=dict(daily_loss=7500.,profit_activation=3000.,profit_giveback=1500.,profit_protection_enabled=True,
+        symbol_losses=2,max_trades=10,max_positions=3,one_trade_per_arm=False,same_signal_lock=True,
+        symbol_loss_limit_enabled=True,trade_limit_enabled=True,position_limit_enabled=True)
+    def __init__(self,engines):
+        self.engines=engines;self.owner=engines['index'];self.lock=threading.RLock()
+        for name,engine in engines.items():engine.shared_risk=self;engine.desk_name=name
+        if not self.owner.get('optional_risk_controls_v1',False):
+            cfg=self.config();cfg.pop('loss_streak',None);cfg['one_trade_per_arm']=False
+            self.owner.put('shared_risk_config',cfg);self.owner.put('optional_risk_controls_v1',True)
+            self.owner.event('SHARED_RISK','Consecutive-loss stop removed; one-entry-per-arm disabled. Optional protection switches available.')
+    def config(self):
+        cfg={**self.DEFAULTS,**self.owner.get('shared_risk_config',{})};cfg.pop('loss_streak',None);return cfg
+    def save(self,body):
+        with self.lock:
+            if any(e.config()['armed'] or e.active() for e in self.engines.values()):raise ValueError('Disarm all three desks and close/reconcile positions before changing shared risk settings')
+            cfg=self.config()
+            bounds=dict(daily_loss=(100,1000000),profit_activation=(100,1000000),profit_giveback=(100,1000000),symbol_losses=(1,20),max_trades=(1,100),max_positions=(1,10))
+            for key,value in body.items():
+                if key in ('one_trade_per_arm','same_signal_lock','profit_protection_enabled','symbol_loss_limit_enabled','trade_limit_enabled','position_limit_enabled'):
+                    if not isinstance(value,bool):raise ValueError('Expected checkbox: '+key)
+                    cfg[key]=value
+                elif key in bounds:
+                    if isinstance(value,bool):raise ValueError('Invalid '+key)
+                    v=float(value);lo,hi=bounds[key]
+                    if not math.isfinite(v) or not lo<=v<=hi:raise ValueError('Out of range: '+key)
+                    if key in ('symbol_losses','max_trades','max_positions'):
+                        if not v.is_integer():raise ValueError('Whole number required: '+key)
+                        v=int(v)
+                    cfg[key]=v
+                else:raise ValueError('Unknown shared setting: '+key)
+            if cfg['profit_protection_enabled'] and cfg['profit_giveback']>=cfg['profit_activation']:raise ValueError('Giveback must be below profit activation')
+            self.owner.put('shared_risk_config',cfg)
+            self.owner.event('SHARED_RISK','Shared limits updated; existing daily latches retained')
+            return cfg
+    def snapshot(self,mode):
+        with self.lock:
+            cfg=self.config();today=now_ist().date().isoformat();now=time.monotonic()
+            key='shared_risk_day:'+mode+':'+today;state=self.owner.get(key,{})
+            total=0.;reserved=0.;active=[];closed=[];attempts=0;missing=[];pending=[];desk_totals={};desk_reserved={}
+            for name,e in self.engines.items():
+                rows=e.rows("SELECT * FROM desk_positions WHERE mode=? AND (ts LIKE ? OR exit_ts LIKE ? OR status IN ('OPEN','ENTRY_PENDING','EXIT_PENDING'))",(mode,today+'%',today+'%'))
+                subtotal=0.;reserved_before=reserved
+                for p in rows:
+                    if p['ts'].startswith(today):attempts+=1
+                    if p['status']=='CLOSED' and (p.get('exit_ts') or '').startswith(today):closed.append(dict(p,desk=name))
+                    # Retained carry positions are included; dashboard explicitly discloses ledger basis.
+                    subtotal+=p['pnl']-p['fees']
+                    if p['status'] not in ('OPEN','ENTRY_PENDING','EXIT_PENDING'):continue
+                    active.append((name,p))
+                    if p['status'] in ('ENTRY_PENDING','EXIT_PENDING'):pending.append(p['id'])
+                    health=e.health.get(p['id'],{});bid=health.get('bid');fresh=bid is not None and now-health.get('observed_mono',0)<= (3 if name=='cas' else 15)
+                    if p['qty']>0:
+                        if not fresh:missing.append(p['contract']);bid=p['entry']
+                        subtotal+=(bid-p['entry'])*p['qty']
+                        reserved+=max(0.,bid-p['stop'])*p['qty']+e.config()['fee_per_order']
+                    if p['status']=='ENTRY_PENDING':
+                        # Reserve the unfilled part, including intents not yet submitted.
+                        setup=json.loads(p.get('setup') or '{}');wanted=int(setup.get('qty') or 0)
+                        reserved+=max(0,wanted-p['qty'])*max(0.,float(setup.get('entry') or 0)-p['stop'])+e.config()['fee_per_order']
+                desk_totals[name]=subtotal;desk_reserved[name]=reserved-reserved_before;total+=subtotal
+            closed.sort(key=lambda p:(p['exit_ts'],p['id']))
+            running=0.;historical_peak=0.
+            for p in closed:
+                running+=p['pnl']-p['fees'];historical_peak=max(historical_peak,running)
+            peak=max(float(state.get('peak',0)),historical_peak,total if not missing else 0.)
+            streak=0
+            for p in reversed(closed):
+                if p['pnl']-p['fees']>=0:break
+                streak+=1
+            reason=state.get('reason');liquidate=bool(state.get('liquidate'))
+            # Clear only the removed/disabled rule's own old latch. Financial loss
+            # limits are evaluated again below and cannot be cleared by these switches.
+            if (reason=='Combined AI consecutive-loss limit reached' or
+                reason=='Combined AI profit giveback limit reached' and not cfg['profit_protection_enabled'] or
+                reason=='Combined AI daily entry-attempt limit reached' and not cfg['trade_limit_enabled']):
+                reason=None;liquidate=False
+            # Financial stops take precedence over entry-only latches.
+            financial=None
+            if total<=-cfg['daily_loss']:financial='Combined AI daily loss limit reached'
+            elif cfg['profit_protection_enabled'] and not missing and peak>=cfg['profit_activation'] and peak-total>=cfg['profit_giveback']:financial='Combined AI profit giveback limit reached'
+            # Also retain each desk's tighter daily stop; no same-day clear-halt bypass.
+            for name,e in self.engines.items():
+                if desk_totals[name]<=-e.config()['daily_loss']:financial=name+' daily loss limit reached'
+            if financial:reason=financial;liquidate=True
+            if not reason and cfg['trade_limit_enabled'] and attempts>=cfg['max_trades']:reason='Combined AI daily entry-attempt limit reached'
+            new=dict(peak=peak,reason=reason,liquidate=liquidate)
+            if new!=state:self.owner.put(key,new)
+            blocker=reason
+            if not blocker and missing:blocker='Fresh position quotes required: '+', '.join(missing)
+            if not blocker and pending:blocker='Unresolved entry/exit order in another or this AI desk'
+            if not blocker and any(e.mismatches for e in self.engines.values()):blocker='Broker quantity verification required before new entries'
+            if not blocker and cfg['position_limit_enabled'] and len(active)>=cfg['max_positions']:blocker='Combined AI open-position limit reached'
+            if not blocker and globals().get('BROKER_GATE') and BROKER_GATE.status()['cooldown_seconds']>0:blocker='Broker rate-limit cooldown; new entries paused'
+            floor=max(-cfg['daily_loss'],peak-cfg['profit_giveback']) if cfg['profit_protection_enabled'] and peak>=cfg['profit_activation'] else -cfg['daily_loss']
+            return dict(mode=mode,date=today,net=round(total,2),peak=round(peak,2),reserved=round(reserved,2),
+                remaining=round(max(0.,total-reserved-floor),2),reason=reason,entry_block=blocker,liquidate=liquidate,
+                attempts=attempts,loss_streak=streak,positions=len(active),missing_quotes=missing,closed=closed,config=cfg,desk_reserved=desk_reserved,desk_totals=desk_totals)
+    def signal_key(self,e,s):
+        if e.desk_name=='cas':
+            epoch=s.get('signal_epoch')
+            return str(int(float(epoch)//max(1.,e.config()['lookback_seconds']))) if epoch else None
+        return str(s['bar_ts']) if s.get('bar_ts') else None
+    def admit(self,e,s):
+        # Caller holds this lock through the durable position insert. No broker I/O here.
+        cfg=e.config();view=self.snapshot(cfg['mode']);limits=view['config']
+        if view['entry_block']:return view['entry_block']
+        losses=sum(1 for p in view['closed'] if p['symbol']==s['symbol'] and p['pnl']-p['fees']<0)
+        if limits['symbol_loss_limit_enabled'] and losses>=limits['symbol_losses']:return 'Daily losing-trade limit for '+s['symbol']
+        signal=self.signal_key(e,s)
+        if limits['same_signal_lock']:
+            if signal is None:return 'Signal timestamp missing; cannot establish fresh entry'
+            for other in self.engines.values():
+                for row in other.rows('SELECT setup FROM desk_positions WHERE mode=? AND symbol=? AND ts LIKE ?',(cfg['mode'],s['symbol'],view['date']+'%')):
+                    prior=json.loads(row['setup'] or '{}')
+                    prior_key=prior.get('shared_signal_key') or (str(prior.get('bar_ts')) if prior.get('bar_ts') else None)
+                    if prior_key==signal:return 'Signal already used; wait for a fresh signal'
+        required=(float(s['entry'])-float(s['stop']))*int(s['qty'])+2*cfg['fee_per_order']
+        if not math.isfinite(required) or required<=0:return 'Invalid planned entry risk'
+        if required>cfg['risk']+.01:return 'Planned loss including estimated fees exceeds per-trade risk'
+        floor=-limits['daily_loss']
+        if limits['profit_protection_enabled'] and view['peak']>=limits['profit_activation']:floor=max(floor,view['peak']-limits['profit_giveback'])
+        if required>view['net']-view['reserved']-floor:return 'Insufficient shared risk remaining for this entry'
+        if view['desk_totals'][e.desk_name]-view['desk_reserved'][e.desk_name]-required < -cfg['daily_loss']:return 'Insufficient desk daily risk remaining'
+        s['shared_signal_key']=signal;s['shared_risk_at_entry']={k:v for k,v in view.items() if k!='closed'}
+        return None
+
+
+SHARED_RISK=SharedAIRisk({'index':DESK,'stock':STOCK_DESK,'cas':CAS_DESK})
+
+
+@app.route('/api/shared-ai-risk',methods=['GET','POST'])
+def shared_ai_risk():
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    try:
+        if request.method=='POST':
+            body=request.get_json(silent=True)
+            if not isinstance(body,dict):raise ValueError('Settings object required')
+            SHARED_RISK.save(body)
+        states={}
+        for mode in ('paper','live'):
+            states[mode]=SHARED_RISK.snapshot(mode);states[mode].pop('closed',None)
+        return jsonify(config=SHARED_RISK.config(),states=states,broker=BROKER_GATE.status(),scope='Three AI desks in this backend process; excludes manual, legacy and other-app trades. Keep one backend worker process.')
+    except (ValueError,TypeError) as e:return jsonify(error=str(e)),400
+
+
+
+
+@app.route('/api/cas-ai/state')
+def cas_ai_state():
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    return jsonify(CAS_DESK.state())
+
+@app.route('/api/cas-ai/config',methods=['POST'])
+def cas_ai_config():
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    body=request.get_json(silent=True)
+    if not isinstance(body,dict):return jsonify(error='JSON object required'),400
+    try:return jsonify(ok=True,config=CAS_DESK.save_config(body))
+    except (ValueError,TypeError) as e:return jsonify(error=str(e)),400
+
+@app.route('/api/cas-ai/control/<action>',methods=['POST'])
+def cas_ai_control(action):
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    body=request.get_json(silent=True) or {}
+    if not isinstance(body,dict):return jsonify(error='JSON object required'),400
+    try:
+        if action=='prepare':
+            if not CAS_DESK.lock.acquire(False):return jsonify(error='CAS supervision is running; retry Prepare shortly'),409
+            try:
+                CAS_DESK.a.ensure_stream();CAS_DESK.a.last_subscription=0.;CAS_DESK.a.update_subscriptions()
+                return jsonify(ok=True,message='Subscriptions prepared. Readiness shows remaining live prerequisites; entries were not armed.')
+            finally:CAS_DESK.lock.release()
+        if action=='reconnect':
+            CAS_DESK.a.request_stream_reconnect();return jsonify(ok=True,message='Reconnect requested; trading gates still apply')
+        if action=='scan':
+            threading.Thread(target=CAS_DESK.cycle,daemon=True,name='cas-manual-scan').start();return jsonify(ok=True)
+        if action=='train':return jsonify(ok=True,started=CAS_DESK.train())
+        return jsonify(ok=True,config=CAS_DESK.control(action,body))
+    except (ValueError,TypeError) as e:return jsonify(error=str(e)),400
+
+
+@app.route('/api/order-recovery/<desk>/<oid>',methods=['POST'])
+def recover_desk_order(desk,oid):
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    engine={'stock':STOCK_DESK,'index':DESK,'cas':CAS_DESK}.get(desk)
+    if engine is None:return jsonify(error='Unknown desk'),404
+    body=request.get_json(silent=True)
+    if not isinstance(body,dict) or body.get('action') not in ('cancel','verify-not-placed'):return jsonify(error='Valid recovery action required'),400
+    lock=getattr(engine,'risk_lock',engine.lock)
+    if not lock.acquire(False):return jsonify(error='Order supervision is running; retry shortly'),409
+    try:
+        if hasattr(engine,'last_verify'):engine.last_verify=0.
+        return jsonify(ok=True,**engine.recover_order(oid,body))
+    except Exception as e:return jsonify(error=str(e)),409
+    finally:lock.release()
+
+
+@app.route('/api/trade-review/<desk>/<pid>')
+def desk_trade_review(desk,pid):
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    engine={'stock':STOCK_DESK,'index':DESK,'cas':CAS_DESK}.get(desk)
+    if engine is None:return jsonify(error='Unknown desk'),404
+    try:return jsonify(engine.trade_review(pid))
+    except ValueError as e:return jsonify(error=str(e)),404
+
+
+def _review_engine(desk):
+    return {'stock':STOCK_DESK,'index':DESK,'cas':CAS_DESK}.get(desk)
+
+
+def _review_filter():
+    date=request.args.get('date','')
+    if date:
+        from datetime import datetime as date_parser
+        if date_parser.strptime(date,'%Y-%m-%d').strftime('%Y-%m-%d')!=date:raise ValueError('Use YYYY-MM-DD')
+    return date
+
+
+@app.route('/api/trade-history/<desk>')
+def desk_trade_history(desk):
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    engine=_review_engine(desk)
+    if engine is None:return jsonify(error='Unknown desk'),404
+    try:
+        date=_review_filter();before=int(request.args.get('before','9223372036854775807'))
+        rows=engine.rows("SELECT rowid cursor,id,ts,contract,status,mode FROM desk_positions WHERE rowid<? AND (?='' OR substr(ts,1,10)=?) ORDER BY rowid DESC LIMIT 101",(before,date,date))
+        return jsonify(trades=rows[:100],next_before=rows[99]['cursor'] if len(rows)>100 else None,recorder_error=engine.recorder_error)
+    except ValueError as e:return jsonify(error=str(e)),400
+
+
+@app.route('/api/trade-timeline/<desk>/<pid>')
+def desk_trade_timeline(desk,pid):
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    engine=_review_engine(desk)
+    if engine is None:return jsonify(error='Unknown desk'),404
+    try:return jsonify(engine.trade_timeline(pid,max(0,int(request.args.get('after','0')))))
+    except ValueError:return jsonify(error='Invalid cursor'),400
+
+
+def _review_csv_cell(value):
+    # Do not allow text supplied by broker / instrument metadata to become Excel formulas.
+    if isinstance(value,str) and value.lstrip().startswith(('=','+','-','@')):return "'"+value
+    return value
+
+
+@app.route('/api/trade-review-export/<desk>')
+def desk_trade_review_export(desk):
+    if not require_session():return jsonify(error='Connect Kite first'),401
+    engine=_review_engine(desk)
+    if engine is None:return jsonify(error='Unknown desk'),404
+    try:date=_review_filter()
+    except ValueError:return jsonify(error='Use YYYY-MM-DD'),400
+    pid=request.args.get('pid','');fmt=request.args.get('format','csv')
+    if fmt not in ('csv','json'):return jsonify(error='Use csv or json'),400
+    if pid and not engine.rows('SELECT id FROM desk_positions WHERE id=?',(pid,)):return jsonify(error='Trade not found'),404
+    # Capture an upper bound, so new entries cannot extend a running export indefinitely.
+    upper=engine.rows('SELECT COALESCE(MAX(rowid),0) n FROM desk_positions')[0]['n']
+    from flask import Response,stream_with_context
+    import csv,io,json as export_json
+    def reviews():
+        cursor=0
+        while True:
+            batch=engine.rows("SELECT rowid cursor,id FROM desk_positions WHERE rowid>? AND rowid<=? AND (?='' OR id=?) AND (?='' OR substr(ts,1,10)=?) ORDER BY rowid LIMIT 50",(cursor,upper,pid,pid,date,date))
+            if not batch:break
+            for row in batch:
+                review=engine.trade_review(row['id']);review.pop('timeline',None)
+                yield row['id'],review
+            cursor=batch[-1]['cursor']
+    def events(trade_id):
+        after=0
+        upper_event=engine.rows('SELECT COALESCE(MAX(id),0) n FROM desk_trade_events WHERE position_id=?',(trade_id,))[0]['n']
+        while True:
+            batch=engine.rows('SELECT id,ts,kind,payload FROM desk_trade_events WHERE position_id=? AND id>? AND id<=? ORDER BY id LIMIT 500',(trade_id,after,upper_event))
+            if not batch:break
+            for e in batch:yield dict(id=e['id'],ts=e['ts'],kind=e['kind'],data=export_json.loads(e['payload']))
+            after=batch[-1]['id']
+    def generate():
+        if fmt=='json':
+            yield '{"note":"Export of retained local evidence. Active trades can change during export. Dates filter entry day in IST.","trades":['
+            first=True
+            for trade_id,review in reviews():
+                if not first:yield ','
+                first=False;yield '{"review":'+export_json.dumps(review,default=str)+',"events":['
+                first_event=True
+                for event in events(trade_id):
+                    if not first_event:yield ','
+                    first_event=False;yield export_json.dumps(event,default=str)
+                yield ']}'
+            yield ']}'
+        else:
+            buf=io.StringIO();writer=csv.writer(buf)
+            def line(values):
+                buf.seek(0);buf.truncate(0);writer.writerow([_review_csv_cell(v) for v in values]);return buf.getvalue()
+            yield '\ufeff'+line(['trade_id','contract','mode','trade_status','record_time_IST','record_type','expected_direction','net_realized_estimated_fees','observed_bid','observed_ask','signal_direction','exit_reason','explanation','evidence_json'])
+            for trade_id,r in reviews():
+                p=r['position'];base=[trade_id,p['contract'],p['mode'],p['status']]
+                yield line(base+[p['ts'],'REVIEW',r['entry_plan'].get('direction'),r['outcome']['net_realized'],'','','',r.get('recorded_exit_reason') or p.get('exit_reason'),' '.join(r['explanations'])+' '+r['limitations'],export_json.dumps(r,default=str)])
+                for e in events(trade_id):
+                    data=e['data'];q=data.get('quote') or {};signal=data.get('signal') or {}
+                    yield line(base+[e['ts'],e['kind'],r['entry_plan'].get('direction'),'',q.get('bid'),q.get('ask'),signal.get('direction'),data.get('reason') or data.get('decision'),'Recorded observation; does not prove market causation',export_json.dumps(data,default=str)])
+    return Response(stream_with_context(generate()),mimetype='application/json' if fmt=='json' else 'text/csv',headers={'Content-Disposition':f'attachment; filename="{desk}-trade-evidence.{fmt}"','Cache-Control':'no-store'})
+
+
 def start_application_workers():
     if os.environ.get("AI_START_WORKERS","1")!="1":return
     def legacy_manage():
@@ -12407,540 +14589,8 @@ def start_application_workers():
     threading.Thread(target=_autotrade_loop,daemon=True).start()
     threading.Thread(target=_breakout_monitor_loop,daemon=True).start()
     DESK.start()
-
-# === BEGIN INDEPENDENT COMMODITY DESK ===
-# MCX futures only. No index models, tables, controls or workers are modified.
-# API references: https://kite.trade/docs/connect/v3/{market-quotes,historical,orders,margins}/
-# Run one backend process (as already required by AI Desk v2).
-def _build_commodity_engine():
-    import copy
-    import json
-    import math
-    import os
-    import sqlite3
-    import threading
-    import time
-    import uuid
-    from datetime import datetime, timedelta, timezone
-
-    tz = timezone(timedelta(hours=5, minutes=30))
-    def now(): return datetime.now(tz)
-    def stamp(): return now().isoformat()
-    def dt(value):
-        x = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-        return x.replace(tzinfo=tz) if x.tzinfo is None else x.astimezone(tz)
-    def num(value, lo=0, hi=1e12):
-        if isinstance(value, bool): raise ValueError('Use a numeric value')
-        x = float(value)
-        if not math.isfinite(x) or not lo <= x <= hi: raise ValueError(f'Value must be between {lo} and {hi}')
-        return x
-    def round_tick(price, tick, up):
-        return round((math.ceil(price / tick - 1e-9) if up else math.floor(price / tick + 1e-9)) * tick, 8)
-    def ema(values, n):
-        v = values[0]
-        for x in values[1:]: v += 2 / (n + 1) * (x - v)
-        return v
-
-    class CommodityEngine:
-        defaults = dict(mode='paper', armed=False, paper_full_session=True, contract='', multiplier=0., verified=False,
-            last_entry_date='', capital=100000., risk=1500., daily_loss=5000., max_notional=1000000.,
-            max_lots=1, atr_stop=1.8, reward_r=2., max_spread_bps=15., min_volume=100,
-            min_oi=100, max_hold=120, cooldown=15, fee_per_order=50., slippage_bps=3.,
-            session_start='09:15', last_entry='21:30', square_off='22:30')
-        bounds = dict(multiplier=(.000001,1e7),capital=(1000,1e9),risk=(100,1e7),
-            daily_loss=(100,1e8),max_notional=(1000,1e10),max_lots=(1,100),atr_stop=(1,5),
-            reward_r=(1,5),max_spread_bps=(1,100),min_volume=(1,1e8),min_oi=(1,1e9),
-            max_hold=(5,720),cooldown=(1,240),fee_per_order=(1,10000),slippage_bps=(1,50))
-        integers = {'max_lots','min_volume','min_oi','max_hold','cooldown'}
-        def __init__(self, broker, connected, path):
-            self.broker, self.connected, self.path = broker, connected, path
-            self.lock = threading.RLock()
-            self.instruments_cache, self.instrument_day = [], None
-            self.bars_cache = {}
-            self.worker = None
-            with self.db() as c:
-                c.execute('CREATE TABLE IF NOT EXISTS commodity_state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
-                row = c.execute('SELECT value FROM commodity_state WHERE id=1').fetchone()
-            self.s = json.loads(row[0]) if row else dict(config=copy.deepcopy(self.defaults),position=None,
-                pending=None,trades=[],events=[],signal=None,heartbeat=None,error=None,halt=None,
-                close_requested=False,last_entry_bar=None,last_exit=None,loss_day=None,quotes_stale=False)
-            self.s['config'].setdefault('paper_full_session', True)  # migrate existing commodity settings
-            self.s['config']['armed'] = False  # a process restart never resumes entries
-            self.save()
-        def db(self): return sqlite3.connect(self.path, timeout=20)
-        def save(self):
-            with self.db() as c:
-                c.execute('INSERT OR REPLACE INTO commodity_state(id,value) VALUES(1,?)',
-                          (json.dumps(self.s,allow_nan=False),))
-        def event(self, kind, message):
-            self.s['events'].insert(0,dict(ts=stamp(),kind=kind,message=str(message)))
-            self.s['events'] = self.s['events'][:300]
-        def instruments(self):
-            if self.instrument_day != now().date():
-                records = self.broker.instruments('MCX')
-                self.instruments_cache = [dict(symbol=r['tradingsymbol'],token=int(r['instrument_token']),
-                    expiry=str(r['expiry'])[:10],lot_size=int(r['lot_size']),tick_size=float(r['tick_size']))
-                    for r in records if r.get('exchange')=='MCX' and r.get('instrument_type')=='FUT'
-                    and str(r.get('expiry',''))[:10] >= now().date().isoformat()
-                    and int(r.get('lot_size',0)) > 0 and float(r.get('tick_size',0)) > 0]
-                self.instruments_cache.sort(key=lambda r:(r['symbol'],r['expiry']))
-                self.instrument_day = now().date()
-            return copy.deepcopy(self.instruments_cache)
-        def instrument(self, symbol):
-            found = next((r for r in self.instruments() if r['symbol']==symbol),None)
-            if not found: raise ValueError('Select an unexpired MCX futures contract from Refresh contracts')
-            return found
-        def configure(self, body):
-            with self.lock:
-                if self.s['config']['armed'] or self.s['position'] or self.s['pending']:
-                    raise ValueError('Disarm and flatten commodity exposure before changing settings')
-                if not isinstance(body,dict): raise ValueError('Expected a settings object')
-                allowed = set(self.bounds) | {'contract','verified','last_entry_date','session_start','last_entry','square_off','paper_full_session'}
-                if set(body)-allowed: raise ValueError('Unknown or protected setting')
-                c = copy.deepcopy(self.s['config'])
-                for key,value in body.items():
-                    if key=='paper_full_session' and not isinstance(value,bool):
-                        raise ValueError('paper_full_session must be true or false')
-                    if key in self.bounds:
-                        x = num(value,*self.bounds[key])
-                        if key in self.integers and not x.is_integer(): raise ValueError(key+' must be a whole number')
-                        c[key] = int(x) if key in self.integers else x
-                    else: c[key] = value
-                if c['verified'] is not True: raise ValueError('Verify contract multiplier and last permitted entry date')
-                inst = self.instrument(c['contract'])
-                cutoff = datetime.strptime(c['last_entry_date'],'%Y-%m-%d').date()
-                if cutoff >= dt(inst['expiry']).date(): raise ValueError('Last entry date must be before expiry and before the applicable tender/delivery period')
-                if cutoff < now().date(): raise ValueError('Last entry date has already passed')
-                for key in ('session_start','last_entry','square_off'):
-                    datetime.strptime(c[key],'%H:%M')
-                    if len(c[key]) != 5: raise ValueError('Times must use HH:MM')
-                if not '09:00' <= c['session_start'] < c['last_entry'] < c['square_off'] <= '23:00':
-                    raise ValueError('Use ordered IST times from 09:00 through 23:00; shorten for contract-specific sessions')
-                if c['risk'] >= c['daily_loss'] or c['daily_loss'] > c['capital']:
-                    raise ValueError('Require risk per trade < daily loss limit <= allocated capital')
-                self.s['config'] = c
-                self.s['signal'] = None
-                self.event('SETTINGS','Commodity settings saved; entry controls remain disarmed')
-                self.save()
-                return c
-        def quote(self, symbol):
-            key = 'MCX:'+symbol
-            raw = self.broker.quote([key]).get(key)
-            if not raw: raise ValueError('No MCX quote for '+symbol)
-            age = (now()-dt(raw['timestamp'])).total_seconds()
-            if not -5 <= age <= 45: raise ValueError('Stale quote: '+symbol)
-            bids = raw.get('depth',{}).get('buy',[])
-            asks = raw.get('depth',{}).get('sell',[])
-            if not bids or not asks: raise ValueError('Missing two-sided market depth')
-            bid,ask = num(bids[0]['price'],.000001),num(asks[0]['price'],.000001)
-            if bid > ask or min(int(bids[0]['quantity']),int(asks[0]['quantity'])) <= 0:
-                raise ValueError('Crossed or empty market depth')
-            return dict(bid=bid,ask=ask,bid_qty=int(bids[0]['quantity']),ask_qty=int(asks[0]['quantity']),
-                volume=int(raw.get('volume',0)),oi=int(raw.get('oi',0)),
-                spread_bps=10000*(ask-bid)/((ask+bid)/2),ts=dt(raw['timestamp']).isoformat(),
-                last_trade_ts=dt(raw['last_trade_time']).isoformat() if raw.get('last_trade_time') else None)
-        def signal(self, inst, quote):
-            # Completed 5-minute candles only; never interpret the forming candle as evidence.
-            key = inst['symbol']
-            cached = self.bars_cache.get(key)
-            if not cached or time.monotonic()-cached[0] > 60:
-                rows = self.broker.historical_data(inst['token'],now()-timedelta(days=6),now(),'5minute',oi=True)
-                rows = sorted([r for r in rows if dt(r['date'])+timedelta(minutes=5) <= now()],key=lambda r:dt(r['date']))
-                self.bars_cache[key] = (time.monotonic(),rows)
-            else: rows = cached[1]
-            if len(rows) < 60: raise ValueError('At least 60 completed 5-minute candles are required')
-            if (now()-(dt(rows[-1]['date'])+timedelta(minutes=5))).total_seconds() > 600:
-                raise ValueError('Historical candles are stale; entries blocked')
-            closes = [num(r['close'],.000001) for r in rows[-100:]]
-            highs = [num(r['high'],.000001) for r in rows[-100:]]
-            lows = [num(r['low'],.000001) for r in rows[-100:]]
-            tr = [max(highs[i]-lows[i],abs(highs[i]-closes[i-1]),abs(lows[i]-closes[i-1])) for i in range(1,len(closes))]
-            atr = sum(tr[-14:])/14
-            if atr <= 0: raise ValueError('Zero ATR; insufficient movement')
-            e20,e50 = ema(closes,20),ema(closes,50)
-            changes = [closes[i]-closes[i-1] for i in range(len(closes)-14,len(closes))]
-            gain,loss = sum(max(0,x) for x in changes),sum(max(0,-x) for x in changes)
-            rsi = 100 if loss == 0 and gain else (50 if loss == 0 else 100-100/(1+gain/loss))
-            today = [r for r in rows if dt(r['date']).date()==now().date()]
-            vol = sum(num(r.get('volume',0)) for r in today)
-            if not vol: raise ValueError('No current-session volume for VWAP')
-            vwap = sum((float(r['high'])+float(r['low'])+float(r['close']))/3*float(r.get('volume',0)) for r in today)/vol
-            avgvol = sum(float(r.get('volume',0)) for r in rows[-21:-1])/20
-            volume_ratio = float(rows[-1].get('volume',0))/avgvol if avgvol else 0
-            price = closes[-1]
-            long_checks = [e20>e50,price>vwap,55<=rsi<=72,price>max(highs[-21:-1]),volume_ratio>=1.1]
-            short_checks = [e20<e50,price<vwap,28<=rsi<=45,price<min(lows[-21:-1]),volume_ratio>=1.1]
-            side = 'BUY' if all(long_checks) else 'SELL' if all(short_checks) else 'WAIT'
-            return dict(contract=key,side=side,score=max(sum(long_checks),sum(short_checks)),
-                checks=5,atr=atr,ema20=e20,ema50=e50,rsi=rsi,vwap=vwap,volume_ratio=volume_ratio,
-                candle=dt(rows[-1]['date']).isoformat(),ts=stamp(),quote=quote,
-                rationale='Trend + session VWAP + RSI + 20-bar breakout + volume must all align',
-                conditions=[dict(name=name,buy=bool(buy),sell=bool(sell)) for name,buy,sell in zip(
-                    ['EMA trend','Session VWAP','RSI momentum','20-bar breakout','Volume confirmation'],long_checks,short_checks)],
-                series=[dict(ts=dt(r['date']).isoformat(),open=float(r.get('open',r['close'])),high=float(r['high']),
-                    low=float(r['low']),close=float(r['close']),volume=float(r.get('volume',0))) for r in rows[-120:]])
-        def pnl(self, p):
-            return (p.get('gross') or 0)-p.get('fees',0)
-        def daily(self):
-            today = now().date().isoformat()
-            mode = self.s['config']['mode']
-            realized = sum(t['net'] for t in self.s['trades'] if t['closed_at'][:10]==today and t['mode']==mode)
-            p = self.s['position']
-            return realized + (self.pnl(p) if p else 0.)
-        def edge(self):
-            ts = [t for t in self.s['trades'] if t['mode']=='paper']
-            days = len({t['closed_at'][:10] for t in ts})
-            net = sum(t['net'] for t in ts)
-            wins = sum(max(t['net'],0) for t in ts)
-            losses = -sum(min(t['net'],0) for t in ts)
-            factor = wins/losses if losses else None
-            # Forward evidence is descriptive, not proof of future profitability.
-            return dict(trades=len(ts),days=days,net=net,profit_factor=factor,
-                eligible=len(ts)>=30 and days>=5 and net>0 and (losses==0 or factor>=1.2))
-        def full_session(self):
-            return self.s['config']['mode']=='paper' and self.s['config'].get('paper_full_session',True)
-        def block(self):
-            c = self.s['config']; current=now()
-            if self.s['halt']: return self.s['halt']
-            if not c['verified'] or not c['contract']: return 'Configure and verify an MCX contract'
-            if self.s['loss_day']==current.date().isoformat(): return 'Daily loss circuit breaker latched until next IST day'
-            if not c['armed']: return 'New entries disarmed; existing positions continue to be managed'
-            if not self.full_session() and (current.weekday()>=5 or not c['session_start'] <= current.strftime('%H:%M') < c['last_entry']):
-                return 'Outside configured entry window (IST)'
-            if current.date().isoformat()>c['last_entry_date']: return 'Contract entry cutoff reached; choose a later contract'
-            if self.s['position'] or self.s['pending']: return 'One commodity exposure/order at a time'
-            if self.s['last_exit'] and (current-dt(self.s['last_exit'])).total_seconds()<c['cooldown']*60: return 'Re-entry cooldown'
-            if self.daily() <= -c['daily_loss']: return 'Daily loss limit reached'
-            return None
-        def size(self, inst, signal, q):
-            c=self.s['config']; long=signal['side']=='BUY'
-            entry=round_tick((q['ask'] if long else q['bid'])*(1+(1 if long else -1)*c['slippage_bps']/10000),inst['tick_size'],long)
-            distance=round_tick(max(signal['atr']*c['atr_stop'],inst['tick_size']*3),inst['tick_size'],True)
-            # multiplier = rupees per one price-point per ONE broker quantity unit, not lot_size.
-            unit_risk=(distance+entry*2*c['slippage_bps']/10000)*c['multiplier']
-            qty=int(max(0,c['risk']-2*c['fee_per_order'])/unit_risk)//inst['lot_size']*inst['lot_size']
-            qty=min(qty,c['max_lots']*inst['lot_size'],int(c['max_notional']/(entry*c['multiplier']))//inst['lot_size']*inst['lot_size'])
-            depth=q['ask_qty'] if long else q['bid_qty']
-            qty=min(qty,depth//inst['lot_size']*inst['lot_size'])
-            if qty<=0: raise ValueError('No full lot fits risk, notional or displayed-depth limits')
-            return entry,distance,qty
-        def order_payload(self, symbol, side, qty, price, tag):
-            return dict(variety='regular',exchange='MCX',tradingsymbol=symbol,transaction_type=side,
-                quantity=qty,product='MIS',order_type='LIMIT',validity='DAY',price=price,tag=tag)
-        def submit(self, purpose, side, qty, price, context):
-            tag='cmd'+uuid.uuid4().hex[:16]
-            pending=dict(purpose=purpose,side=side,qty=qty,price=price,tag=tag,order_id=None,
-                         created=stamp(),context=context,filled=0,turnover=0.,cancel_requested=False)
-            self.s['pending']=pending
-            self.save() # durable intent BEFORE the broker call; never blindly retry a timeout
-            try:
-                pending['order_id']=str(self.broker.place_order(**self.order_payload(context['contract'],side,qty,price,tag)))
-                self.event('ORDER',purpose+' LIMIT order submitted: '+pending['order_id'])
-            except Exception as exc:
-                self.s['halt']='Order acknowledgement uncertain. Reconciliation required; no automatic resubmission.'
-                self.s['config']['armed']=False
-                self.event('ORDER_UNCERTAIN',str(exc))
-            self.save()
-        def reconcile(self):
-            pending=self.s['pending']
-            if not pending: return
-            orders=self.broker.orders()
-            matches=[o for o in orders if (str(o.get('order_id'))==pending['order_id'] if pending['order_id'] else o.get('tag')==pending['tag'])]
-            if len(matches)!=1:
-                if (now()-dt(pending['created'])).total_seconds()>30:
-                    self.s['halt']='Pending commodity order cannot be uniquely located. Check broker; do not resubmit.'
-                    self.s['config']['armed']=False
-                return
-            o=matches[0]; pending['order_id']=str(o['order_id'])
-            if o.get('exchange')!='MCX' or o.get('tradingsymbol')!=pending['context']['contract'] or o.get('transaction_type')!=pending['side']:
-                raise ValueError('Broker order identity mismatch')
-            filled=int(o.get('filled_quantity',0)); average=float(o.get('average_price',0) or 0)
-            if filled<pending['filled'] or filled>pending['qty']: raise ValueError('Inconsistent broker fill quantity')
-            delta=filled-pending['filled']; turnover=filled*average
-            if delta:
-                fill_price=num((turnover-pending['turnover'])/delta,.000001)
-                if pending['purpose']=='ENTRY':
-                    p=self.s['position']
-                    if not p:
-                        p=copy.deepcopy(pending['context']); p.update(qty=0,entry=0.,fees=p['fee_per_order'],gross=0.)
-                        self.s['position']=p
-                    p['entry']=(p['entry']*p['qty']+fill_price*delta)/(p['qty']+delta)
-                    p['qty']+=delta; p['initial_qty']=filled
-                    sign=1 if p['side']=='BUY' else -1
-                    p['stop']=round_tick(p['entry']-sign*p['distance'],p['tick_size'],sign<0)
-                    p['target']=round_tick(p['entry']+sign*p['distance']*p['reward_r'],p['tick_size'],sign>0)
-                else:
-                    p=self.s['position']
-                    if not p or delta>p['qty']: raise ValueError('Exit fill exceeds tracked commodity exposure')
-                    if pending['filled']==0: p['fees']+=p['fee_per_order']
-                    p['realized_gross']=p.get('realized_gross',0)+(fill_price-p['entry'])*(1 if p['side']=='BUY' else -1)*delta*p['multiplier']
-                    p['qty']-=delta
-                    if p['qty']==0: self.finish(fill_price,pending['context'].get('exit_reason','Exit'))
-                pending['filled']=filled; pending['turnover']=turnover
-                self.event('FILL',pending['purpose']+' cumulative broker fill '+str(filled))
-            terminal=o.get('status') in ('COMPLETE','CANCELLED','REJECTED')
-            if terminal:
-                self.event('ORDER_STATUS',str(o.get('status'))+' '+str(o.get('status_message') or ''))
-                self.s['pending']=None
-                if o.get('status')=='REJECTED':
-                    self.s['config']['armed']=False
-                    self.s['halt']='Broker rejected order. Resolve the broker reason and clear halt.'
-            elif not pending['cancel_requested'] and ((now()-dt(pending['created'])).total_seconds()>40 or self.s['close_requested']):
-                self.broker.cancel_order(variety='regular',order_id=pending['order_id'])
-                pending['cancel_requested']=True
-            self.save()
-        def finish(self, price, reason):
-            p=self.s['position']
-            t=copy.deepcopy(p)
-            t.update(exit=price,closed_at=stamp(),exit_reason=reason,net=p.get('realized_gross',0)-p['fees'])
-            self.s['trades'].insert(0,t)
-            self.s['position']=None; self.s['last_exit']=stamp()
-            self.s['close_requested']=False
-            self.event('CLOSED',reason+'; estimated net ₹'+str(round(t['net'],2)))
-        def close_position(self, q, reason):
-            p=self.s['position']
-            if not p: return
-            if self.s['pending']:
-                self.s['close_requested']=True
-                return
-            if p['mode']=='live':
-                actual=sum(int(r.get('quantity',0)) for r in self.broker.positions().get('net',[])
-                    if r.get('exchange')=='MCX' and r.get('tradingsymbol')==p['contract'] and r.get('product')=='MIS')
-                expected=p['qty']*(1 if p['side']=='BUY' else -1)
-                if actual!=expected:
-                    self.s['halt']='Broker position differs from commodity ledger; exit blocked to avoid an unintended position. Reconcile in broker terminal.'
-                    self.s['config']['armed']=False
-                    self.event('RECONCILIATION',self.s['halt'])
-                    return
-            side='SELL' if p['side']=='BUY' else 'BUY'; sign=1 if side=='BUY' else -1
-            price=round_tick((q['ask'] if side=='BUY' else q['bid'])*(1+sign*p['slippage_bps']/10000),p['tick_size'],side=='BUY')
-            if p['mode']=='paper':
-                p['realized_gross']=(price-p['entry'])*(1 if p['side']=='BUY' else -1)*p['qty']*p['multiplier']
-                p['fees']+=p['fee_per_order']; self.finish(price,reason)
-            else:
-                self.s['close_requested']=True
-                context=copy.deepcopy(p); context['exit_reason']=reason
-                self.submit('EXIT',side,p['qty'],price,context)
-        def cycle(self, allow_entries=True):
-            with self.lock:
-                try:
-                    if not self.connected(): raise ValueError('Connect Kite; position monitoring requires market data')
-                    self.reconcile()
-                    c=self.s['config']; p=self.s['position']
-                    if p:
-                        try: q=self.quote(p['contract'])
-                        except Exception:
-                            self.s['quotes_stale']=True
-                            p['gross']=None
-                            if not self.full_session(): self.s['config']['armed']=False
-                            raise
-                        self.s['quotes_stale']=False
-                        mark=q['bid'] if p['side']=='BUY' else q['ask']; sign=1 if p['side']=='BUY' else -1
-                        p['mark']=mark; p['marked_at']=q['ts']
-                        p['gross']=p.get('realized_gross',0)+(mark-p['entry'])*sign*p['qty']*p['multiplier']
-                        reason=None
-                        if self.s['close_requested']: reason='Manual / pending exit'
-                        elif now().date().isoformat()>p.get('last_entry_date',c['last_entry_date']): reason='Contract entry/delivery cutoff'
-                        elif not (p['mode']=='paper' and p.get('paper_full_session',c.get('paper_full_session',True))) and (now().date()>dt(p['opened_at']).date() or now().strftime('%H:%M')>=p['square_off']): reason='Session square-off'
-                        elif (now()-dt(p['opened_at'])).total_seconds()>=p['max_hold']*60: reason='Maximum hold time'
-                        elif sign*(mark-p['stop'])<=0: reason='ATR / trailing stop'
-                        elif sign*(mark-p['target'])>=0: reason='Profit target'
-                        elif self.daily()<=-c['daily_loss']: reason='Daily loss limit'
-                        if reason: self.close_position(q,reason)
-                        elif sign*(mark-p['entry'])>=p['distance']:
-                            # Only tighten; active after one planned R. Includes an estimated fee buffer.
-                            breakeven=p['entry']+sign*2*p['fee_per_order']/(max(p['qty'],1)*p['multiplier'])
-                            trail=mark-sign*p['distance']
-                            p['stop']=round_tick(max(p['stop'],breakeven,trail) if sign>0 else min(p['stop'],breakeven,trail),p['tick_size'],sign<0)
-                    if self.daily()<=-c['daily_loss']:
-                        self.s['loss_day']=now().date().isoformat()
-                        if not self.full_session(): c['armed']=False
-                    if c['contract']:
-                        inst=self.instrument(c['contract']); q=self.quote(c['contract'])
-                        sig=self.signal(inst,q); self.s['signal']=sig
-                        self.s['error']=None
-                        if allow_entries and not self.block() and sig['side']!='WAIT' and sig['candle']!=self.s['last_entry_bar']:
-                            if self.full_session():
-                                last_trade=q.get('last_trade_ts')
-                                if not last_trade or not -5 <= (now()-dt(last_trade)).total_seconds() <= 120:
-                                    raise ValueError('Waiting for recent MCX trading activity; paper entries remain armed')
-                            if q['spread_bps']>c['max_spread_bps'] or q['volume']<c['min_volume'] or q['oi']<c['min_oi']:
-                                raise ValueError('Liquidity filter: spread, volume or open interest outside limits')
-                            entry,distance,qty=self.size(inst,sig,q)
-                            if abs(entry-sig['series'][-1]['close'])>sig['atr']:
-                                raise ValueError('Price moved over one ATR beyond the signal candle; wait for a fresh signal')
-                            estimated_risk=(distance+entry*2*c['slippage_bps']/10000)*qty*c['multiplier']+2*c['fee_per_order']
-                            if estimated_risk>c['daily_loss']+min(0,self.daily()):
-                                raise ValueError('Planned trade exceeds remaining daily loss budget')
-                            context=dict(contract=inst['symbol'],expiry=inst['expiry'],side=sig['side'],qty=qty,initial_qty=qty,
-                                entry=entry,distance=distance,multiplier=c['multiplier'],tick_size=inst['tick_size'],
-                                mode=c['mode'],paper_full_session=self.full_session(),last_entry_date=c['last_entry_date'],opened_at=stamp(),fee_per_order=c['fee_per_order'],fees=c['fee_per_order'],
-                                slippage_bps=c['slippage_bps'],reward_r=c['reward_r'],max_hold=c['max_hold'],square_off=c['square_off'],
-                                mark=entry,gross=0.,signal=sig['candle'])
-                            sign=1 if sig['side']=='BUY' else -1
-                            context['stop']=round_tick(entry-sign*distance,inst['tick_size'],sign<0)
-                            context['target']=round_tick(entry+sign*distance*c['reward_r'],inst['tick_size'],sign>0)
-                            if c['mode']=='live':
-                                # Refuse any existing same-contract broker exposure or open external order.
-                                if any(int(r.get('quantity',0)) for r in self.broker.positions().get('net',[]) if r.get('exchange')=='MCX' and r.get('tradingsymbol')==inst['symbol']):
-                                    raise ValueError('Existing broker exposure in this contract; commodity entry blocked')
-                                if any(r.get('exchange')=='MCX' and r.get('tradingsymbol')==inst['symbol'] and r.get('status') not in ('COMPLETE','CANCELLED','REJECTED') for r in self.broker.orders()):
-                                    raise ValueError('Existing broker order in this contract; commodity entry blocked')
-                                payload=self.order_payload(inst['symbol'],sig['side'],qty,entry,'marginpreview')
-                                margins=self.broker.order_margins([payload])
-                                required=num(margins[0]['total'],.000001)
-                                if required+2*c['fee_per_order']>c['capital']: raise ValueError('Broker margin exceeds allocated commodity capital')
-                                self.s['last_entry_bar']=sig['candle']
-                                self.submit('ENTRY',sig['side'],qty,entry,context)
-                            else:
-                                self.s['last_entry_bar']=sig['candle']; self.s['position']=context
-                                self.event('PAPER_ENTRY',sig['side']+' '+inst['symbol']+' × '+str(qty))
-                    self.s['heartbeat']=stamp()
-                except Exception as exc:
-                    self.s['error']=str(exc)
-                    self.event('DATA / CONTROL',str(exc))
-                    self.s['heartbeat']=stamp()
-                finally: self.save()
-        def control(self, action, body):
-            with self.lock:
-                c=self.s['config']
-                if action=='disarm':
-                    c['armed']=False
-                    if self.s['pending'] and self.s['pending']['purpose']=='ENTRY':
-                        self.s['close_requested']=True  # cancel unfilled remainder, flatten any fills
-                elif action=='arm':
-                    if not c['verified'] or not c['contract']: raise ValueError('Save verified contract settings first')
-                    if self.s['halt'] or self.s['pending']: raise ValueError('Resolve halt / pending order before arming')
-                    if c['mode']=='live' and (body.get('ack') is not True or not self.edge()['eligible']):
-                        raise ValueError('Live arming requires acknowledgement and qualifying forward paper results')
-                    if not self.worker or not self.worker.is_alive(): raise ValueError('Commodity worker is not running')
-                    self.cycle(False)
-                    if self.s['error'] and not self.full_session(): raise ValueError(self.s['error'])
-                    if self.s['loss_day']==now().date().isoformat(): raise ValueError('Daily loss halt remains active until next IST day')
-                    c['armed']=True
-                elif action=='mode':
-                    if self.s['position'] or self.s['pending']: raise ValueError('Flatten exposure before changing mode')
-                    if body.get('mode') not in ('paper','live'): raise ValueError('Invalid mode')
-                    if body['mode']=='live' and (body.get('ack') is not True or not self.edge()['eligible']):
-                        raise ValueError('Live requires explicit acknowledgement and 30 forward paper trades over 5 trading dates, positive net P&L and profit factor ≥ 1.2')
-                    c['mode']=body['mode']; c['armed']=False
-                elif action=='close':
-                    if body.get('ack') is not True: raise ValueError('Confirm closing commodity exposure')
-                    c['armed']=False; self.s['close_requested']=True
-                    self.save(); self.cycle(False)
-                    if not self.s['position'] and not self.s['pending']: self.s['close_requested']=False
-                elif action=='clear-halt':
-                    if self.s['position'] or self.s['pending']: raise ValueError('Resolve orders and flatten exposure first; unresolved intents cannot be cleared automatically')
-                    self.s['halt']=None; c['armed']=False
-                elif action=='scan': self.cycle(False)
-                else: raise ValueError('Unknown commodity control')
-                self.event('CONTROL',action); self.save()
-                return self.state()
-        def analytics(self):
-            """Read-only diagnostics. Never refreshes a quote or places an order."""
-            c=self.s['config']; sig=self.s.get('signal') or {}; q=sig.get('quote') or {}
-            current=now()
-            def age(value):
-                try: return (current-dt(value)).total_seconds()
-                except (ValueError,TypeError): return None
-            quote_age=age(q.get('ts')); signal_age=age(sig.get('candle'))
-            fresh=quote_age is not None and -5<=quote_age<=45
-            candle_fresh=signal_age is not None and 300<=signal_age<=900
-            position=self.s.get('position')
-            mark_age=age((position or {}).get('marked_at') or (position or {}).get('opened_at'))
-            mark_fresh=not position or (mark_age is not None and -5<=mark_age<=45 and not self.s['quotes_stale'])
-            pnl=self.daily() if mark_fresh else None
-            available=None if pnl is None else max(0,c['daily_loss']+min(0,pnl))
-            checks=[
-                dict(label='Contract specification',passed=c.get('verified') is True and bool(c.get('contract')),detail='Multiplier and delivery cutoff verified'),
-                dict(label='Fresh quote',passed=fresh,detail='No quote' if quote_age is None else f'{quote_age:.0f}s old · limit 45s'),
-                dict(label='Completed candle',passed=candle_fresh,detail='No candle' if signal_age is None else f'{signal_age/60:.1f}m since candle start'),
-                dict(label='Spread',passed=fresh and q.get('spread_bps',1e9)<=c['max_spread_bps'],detail=f"Limit {c['max_spread_bps']:g} bps"),
-                dict(label='Volume / open interest',passed=fresh and q.get('volume',0)>=c['min_volume'] and q.get('oi',0)>=c['min_oi'],detail=f"Minimum {c['min_volume']} / {c['min_oi']}"),
-                dict(label='Entry window',passed=self.full_session() or (current.weekday()<5 and c['session_start']<=current.strftime('%H:%M')<c['last_entry']),detail='No clock cutoff · paper monitoring stays enabled' if self.full_session() else c['session_start']+'–'+c['last_entry']+' IST'),
-                dict(label='Delivery cutoff',passed=bool(c.get('last_entry_date')) and current.date().isoformat()<=c['last_entry_date'],detail=c.get('last_entry_date') or 'Not configured'),
-                dict(label='Daily risk allowance',passed=available is not None and available>=c['risk'] and self.s['loss_day']!=current.date().isoformat(),detail='Remaining budget excludes gains above the daily limit'),
-                dict(label='Exposure / order slot',passed=not self.s['position'] and not self.s['pending'],detail='One commodity exposure at a time')]
-            cutoff_days=None
-            if c.get('last_entry_date'):
-                cutoff_days=(dt(c['last_entry_date']).date()-current.date()).days
-            last_trade_age=age(q.get('last_trade_ts'))
-            if self.full_session():
-                checks.append(dict(label='Recent MCX trading',passed=last_trade_age is not None and -5<=last_trade_age<=120,detail='Recent trade required · maximum age 120s'))
-            return dict(full_session=self.full_session(),position_mark_fresh=mark_fresh,quote_age_seconds=quote_age,signal_age_seconds=signal_age,quote_fresh=fresh,
-                candle_fresh=candle_fresh,checks=checks,remaining_daily_risk=available,
-                used_daily_risk=None if available is None else c['daily_loss']-available,
-                cutoff_days=cutoff_days,session_label='Continuous paper monitoring' if self.full_session() else ('Entry window' if checks[5]['passed'] else 'Outside entry window'),
-                performance={mode:self.performance(mode) for mode in ('paper','live')})
-        def performance(self, mode):
-            rows=sorted([r for r in self.s['trades'] if r['mode']==mode],key=lambda r:r['closed_at'])
-            equity=peak=drawdown=0.;curve=[];contracts={}
-            for r in rows:
-                equity+=r['net'];peak=max(peak,equity);drawdown=max(drawdown,peak-equity)
-                curve.append(dict(ts=r['closed_at'],net=round(equity,2)))
-                group=contracts.setdefault(r['contract'],dict(contract=r['contract'],trades=0,net=0.,wins=0))
-                group['trades']+=1;group['net']+=r['net'];group['wins']+=r['net']>0
-            wins=[r['net'] for r in rows if r['net']>0];losses=[r['net'] for r in rows if r['net']<0]
-            return dict(trades=len(rows),wins=len(wins),losses=len(losses),breakeven=len(rows)-len(wins)-len(losses),
-                win_rate=100*len(wins)/len(rows) if rows else None,net=equity,
-                average=equity/len(rows) if rows else None,max_drawdown=drawdown,
-                profit_factor=sum(wins)/-sum(losses) if losses else None,
-                fees=sum(r.get('fees',0) for r in rows),equity_curve=curve[-200:],
-                contracts=sorted(contracts.values(),key=lambda r:r['net'],reverse=True))
-        def state(self):
-            with self.lock:
-                result=copy.deepcopy(self.s)
-                result['trades']=result['trades'][:200]
-                result['events']=result['events'][:80]
-                result['edge']=self.edge()
-                result['entry_block']=self.block()
-                result['daily_net']=None if self.s['quotes_stale'] else self.daily()
-                result['worker_running']=bool(self.worker and self.worker.is_alive())
-                result['analytics']=self.analytics()
-                if not result['analytics']['position_mark_fresh']:
-                    result['daily_net']=None
-                    result['quotes_stale']=True
-                return result
-        def start(self):
-            if self.worker and self.worker.is_alive(): return
-            def loop():
-                while True:
-                    if self.s['config']['armed'] or self.s['position'] or self.s['pending']:
-                        self.cycle()
-                    time.sleep(20)
-            self.worker=threading.Thread(target=loop,daemon=True,name='independent-commodity-desk')
-            self.worker.start()
-    return CommodityEngine
-
-CommodityEngine = _build_commodity_engine()
-COMMODITY = CommodityEngine(kite, require_session, os.path.join(os.path.dirname(__file__), 'commodity_desk.db'))
-
-@app.route('/api/commodity/state')
-def commodity_state_route():
-    if not require_session(): return jsonify({'error':'Connect Kite using the existing login button.'}),401
-    return jsonify(COMMODITY.state())
-
-@app.route('/api/commodity/contracts')
-def commodity_contracts_route():
-    if not require_session(): return jsonify({'error':'Connect Kite first.'}),401
-    try:
-        with COMMODITY.lock: return jsonify({'contracts':COMMODITY.instruments()})
-    except Exception as exc: return jsonify({'error':str(exc)}),400
-
-@app.route('/api/commodity/config',methods=['POST'])
-def commodity_config_route():
-    if not require_session(): return jsonify({'error':'Connect Kite first.'}),401
-    try: return jsonify({'config':COMMODITY.configure(request.get_json(silent=True) or {})})
-    except (ValueError,TypeError,KeyError) as exc: return jsonify({'error':str(exc)}),400
-
-@app.route('/api/commodity/control/<action>',methods=['POST'])
-def commodity_control_route(action):
-    if not require_session(): return jsonify({'error':'Connect Kite first.'}),401
-    try: return jsonify(COMMODITY.control(action,request.get_json(silent=True) or {}))
-    except (ValueError,TypeError,KeyError) as exc: return jsonify({'error':str(exc)}),400
-
-if os.environ.get('AI_START_WORKERS','1')=='1': COMMODITY.start()
-# === END INDEPENDENT COMMODITY DESK ===
+    STOCK_DESK.start()
+    CAS_DESK.start()
 
 start_application_workers()
 
